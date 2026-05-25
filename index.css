@@ -1,0 +1,106 @@
+body {
+  margin: 0;
+  background: #f8fafc;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #0f172a;
+}
+
+.font-mono {
+  font-family: "JetBrains Mono", monospace;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+
+::selection {
+  background: #c7d2fe;
+  color: #111827;
+}
+
+.finmonitor-shell {
+  color-scheme: light;
+  transition: background-color 160ms ease, color 160ms ease;
+}
+
+.finmonitor-shell button,
+.finmonitor-shell input,
+.finmonitor-shell textarea,
+.finmonitor-shell select {
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, box-shadow 160ms ease;
+}
+
+.theme-night {
+  color-scheme: dark;
+  background: #07111f !important;
+  color: #e5e7eb;
+}
+
+.theme-night .bg-slate-50,
+.theme-night .bg-slate-100,
+.theme-night .bg-white {
+  background-color: #0f1b2d !important;
+}
+
+.theme-night .bg-slate-50\/50 {
+  background-color: rgba(15, 27, 45, 0.72) !important;
+}
+
+.theme-night .border-slate-100,
+.theme-night .border-slate-200,
+.theme-night .border-slate-300 {
+  border-color: #23314a !important;
+}
+
+.theme-night .text-slate-900,
+.theme-night .text-slate-800,
+.theme-night .text-slate-700 {
+  color: #f8fafc !important;
+}
+
+.theme-night .text-slate-600,
+.theme-night .text-slate-500 {
+  color: #b6c3d5 !important;
+}
+
+.theme-night .text-slate-400 {
+  color: #7f8ea3 !important;
+}
+
+.theme-night input,
+.theme-night textarea,
+.theme-night select {
+  background-color: #0b1626 !important;
+  border-color: #2b3a55 !important;
+  color: #f8fafc !important;
+}
+
+.theme-night input::placeholder,
+.theme-night textarea::placeholder {
+  color: #64748b !important;
+}
+
+.theme-night .shadow-sm,
+.theme-night .shadow-md,
+.theme-night .shadow-lg,
+.theme-night .shadow-xl,
+.theme-night .shadow-2xl {
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.22) !important;
+}
+
+.theme-night .hover\:bg-slate-50:hover,
+.theme-night .hover\:bg-slate-100:hover {
+  background-color: #18263a !important;
+}
+
+.theme-night table .bg-slate-50,
+.theme-night tr.bg-slate-50,
+.theme-night tr.bg-slate-50\/50 {
+  background-color: #101d30 !important;
+}
+
+.theme-night .pdf-page,
+.theme-night .pdf-page * {
+  color-scheme: light !important;
+}

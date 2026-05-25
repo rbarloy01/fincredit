@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FinAnalyzer AI</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script>
+      window.tailwind = window.tailwind || {};
+      window.tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              trueblue: '#0066E6',
+              bluebonnet: '#0018E6'
+            }
+          }
+        }
+      };
+    </script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f8fafc;
+        }
+        .font-mono {
+            font-family: 'JetBrains Mono', monospace;
+        }
+    </style>
+    <style>
+      .bg-bluebonnet { background-color: #0018E6 !important; }
+      .hover\:bg-trueblue:hover { background-color: #0066E6 !important; }
+      .text-trueblue { color: #0066E6 !important; }
+      .text-bluebonnet { color: #0018E6 !important; }
+      .border-bluebonnet { border-color: #0018E6 !important; }
+      .shadow-\[\#0018E633\] { --tw-shadow-color: #0018E633 !important; }
+
+      @media print {
+        aside,
+        .print\:hidden {
+          display: none !important;
+        }
+
+        main {
+          padding: 0 !important;
+          overflow: visible !important;
+        }
+
+        .print\:bg-white {
+          background: #fff !important;
+        }
+      }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>
+      window.pdfjsLib = window['pdfjs-dist/build/pdf'];
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    </script>
+    <script type="module" src="/index.tsx"></script>
+</body>
+</html>

@@ -1,0 +1,207 @@
+import path from 'path';
+import { defineConfig, loadEnv } from 'vite';
+import react from '@vitejs/plugin-react';
+import https from 'node:https';
+
+function readBody(req: any): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+    req.on('end', () => resolve(body));
+    req.on('error', reject);
+  });
+}
+
+function postJson(url: string, apiKey: string, payload: unknown, extraHeaders?: Record<string, string>): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const request = https.request({
+      hostname: target.hostname,
+      path: target.pathname,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        ...(extraHeaders || {}),
+      },
+    }, response => {
+      let body = '';
+      response.on('data', chunk => { body += chunk.toString(); });
+      response.on('end', () => resolve({ status: response.statusCode || 500, body }));
+    });
+    request.on('error', reject);
+    request.write(JSON.stringify(payload));
+    request.end();
+  });
+}
+
+function postJsonAnthropicStyle(url: string, apiKey: string, payload: unknown): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const bodyStr = JSON.stringify(payload);
+    const request = https.request({
+      hostname: target.hostname,
+      path: target.pathname,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'Content-Length': Buffer.byteLength(bodyStr),
+      },
+    }, response => {
+      let body = '';
+      response.on('data', chunk => { body += chunk.toString(); });
+      response.on('end', () => resolve({ status: response.statusCode || 500, body }));
+    });
+    request.on('error', reject);
+    request.write(bodyStr);
+    request.end();
+  });
+}
+
+export default defineConfig(({ mode }) => {
+    const env = loadEnv(mode, '.', '');
+    return {
+      root: path.resolve(__dirname),
+      server: {
+        port: 4175,
+        host: '0.0.0.0',
+      },
+      plugins: [react(), {
+        name: 'local-openai-proxy',
+        configureServer(server) {
+          server.middlewares.use('/api/openai/responses', async (req, res) => {
+            if (req.method !== 'POST') {
+              res.statusCode = 405;
+              res.end('Method not allowed');
+              return;
+            }
+            try {
+              const incoming = JSON.parse(await readBody(req));
+              const apiKey = incoming.apiKey || env.OPENAI_API_KEY;
+              if (!apiKey) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ error: 'OPENAI_API_KEY missing' }));
+                return;
+              }
+              const result = await postJson('https://api.openai.com/v1/responses', apiKey, incoming.payload);
+              res.statusCode = result.status;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(result.body);
+            } catch (error: any) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: error?.message || 'OpenAI proxy error' }));
+            }
+          });
+
+          server.middlewares.use('/api/gemini', async (req, res) => {
+            if (req.method !== 'POST') { res.statusCode = 405; res.end('Method not allowed'); return; }
+            try {
+              const incoming = JSON.parse(await readBody(req));
+              const apiKey = incoming.apiKey || env.GEMINI_API_KEY;
+              if (!apiKey) { res.statusCode = 400; res.end(JSON.stringify({ error: 'GEMINI_API_KEY missing' })); return; }
+              const model = incoming.model || 'gemini-flash-latest';
+              const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+              const target = new URL(url);
+              const bodyStr = JSON.stringify(incoming.payload);
+              const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+                const request = https.request({
+                  hostname: target.hostname,
+                  path: target.pathname + target.search,
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyStr) },
+                }, response => {
+                  let body = ''; response.on('data', c => { body += c; }); response.on('end', () => resolve({ status: response.statusCode || 500, body }));
+                });
+                request.on('error', reject); request.write(bodyStr); request.end();
+              });
+              res.statusCode = result.status; res.setHeader('Content-Type', 'application/json'); res.end(result.body);
+            } catch (error: any) { res.statusCode = 500; res.end(JSON.stringify({ error: error?.message || 'Gemini proxy error' })); }
+          });
+
+          server.middlewares.use('/api/admin/users/create', async (req, res) => {
+            if (req.method !== 'POST') { res.statusCode = 405; res.end('Method not allowed'); return; }
+            try {
+              const body = JSON.parse(await readBody(req));
+              const supabaseUrl = env.SUPABASE_URL;
+              const serviceKey = env.SUPABASE_SERVICE_KEY;
+              // 1. Create auth user
+              const authRes = await postJson(
+                `${supabaseUrl}/auth/v1/admin/users`,
+                serviceKey,
+                { email: body.email, password: body.password, email_confirm: true },
+                { apikey: serviceKey }
+              );
+              if (authRes.status !== 200) { res.statusCode = 400; res.end(JSON.stringify({ error: JSON.parse(authRes.body).msg || 'Error al crear usuario' })); return; }
+              const user = JSON.parse(authRes.body);
+              // 2. Insert profile
+              await postJson(
+                `${supabaseUrl}/rest/v1/profiles`,
+                serviceKey,
+                { id: user.id, name: body.name, email: body.email.toLowerCase(), role: body.role },
+                { apikey: serviceKey, 'Content-Type': 'application/json', Prefer: 'return=minimal' }
+              );
+              res.statusCode = 200;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ id: user.id, name: body.name, email: body.email, role: body.role, createdAt: user.created_at }));
+            } catch (error: any) { res.statusCode = 500; res.end(JSON.stringify({ error: error?.message || 'Error interno' })); }
+          });
+
+          server.middlewares.use('/api/admin/users/delete', async (req, res) => {
+            if (req.method !== 'POST') { res.statusCode = 405; res.end('Method not allowed'); return; }
+            try {
+              const body = JSON.parse(await readBody(req));
+              const supabaseUrl = env.SUPABASE_URL;
+              const serviceKey = env.SUPABASE_SERVICE_KEY;
+              const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+                const target = new URL(`${supabaseUrl}/auth/v1/admin/users/${body.userId}`);
+                const request = https.request({
+                  hostname: target.hostname, path: target.pathname, method: 'DELETE',
+                  headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+                }, response => {
+                  let b = ''; response.on('data', c => { b += c; }); response.on('end', () => resolve({ status: response.statusCode || 500, body: b }));
+                });
+                request.on('error', reject); request.end();
+              });
+              res.statusCode = result.status < 300 ? 200 : result.status;
+              res.end(result.status < 300 ? '{}' : result.body);
+            } catch (error: any) { res.statusCode = 500; res.end(JSON.stringify({ error: error?.message || 'Error interno' })); }
+          });
+
+          server.middlewares.use('/api/claude', async (req, res) => {
+            if (req.method !== 'POST') {
+              res.statusCode = 405;
+              res.end('Method not allowed');
+              return;
+            }
+            try {
+              const incoming = JSON.parse(await readBody(req));
+              const apiKey = incoming.apiKey || env.ANTHROPIC_API_KEY;
+              if (!apiKey) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ error: 'ANTHROPIC_API_KEY missing — configure it in Settings' }));
+                return;
+              }
+              const result = await postJsonAnthropicStyle('https://api.anthropic.com/v1/messages', apiKey, incoming.payload);
+              res.statusCode = result.status;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(result.body);
+            } catch (error: any) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: error?.message || 'Claude proxy error' }));
+            }
+          });
+        }
+      }],
+      define: {
+        'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
+      },
+      resolve: {
+        alias: {
+          '@': path.resolve(__dirname, '.'),
+        }
+      }
+    };
+});
