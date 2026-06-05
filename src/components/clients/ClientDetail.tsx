@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { db, Client, Transaction, FinancialStatement_DB, Covenant_DB, LoanTape_DB } from '../../db/index';
+import { db, Client, Transaction, FinancialStatement_DB, Covenant_DB, LoanTape_DB, CustomField } from '../../db/index';
 import { exportResumen } from '../../lib/export';
 import { Session } from '../../services/auth';
 import { AISettings } from '../../services/ai';
-import { ChevronLeft, Building2, Download, FileText } from 'lucide-react';
+import { ChevronLeft, Building2, Download, FileText, Trash2 } from 'lucide-react';
 import TransactionPanel from '../transactions/TransactionPanel';
 import FinancialPanel from '../financials/FinancialPanel';
 import LoanTapePanel from '../loantape/LoanTapePanel';
@@ -11,21 +11,25 @@ import FinancialCovenantsPanel from '../covenants/FinancialCovenantsPanel';
 import HacerNoHacerPanel from '../covenants/HacerNoHacerPanel';
 import ClientReportView from '../report/ReportView';
 import SaaSMonitorPanel from '../monitoring/SaaSMonitorPanel';
+import AuditPanel from '../audit/AuditPanel';
+import WorkingOverlay from '../common/WorkingOverlay';
 
 interface Props {
   clientId: string;
   session: Session;
   aiSettings: AISettings;
   onBack: () => void;
+  onDeleted?: () => void;
 }
 
-type Tab = 'monitor' | 'resumen' | 'transacciones' | 'estados' | 'loantape' | 'cov_financiero' | 'hacer_no_hacer' | 'reporte';
+type Tab = 'monitor' | 'resumen' | 'transacciones' | 'estados' | 'auditoria' | 'loantape' | 'cov_financiero' | 'hacer_no_hacer' | 'reporte';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'monitor', label: 'SaaS Monitor' },
   { id: 'resumen', label: 'Resumen' },
   { id: 'transacciones', label: 'Transacciones' },
   { id: 'estados', label: 'Estados Financieros' },
+  { id: 'auditoria', label: 'Auditoría' },
   { id: 'loantape', label: 'Loan Tape' },
   { id: 'cov_financiero', label: 'Covenants Financieros' },
   { id: 'hacer_no_hacer', label: 'Hacer / No Hacer' },
@@ -191,30 +195,41 @@ const ResumenTab: React.FC<{ client: Client; transactions: Transaction[]; covena
   );
 };
 
-const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack }) => {
+const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, onDeleted }) => {
   const [client, setClient] = useState<Client | null>(null);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [statements, setStatements] = useState<FinancialStatement_DB[]>([]);
   const [covenants, setCovenants] = useState<Covenant_DB[]>([]);
   const [loanTapes, setLoanTapes] = useState<LoanTape_DB[]>([]);
+  const [customFields, setCustomFields] = useState<CustomField[]>([]);
   const [activeTab, setActiveTab] = useState<Tab>('monitor');
   const [loading, setLoading] = useState(true);
+  const [deleting, setDeleting] = useState(false);
 
   const loadData = async () => {
     setLoading(true);
     try {
-      const [c, txs, stmts, covs, tapes] = await Promise.all([
+      const [c, txs, stmts, covs, tapes, fields] = await Promise.all([
         db.getClientById(clientId),
         db.getTransactions(clientId),
         db.getStatements(clientId),
         db.getCovenants(clientId),
         db.getLoanTapes(clientId),
+        db.getCustomFields(clientId),
       ]);
       if (c) setClient(c);
       setTransactions(txs);
       setStatements(stmts);
       setCovenants(covs);
       setLoanTapes(tapes);
+      setCustomFields(fields);
+      await Promise.all([
+        db.getClientSetting(clientId, `finmonitor_defined_concepts_${clientId}`, []),
+        db.getClientSetting(clientId, `finmonitor_vertical_bases_${clientId}`, {}),
+        db.getClientSetting(clientId, `finmonitor_contract_covs_${clientId}`, []),
+        db.getClientSetting(clientId, `finmonitor_hidden_standard_covs_${clientId}`, []),
+        db.getClientSetting(clientId, `finmonitor_eff_mappings_${clientId}`, {}),
+      ]);
     } catch (err) {
       console.error('Error loading client data:', err);
     } finally {
@@ -229,6 +244,21 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack }
     const next = { ...client, ...updates };
     setClient(next);
     await db.updateClient(client.id, updates);
+  };
+
+  const handleDeleteClient = async () => {
+    if (!client || session.role !== 'manager') return;
+    if (!confirm(`¿Eliminar cliente "${client.name}" y toda su información cargada?`)) return;
+    setDeleting(true);
+    try {
+      await db.deleteClient(client.id);
+      onDeleted?.();
+      onBack();
+    } catch (err: any) {
+      alert(`Error al eliminar cliente: ${err.message}`);
+    } finally {
+      setDeleting(false);
+    }
   };
 
   if (loading) {
@@ -256,6 +286,11 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack }
 
   return (
     <div className="flex-1 bg-slate-50 min-h-screen">
+      <WorkingOverlay
+        show={deleting}
+        title="Eliminando cliente"
+        messages={['Almost there...', 'Working on it...', 'Borrando documentos ligados...', 'Limpiando covenants...', 'Regresando al portafolio...']}
+      />
       {/* Header */}
       <div className="bg-white border-b border-slate-200 px-8 py-6">
         <div className="flex items-center gap-4 mb-4">
@@ -273,6 +308,16 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack }
             </div>
             <p className="text-slate-500 text-sm mt-0.5 font-mono">{client.taxId} · {client.industry}</p>
           </div>
+          {session.role === 'manager' && (
+            <button
+              onClick={handleDeleteClient}
+              disabled={deleting}
+              className="flex items-center gap-2 bg-white border border-rose-200 text-rose-600 hover:bg-rose-50 font-bold px-4 py-2.5 rounded-xl text-sm transition-all disabled:opacity-50"
+            >
+              <Trash2 className="w-4 h-4" />
+              Eliminar
+            </button>
+          )}
         </div>
 
         {/* Tabs */}
@@ -322,6 +367,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack }
             aiSettings={aiSettings}
             covenants={covenants}
             onStatementsChange={setStatements}
+            onCovenantsChange={setCovenants}
           />
         )}
         {activeTab === 'loantape' && (
@@ -331,6 +377,12 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack }
             session={session}
             aiSettings={aiSettings}
             onTapesChange={setLoanTapes}
+          />
+        )}
+        {activeTab === 'auditoria' && (
+          <AuditPanel
+            statements={statements}
+            onStatementsChange={setStatements}
           />
         )}
         {activeTab === 'cov_financiero' && (
@@ -356,6 +408,8 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack }
             statements={statements}
             covenants={covenants}
             loanTapes={loanTapes}
+            customFields={customFields}
+            onCustomFieldsChange={setCustomFields}
             onClientUpdate={handleClientUpdate}
             onClose={() => setActiveTab('resumen')}
           />

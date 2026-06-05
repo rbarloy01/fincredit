@@ -33,7 +33,7 @@ export function saveAISettings(s: AISettings) {
 
 export type StatementType = 'balance_general' | 'estado_resultados' | 'flujo_efectivo' | 'otro';
 
-export interface RawLineItem { name: string; value: number; source?: string; statementType?: StatementType; }
+export interface RawLineItem { name: string; value: number; source?: string; sectionPath?: string | null; statementType?: StatementType; }
 
 export interface ExtractedStatement {
   period: string;
@@ -64,7 +64,7 @@ export interface StructuredLoanTapeAnalysis {
   overallStatus: string; riskScore: number; executiveSummary: string; trendDirection: string;
   portfolioQuality?: Record<string, { count: number; balance: number; pct: number }>;
   dpd_distribution?: Array<{ bucket: string; count: number; balance: number; pct: number }>;
-  concentrations?: Record<string, Array<{ name: string; count: number; balance: number; pct: number; severity?: string }>>;
+  concentrations?: Record<string, any[]>;
   anomalies?: Record<string, any[]>;
   validation?: Array<{ loan_id: string; rule_id: string; field: string; message: string; severity?: string }>;
   metrics: Array<{ name: string; latestValue: string; previousValue?: string; change?: string; trend: string; status: string; contractLimit?: string; congruent: boolean; }>;
@@ -201,6 +201,7 @@ Devuelve únicamente JSON minificado con la estructura indicada.`;
       name: String(item.name || ''),
       value: Number(item.value) || 0,
       source: item.source,
+      sectionPath: item.sectionPath || null,
       statementType: item.statementType || item.type || 'otro',
     })),
   }));

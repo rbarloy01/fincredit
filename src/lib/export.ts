@@ -7,6 +7,7 @@ import jsPDF from 'jspdf';
 import {
   Client, Transaction, Covenant_DB, FinancialStatement_DB, LoanTape_DB,
 } from '../db/index';
+import { evaluateFormula, formulaLabel, getMetric, rawAccountKey } from './financialMetrics';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -14,6 +15,14 @@ export interface SheetDef {
   name: string;
   rows: (string | number | null | undefined)[][];
   colWidths?: number[];
+  outlineColumns?: number[];
+}
+
+export type VerticalBaseConfig = Record<string, string>;
+export interface DefinedConcept {
+  id: string;
+  name: string;
+  tokens: string[];
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
@@ -50,7 +59,10 @@ function periodMonth(p: FinancialStatement_DB): number {
 }
 
 function monthLabel(p: FinancialStatement_DB): string {
-  return new Date(p.periodDate).toLocaleDateString('es-MX', { month: 'short', year: '2-digit' });
+  const d = new Date(p.periodDate);
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  if (isNaN(d.getTime())) return p.period || '';
+  return `${months[d.getMonth()]}-${d.getFullYear()}`;
 }
 
 // ── PDF / PNG helpers ─────────────────────────────────────────────────────────
@@ -130,9 +142,9 @@ export async function exportToPdf(pages: HTMLElement[], filename: string): Promi
 type RowKind = 'title' | 'subheading' | 'headers' | 'data' | 'blank';
 
 const XL = {
-  title:      { bg: '312E81', fg: 'FFFFFF', bold: true,  sz: 12, h: 24 },
-  subheading: { bg: '1E293B', fg: 'FFFFFF', bold: true,  sz: 10, h: 20 },
-  headers:    { bg: '334155', fg: 'F8FAFC', bold: true,  sz: 9,  h: 17 },
+  title:      { bg: '0F172A', fg: 'FFFFFF', bold: true,  sz: 14, h: 28 },
+  subheading: { bg: 'EEF2FF', fg: '312E81', bold: true,  sz: 10, h: 22 },
+  headers:    { bg: '312E81', fg: 'F8FAFC', bold: true,  sz: 9,  h: 19 },
   data:       { bg: 'FFFFFF', fg: '1E293B', bold: false, sz: 9,  h: 15 },
   blank:      { bg: 'FFFFFF', fg: '1E293B', bold: false, sz: 9,  h: 5  },
 };
@@ -156,12 +168,17 @@ export async function exportToExcel(sheets: SheetDef[], filename: string): Promi
 
   for (const sheet of sheets) {
     const ws = wb.addWorksheet(sheet.name.slice(0, 31));
+    ws.properties.tabColor = { argb: sheet.name.includes('Dashboard') ? 'FF312E81' : 'FF64748B' };
     const maxCols = Math.max(1, ...sheet.rows.map(r => r.length));
     const nCols = Math.max(maxCols, sheet.colWidths?.length ?? 0);
 
     ws.columns = Array.from({ length: nCols }, (_, i) => ({
       width: sheet.colWidths?.[i] ?? (i === 0 ? 34 : 14),
     }));
+    ws.properties.outlineProperties = { summaryBelow: false, summaryRight: false };
+    (sheet.outlineColumns || []).forEach(col => {
+      if (col >= 1 && col <= nCols) ws.getColumn(col).outlineLevel = 1;
+    });
 
     let prev: RowKind = 'blank';
     let headerLabels: string[] = [];
@@ -177,25 +194,32 @@ export async function exportToExcel(sheets: SheetDef[], filename: string): Promi
         if (firstHeaderRow < 0) firstHeaderRow = ri + 1;
       }
 
-      const exRow = ws.addRow(raw.map(c => c ?? ''));
+      const exRow = ws.addRow(raw.map(c => {
+        if (typeof c === 'string' && c.startsWith('=')) return { formula: c.slice(1) } as any;
+        return c ?? '';
+      }));
       exRow.height = h;
 
       exRow.eachCell({ includeEmpty: true }, (cell, col) => {
         if (col > nCols) return;
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + bg } };
         cell.font = { name: 'Arial', size: sz, bold, color: { argb: 'FF' + fg } };
-        const isNum = typeof cell.value === 'number';
+        const isNum = typeof cell.value === 'number' || (typeof cell.value === 'object' && !!(cell.value as any)?.formula);
         cell.alignment = {
           vertical: 'middle',
           horizontal: (kind === 'title' || kind === 'subheading' || !isNum) ? 'left' : 'right',
         };
         if (isNum && kind === 'data') {
           const lbl = (headerLabels[col - 1] ?? '').toUpperCase();
-          const isPct = lbl.includes('%') || lbl.includes('VAR') || lbl.includes('VERT');
-          cell.numFmt = isPct ? '0.0%' : '#,##0.00';
+          const isPct = lbl.includes('%') || lbl.includes('VAR') || lbl.includes('VERT') || lbl === 'ROA' || lbl === 'ROE';
+          cell.numFmt = isPct ? '0.0%' : '#,##0;[Red](#,##0);-';
         }
         if (kind === 'headers') {
           cell.border = { bottom: { style: 'thin', color: { argb: 'FF6366F1' } } };
+          cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        }
+        if (kind === 'data') {
+          cell.border = { bottom: { style: 'hair', color: { argb: 'FFE2E8F0' } } };
         }
       });
 
@@ -210,7 +234,8 @@ export async function exportToExcel(sheets: SheetDef[], filename: string): Promi
     }
 
     if (firstHeaderRow > 0) {
-      ws.views = [{ state: 'frozen', ySplit: firstHeaderRow, xSplit: 0 }];
+      ws.views = [{ state: 'frozen', ySplit: firstHeaderRow, xSplit: sheet.name.includes('Balance') || sheet.name.includes('Estado') ? 2 : 0 }];
+      ws.autoFilter = { from: { row: firstHeaderRow, column: 1 }, to: { row: firstHeaderRow, column: nCols } };
     }
   }
 
@@ -266,97 +291,396 @@ export function buildFichaContractual(
   };
 }
 
-// 2. BG — Monthly Balance Sheet time-series
-export function buildBG(statements: FinancialStatement_DB[]): SheetDef {
-  const sorted = [...statements].sort((a, b) => a.periodDate.localeCompare(b.periodDate));
-  const n = sorted.length;
+function colName(n: number): string {
+  let s = '';
+  while (n > 0) {
+    const m = (n - 1) % 26;
+    s = String.fromCharCode(65 + m) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
 
-  // Collect all balance sheet account names
-  const accountSet = new Set<string>();
-  for (const s of sorted) {
-    for (const li of s.rawLineItems || []) {
-      if (!li.statementType || li.statementType === 'balance_general') accountSet.add(li.name);
+function normalizedPeriods(statements: FinancialStatement_DB[]) {
+  const out = new Map<string, { label: string; stmt: FinancialStatement_DB }>();
+  const sorted = [...statements].sort((a, b) => a.periodDate.localeCompare(b.periodDate));
+  for (const stmt of sorted) {
+    const base = monthLabel(stmt);
+    const p = (stmt.period || '').toLowerCase();
+    const suffix = /acum|acumul|ytd/.test(p) ? ' Acum' : /ltm|ttm/.test(p) ? ' LTM' : '';
+    let label = `${base}${suffix}`;
+    if (out.has(label) && suffix === '') {
+      out.set(label, { label, stmt });
+      continue;
+    }
+    if (out.has(label)) {
+      let i = 2;
+      while (out.has(`${label} ${i}`)) i++;
+      label = `${label} ${i}`;
+    }
+    out.set(label, { label, stmt });
+  }
+  return Array.from(out.values());
+}
+
+function excelString(value: string) {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function covenantDataRef(refKey: string, periodHeaderCell: string) {
+  return `N(IFERROR(INDEX('Datos Covenant'!$D:$ZZ,MATCH(${excelString(refKey)},'Datos Covenant'!$A:$A,0),MATCH(${periodHeaderCell},'Datos Covenant'!$D$1:$ZZ$1,0)),0))`;
+}
+
+function formulaToExcel(formula: string, periodHeaderCell: string): string {
+  const f = (formula || '').trim();
+  const ref = (key: string) => covenantDataRef(key, periodHeaderCell);
+  if (f.startsWith('expr:')) {
+    try {
+      const tokens = JSON.parse(f.slice('expr:'.length)) as string[];
+      const body = tokens.map(t => {
+        if (t.startsWith('ref:')) return ref(t.slice(4));
+        if (t.startsWith('num:')) return t.slice(4);
+        return t;
+      }).join('');
+      return `=IFERROR(${body},"")`;
+    } catch {
+      return '=""';
     }
   }
-  const accounts = Array.from(accountSet);
+  if (f.startsWith('ratio:')) {
+    const [num, den] = f.slice('ratio:'.length).split('/');
+    return num && den ? `=IFERROR(${ref(num)}/${ref(den)},"")` : '=""';
+  }
+  const low = f.toLowerCase();
+  if (low.includes('deuda') && low.includes('ebitda')) return `=IFERROR(${ref('totalDebt')}/${ref('ebitda')},"")`;
+  if (low.includes('dscr') || (low.includes('ebitda') && low.includes('interes'))) return `=IFERROR(${ref('ebitda')}/${ref('interestExpense')},"")`;
+  if (low.includes('corriente') || low.includes('liquidez')) return `=IFERROR(${ref('currentAssets')}/${ref('currentLiabilities')},"")`;
+  if (low.includes('roa')) return `=IFERROR(${ref('netIncome')}/${ref('totalAssets')},"")`;
+  if (low.includes('roe')) return `=IFERROR(${ref('netIncome')}/${ref('equity')},"")`;
+  if (low.includes('apalanc') || low.includes('equity') || low.includes('capital')) return `=IFERROR(${ref('totalDebt')}/${ref('equity')},"")`;
+  return '=""';
+}
 
-  // Header rows (template-style)
-  const counterRow: SheetDef['rows'][0] = ['CUENTA', 'MX$\'000',
-    ...sorted.map((_, i) => i - n + 1)]; // counter: -(n-1) … 0
-  const yearRow: SheetDef['rows'][0] = ['Año', '',
-    ...sorted.map(periodYear)];
-  const monthRow: SheetDef['rows'][0] = ['Mes', '',
-    ...sorted.map(monthLabel)];
-  const monthNumRow: SheetDef['rows'][0] = ['# Mes', '',
-    ...sorted.map(periodMonth)];
+function nrm(v: string) {
+  return v.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+}
 
-  const dataRows: SheetDef['rows'] = accounts.map(acc => [
-    acc, '',
-    ...sorted.map(s => {
-      const li = (s.rawLineItems || []).find(l => l.name === acc &&
-        (!l.statementType || l.statementType === 'balance_general'));
-      return li ? li.value : null;
-    }),
-  ]);
+function nkey(v: string) {
+  return v.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '');
+}
 
-  // Mapped totals section
-  const blank: SheetDef['rows'][0] = [''];
-  const ratioRows: SheetDef['rows'] = [
-    ['TOTALES MAPEADOS', ''],
-    ['Activo Total', '', ...sorted.map(s => s.mappedData.totalAssets || null)],
-    ['Pasivo Total', '', ...sorted.map(s => (s.mappedData.totalAssets - s.mappedData.equity) || null)],
-    ['Capital Total', '', ...sorted.map(s => s.mappedData.equity || null)],
-    ['Cartera Total (Deuda)', '', ...sorted.map(s => s.mappedData.totalDebt || null)],
-    ['Activo Circulante', '', ...sorted.map(s => s.mappedData.currentAssets || null)],
-    ['Pasivo Circulante', '', ...sorted.map(s => s.mappedData.currentLiabilities || null)],
+function rawValue(stmt: FinancialStatement_DB, account: string, type: 'balance_general' | 'estado_resultados') {
+  return (stmt.rawLineItems || []).find(l => l.name === account && ((l.statementType || 'balance_general') === type))?.value ?? null;
+}
+
+function orderedAccounts(statements: FinancialStatement_DB[], type: 'balance_general' | 'estado_resultados') {
+  const set = new Set<string>();
+  statements.forEach(s => (s.rawLineItems || []).forEach(li => {
+    const liType = li.statementType || 'balance_general';
+    if (liType === type) set.add(li.name);
+  }));
+  return Array.from(set);
+}
+
+function mappedFieldFor(statements: FinancialStatement_DB[], key: string): string {
+  for (const stmt of statements) {
+    const found = (stmt.extraAccounts || []).find(a => a.key === key);
+    if (found?.label) return found.label;
+  }
+  return '';
+}
+
+function exportSegment(item: FinancialStatement_DB['rawLineItems'][number]) {
+  const type = item.statementType || 'otro';
+  const path = nkey(item.sectionPath || '');
+  const name = nkey(item.name || '');
+  if (type === 'estado_resultados' || path.includes('estadoresultado')) return 'Estado de Resultados';
+  if (type === 'flujo_efectivo' || path.includes('flujoefectivo')) return 'Flujo de Efectivo';
+  if (/(capital|patrimonio|resultadoacumulado|utilidadretenida|capitalcontable|resultadodelejercicio)/.test(name)) return 'CAPITAL';
+  if (/(pasivo|proveedor|acreedor|deuda|obligacion|prestamo|impuesto|seguro|social|imss|isr|iva|ptu|provision|cuentaporpagar|cxp)/.test(name)) return 'PASIVO';
+  if (/(activo|caja|banco|efectivo|cliente|cuentaporcobrar|inventario|propiedad|equipo|intangible)/.test(name)) return 'ACTIVO';
+  if (path.includes('pasivo') && !path.includes('capital') && !path.includes('patrimonio')) return 'PASIVO';
+  if (path.includes('capital') || path.includes('patrimonio')) return 'CAPITAL';
+  if (path.includes('activo')) return 'ACTIVO';
+  if (type === 'balance_general') return 'Balance General sin clasificar';
+  return 'Otros';
+}
+
+function accountSortRank(name: string, segment: string) {
+  const n = nkey(name);
+  if (segment === 'ACTIVO') {
+    if (/(efectivo|caja|banco)/.test(n)) return 10;
+    if (/(inversion|valores)/.test(n)) return 20;
+    if (/(cliente|cuentaporcobrar|cxc|derechodecobro|cartera|credito|vigente|vencida)/.test(n)) return 30;
+    if (/(estimacion|reserva|preventiva|deterioro)/.test(n)) return 35;
+    if (/(inventario|iva|impuestoacreditable|pagosanticipados|anticipo)/.test(n)) return 40;
+    if (/(propiedad|inmueble|mobiliario|equipo|activo fijo|activofijo)/.test(n)) return 60;
+    if (/(intangible|software|deposito|garantia|diferido)/.test(n)) return 70;
+    if (/(total|suma)/.test(n)) return 99;
+    return 50;
+  }
+  if (segment === 'PASIVO') {
+    if (/(proveedor|cuentaporpagar|cxp|acreedor)/.test(n)) return 10;
+    if (/(impuesto|seguro|social|imss|isr|iva|ptu|provision)/.test(n)) return 20;
+    if (/(deuda|prestamo|credito|banco|linea|bursatil|arrendamiento)/.test(n)) return 30;
+    if (/(largo|nocorriente|nocirculante)/.test(n)) return 60;
+    if (/(total|suma)/.test(n)) return 99;
+    return 40;
+  }
+  if (segment === 'CAPITAL') {
+    if (/(capitalsocial|capital)/.test(n)) return 10;
+    if (/(prima|reserva)/.test(n)) return 20;
+    if (/(resultado|utilidad|perdida|retenida|acumulada)/.test(n)) return 30;
+    if (/(total|suma)/.test(n)) return 99;
+    return 50;
+  }
+  if (segment === 'Estado de Resultados') {
+    if (/(ingreso|venta)/.test(n) && !/(otro|gasto)/.test(n)) return 10;
+    if (/(costo)/.test(n)) return 20;
+    if (/(utilidadbruta|margenbruto)/.test(n)) return 30;
+    if (/(gasto|administracion|venta|operativo|nomina|sueldo|depreciacion|amortizacion)/.test(n)) return 40;
+    if (/(utilidadoperativa|resultadooperativo|ebitda)/.test(n)) return 50;
+    if (/(otroingreso|otrosingresos|otrogasto|otrosgastos|financiamiento|interes)/.test(n)) return 60;
+    if (/(antesdeimpuesto|antesdeisr)/.test(n)) return 70;
+    if (/(impuesto|isr|ptu)/.test(n)) return 80;
+    if (/(utilidadneta|resultadoneto|perdidaneta)/.test(n)) return 99;
+    return 65;
+  }
+  return 50;
+}
+
+function rawValueByKey(stmt: FinancialStatement_DB, key: string) {
+  const item = stmt.rawLineItems.find(i => `${i.statementType || 'otro'}||${i.name}` === key);
+  return item?.value ?? null;
+}
+
+function verticalBaseValue(stmt: FinancialStatement_DB, segment: string, bases: VerticalBaseConfig = {}, concepts: DefinedConcept[] = []) {
+  const customKey = bases[segment];
+  if (customKey) {
+    const concept = customKey.startsWith('concept:') ? concepts.find(c => c.id === customKey.slice('concept:'.length)) : undefined;
+    const custom = concept ? evaluateFormula(`expr:${JSON.stringify(concept.tokens)}`, stmt) : rawValueByKey(stmt, customKey);
+    if (custom !== null) return custom;
+  }
+  const find = (names: string[]) => stmt.rawLineItems.find(i => {
+    const n = nkey(i.name);
+    return names.some(name => n.includes(nkey(name)));
+  })?.value ?? null;
+  if (segment === 'ACTIVO' || segment === 'Balance General sin clasificar') return stmt.mappedData.totalAssets || find(['suma del activo', 'total activo', 'activos totales']);
+  if (segment === 'PASIVO') return find(['suma del pasivo', 'total pasivo', 'pasivos totales']) || stmt.mappedData.totalDebt || null;
+  if (segment === 'CAPITAL') return stmt.mappedData.equity || find(['suma del capital', 'total capital', 'capital contable', 'patrimonio']);
+  if (segment === 'Estado de Resultados') return stmt.mappedData.revenue || find(['total ingresos', 'ingresos', 'ventas']);
+  return null;
+}
+
+function addAnalysisRow(rows: SheetDef['rows'], label: string, section: string, key: string, periods: Array<{ label: string; stmt: FinancialStatement_DB }>, bases: VerticalBaseConfig = {}, concepts: DefinedConcept[] = []) {
+  const row: SheetDef['rows'][0] = [label, section];
+  const values = periods.map(p => rawValueByKey(p.stmt, key));
+  values.forEach((value, i) => {
+    const base = verticalBaseValue(periods[i].stmt, section, bases, concepts);
+    row.push(value);
+    row.push(value !== null && base ? value / base : null);
+  });
+  values.slice(1).forEach((value, i) => {
+    const prev = values[i];
+    row.push(value !== null && prev !== null ? value - prev : null);
+    row.push(value !== null && prev !== null && prev !== 0 ? (value - prev) / Math.abs(prev) : null);
+  });
+  rows.push(row);
+}
+
+function buildSegmentedAnalysisSheet(
+  statements: FinancialStatement_DB[],
+  name: string,
+  segments: string[],
+  bases: VerticalBaseConfig = {},
+  concepts: DefinedConcept[] = [],
+  footerRows: SheetDef['rows'] = [],
+): SheetDef {
+  const periods = normalizedPeriods(statements);
+  const keys = new Map<string, { name: string; segment: string }>();
+  periods.forEach(p => p.stmt.rawLineItems.forEach(item => {
+    const segment = exportSegment(item);
+    if (!segments.includes(segment)) return;
+    const key = `${item.statementType || 'otro'}||${item.name}`;
+    if (!keys.has(key)) keys.set(key, { name: item.name, segment });
+  }));
+  const rows: SheetDef['rows'] = [statementHeaders(periods)];
+  segments.forEach(segment => {
+    const items = Array.from(keys.entries())
+      .filter(([, meta]) => meta.segment === segment)
+      .sort((a, b) => accountSortRank(a[1].name, segment) - accountSortRank(b[1].name, segment) || a[1].name.localeCompare(b[1].name, 'es'));
+    if (!items.length) return;
+    rows.push([segment]);
+    items.forEach(([key, meta]) => addAnalysisRow(rows, meta.name, segment, key, periods, bases, concepts));
+  });
+  if (footerRows.length > 0) {
+    rows.push([], [], [], [], [], ...footerRows);
+  }
+  const nCols = rows[0].length;
+  return { name, rows, colWidths: statementColWidths(periods.length), outlineColumns: statementOutlineColumns(nCols) };
+}
+
+function statementHeaders(periods: Array<{ label: string; stmt: FinancialStatement_DB }>) {
+  return [
+    'Cuenta',
+    'Sección',
+    ...periods.flatMap(p => [p.label, `% Vertical ${p.label}`]),
+    ...periods.slice(1).flatMap(p => [`Δ ${p.label}`, `Δ% ${p.label}`]),
   ];
+}
+
+function addStatementRow(rows: SheetDef['rows'], label: string, section: string, periods: Array<{ label: string; stmt: FinancialStatement_DB }>, valueFn: (stmt: FinancialStatement_DB) => number | null, baseRowByPeriod: number[]) {
+  const rowNumber = rows.length + 1;
+  const row: SheetDef['rows'][0] = [label, section];
+  periods.forEach((p, i) => {
+    const valueCol = 3 + i * 2;
+    row.push(valueFn(p.stmt));
+    row.push(`=IFERROR(IF(${colName(valueCol)}${rowNumber}="","",${colName(valueCol)}${rowNumber}/${colName(valueCol)}${baseRowByPeriod[i]}),"")`);
+  });
+  periods.slice(1).forEach((_, i) => {
+    const prevValueCol = 3 + i * 2;
+    const valueCol = 5 + i * 2;
+    row.push(`=IFERROR(${colName(valueCol)}${rowNumber}-${colName(prevValueCol)}${rowNumber},"")`);
+    row.push(`=IFERROR((${colName(valueCol)}${rowNumber}-${colName(prevValueCol)}${rowNumber})/ABS(${colName(prevValueCol)}${rowNumber}),"")`);
+  });
+  rows.push(row);
+}
+
+function statementColWidths(periods: number) {
+  return [38, 20, ...Array(periods).flatMap(() => [15, 10]), ...Array(Math.max(0, periods - 1)).flatMap(() => [14, 10])];
+}
+
+function statementOutlineColumns(nCols: number) {
+  return Array.from({ length: Math.max(0, nCols - 2) }, (_, i) => i + 3);
+}
+
+export function buildEFFDashboard(statements: FinancialStatement_DB[], clientName: string): SheetDef {
+  const periods = normalizedPeriods(statements);
+  const latest = periods.at(-1)?.stmt;
+  const rows: SheetDef['rows'] = [
+    [`FINMONITOR EFF — ${clientName || 'Cliente'}`],
+    [],
+    ['Resumen SaaS', 'Valor'],
+    ['Periodos cargados', periods.length],
+    ['Último periodo', periods.at(-1)?.label || 'N/A'],
+    ['Archivos fuente', new Set(statements.map(s => s.fileName).filter(Boolean)).size],
+    [],
+    ['KPIs últimos estados', 'Valor'],
+    ['Ingresos', latest?.mappedData.revenue ?? null],
+    ['EBITDA / Utilidad operativa', latest?.mappedData.ebitda ?? null],
+    ['Utilidad neta', latest?.mappedData.netIncome ?? null],
+    ['Activo total', latest?.mappedData.totalAssets ?? null],
+    ['Deuda total', latest?.mappedData.totalDebt ?? null],
+    ['Capital', latest?.mappedData.equity ?? null],
+    [],
+    ['Periodos incluidos'],
+    ['Etiqueta', 'Fecha', 'Archivo'],
+    ...periods.map(p => [p.label, p.stmt.periodDate, p.stmt.fileName || '']),
+    [],
+    ['Notas'],
+    ['Las hojas BG/ER tienen una columna de valor por mes, % vertical por mes, y Δ / Δ% entre meses consecutivos.'],
+    ['Las columnas de análisis están agrupadas con outline para colapsar/expandir desde Excel.'],
+  ];
+  return { name: 'Dashboard EFF', rows, colWidths: [34, 22, 42] };
+}
+
+export function buildDefinedConcepts(statements: FinancialStatement_DB[], concepts: DefinedConcept[]): SheetDef {
+  const periods = normalizedPeriods(statements);
+  if (!concepts.length) return { name: 'Conceptos Definidos', rows: [['Sin conceptos definidos']] };
+  const labels: Record<string, string> = {};
+  periods.forEach(p => p.stmt.rawLineItems.forEach(item => {
+    labels[`account:${item.statementType || 'otro'}::${item.name}`] = item.name;
+  }));
+  const rows: SheetDef['rows'] = [
+    ['CONCEPTOS DEFINIDOS'],
+    [],
+    ['Concepto', 'Fórmula', ...periods.map(p => p.label)],
+  ];
+  concepts.forEach(concept => {
+    const formula = `expr:${JSON.stringify(concept.tokens)}`;
+    rows.push([
+      concept.name,
+      formulaLabel(formula, labels),
+      ...periods.map(p => evaluateFormula(formula, p.stmt)),
+    ]);
+  });
+  return { name: 'Conceptos Definidos', rows, colWidths: [30, 60, ...Array(periods.length).fill(14)] };
+}
+
+export function buildCovenantDataSheet(statements: FinancialStatement_DB[], concepts: DefinedConcept[] = []): SheetDef {
+  const periods = normalizedPeriods(statements);
+  const rows: SheetDef['rows'] = [
+    ['KEY', 'Tipo', 'Nombre', ...periods.map(p => p.label)],
+  ];
+  const metrics = [
+    ['revenue', 'Ingresos'],
+    ['ebitda', 'EBITDA'],
+    ['interestExpense', 'Gasto financiero'],
+    ['netIncome', 'Utilidad neta'],
+    ['currentAssets', 'Activo corriente'],
+    ['currentLiabilities', 'Pasivo corriente'],
+    ['totalDebt', 'Deuda total'],
+    ['totalAssets', 'Total activo'],
+    ['equity', 'Capital'],
+  ];
+  metrics.forEach(([key, label]) => {
+    rows.push([key, 'Métrica', label, ...periods.map(p => getMetric(p.stmt, key))]);
+  });
+
+  const rawKeys = new Map<string, string>();
+  periods.forEach(p => p.stmt.rawLineItems.forEach(item => rawKeys.set(`account:${rawAccountKey(item)}`, item.name)));
+  Array.from(rawKeys.entries()).forEach(([key, label]) => {
+    rows.push([
+      key,
+      'Cuenta extraída',
+      label,
+      ...periods.map(p => {
+        const item = p.stmt.rawLineItems.find(i => `account:${rawAccountKey(i)}` === key);
+        return item?.value ?? null;
+      }),
+    ]);
+  });
+
+  concepts.forEach(concept => {
+    rows.push([
+      `concept:${concept.id}`,
+      'Concepto definido',
+      concept.name,
+      ...periods.map((_, i) => formulaToExcel(`expr:${JSON.stringify(concept.tokens)}`, `${colName(4 + i)}$1`)),
+    ]);
+  });
 
   return {
-    name: 'BG',
-    rows: [counterRow, yearRow, monthRow, monthNumRow, blank, ...dataRows, blank, ...ratioRows],
-    colWidths: [38, 12, ...Array(n).fill(14)],
+    name: 'Datos Covenant',
+    rows,
+    colWidths: [42, 18, 36, ...Array(periods.length).fill(14)],
   };
 }
 
-// 3. ER — Monthly Income Statement time-series
-export function buildER(statements: FinancialStatement_DB[]): SheetDef {
-  const sorted = [...statements].sort((a, b) => a.periodDate.localeCompare(b.periodDate));
-  const n = sorted.length;
+// 2. Balance General — ordered monthly time-series
+export function buildBG(statements: FinancialStatement_DB[], bases: VerticalBaseConfig = {}, concepts: DefinedConcept[] = [], covenants: Covenant_DB[] = []): SheetDef {
+  const periods = normalizedPeriods(statements);
+  const calculated = covenants
+    .filter(c => c.type === 'financial')
+    .map(c => ({ covenant: c, values: periods.map(p => evaluateCovValue(c, p.stmt)) }))
+    .filter(row => row.values.some(value => value !== null));
+  const footerRows: SheetDef['rows'] = calculated.length
+    ? [
+        ['COVENANTS CALCULADOS'],
+        ['Covenant', 'Resultado', ...periods.flatMap(p => [p.label, ''])],
+        ...calculated.map(({ covenant, values }) => [
+          covenant.name,
+          'Valor',
+          ...values.flatMap(value => [value, null]),
+        ]),
+      ]
+    : [];
+  return buildSegmentedAnalysisSheet(statements, 'Balance General', ['ACTIVO', 'PASIVO', 'CAPITAL', 'Balance General sin clasificar'], bases, concepts, footerRows);
+}
 
-  const accountSet = new Set<string>();
-  for (const s of sorted) {
-    for (const li of s.rawLineItems || []) {
-      if (li.statementType === 'estado_resultados') accountSet.add(li.name);
-    }
-  }
-  const accounts = Array.from(accountSet);
-
-  const counterRow: SheetDef['rows'][0] = ['CUENTA', 'MX$\'000', ...sorted.map((_, i) => i - n + 1)];
-  const yearRow: SheetDef['rows'][0] = ['Año', '', ...sorted.map(periodYear)];
-  const monthRow: SheetDef['rows'][0] = ['Mes', '', ...sorted.map(monthLabel)];
-  const monthNumRow: SheetDef['rows'][0] = ['# Mes', '', ...sorted.map(periodMonth)];
-
-  const dataRows: SheetDef['rows'] = accounts.length > 0
-    ? accounts.map(acc => [
-        acc, '',
-        ...sorted.map(s => {
-          const li = (s.rawLineItems || []).find(l => l.name === acc && l.statementType === 'estado_resultados');
-          return li ? li.value : null;
-        }),
-      ])
-    : [
-        // fallback to mapped data if no ER line items tagged
-        ['Ingresos por Intereses', '', ...sorted.map(s => s.mappedData.revenue || null)],
-        ['Gastos por Intereses', '', ...sorted.map(s => s.mappedData.interestExpense || null)],
-        ['EBITDA', '', ...sorted.map(s => s.mappedData.ebitda || null)],
-        ['Resultado Neto', '', ...sorted.map(s => s.mappedData.netIncome || null)],
-      ];
-
-  return {
-    name: 'ER',
-    rows: [counterRow, yearRow, monthRow, monthNumRow, [''], ...dataRows],
-    colWidths: [38, 12, ...Array(n).fill(14)],
-  };
+// 3. Estado de Resultados — ordered monthly time-series
+export function buildER(statements: FinancialStatement_DB[], bases: VerticalBaseConfig = {}, concepts: DefinedConcept[] = []): SheetDef {
+  return buildSegmentedAnalysisSheet(statements, 'Estado de Resultados', ['Estado de Resultados'], bases, concepts);
 }
 
 // 4. VARIACION A CIERRES — YoY comparison from two most recent December periods
@@ -440,45 +764,66 @@ export function buildVariacion(statements: FinancialStatement_DB[], clientName =
 export function buildMonitoreo(
   covenants: Covenant_DB[],
   statements: FinancialStatement_DB[],
+  concepts: DefinedConcept[] = [],
 ): SheetDef {
   const financial = covenants.filter(c => c.type === 'financial');
-  const sorted = [...statements].sort((a, b) => a.periodDate.localeCompare(b.periodDate));
+  const periods = normalizedPeriods(statements);
 
-  if (financial.length === 0 || sorted.length === 0) {
+  if (financial.length === 0 || periods.length === 0) {
     return { name: 'Monitoreo', rows: [['Sin covenants financieros definidos']] };
   }
 
-  const periods = sorted.map(monthLabel);
   const rows: SheetDef['rows'] = [
     ['MONITOREO DE COVENANTS — ' + new Date().getFullYear()],
     [],
-    ['COVENANT', 'FÓRMULA', 'OPERADOR', 'UMBRAL', ...periods],
+    ['COVENANT', 'FÓRMULA', 'OPERADOR', 'UMBRAL', ...periods.map(p => p.label)],
     [],
   ];
 
   for (const cov of financial) {
-    const values = sorted.map(s => evaluateCovValue(cov, s));
+    const valueRow = rows.length + 1;
+    const values = periods.map((p, i) => formulaToExcel(cov.formulaByPeriod?.[p.stmt.period] || cov.formula || cov.name, `${colName(5 + i)}$3`));
     rows.push([cov.name, cov.formula, cov.operator, cov.threshold ? parseFloat(cov.threshold) : null, ...values]);
-    rows.push(['', '', '', 'UMBRAL', ...periods.map(() => cov.threshold ? parseFloat(cov.threshold) : null)]);
+    rows.push(['', 'Fórmula Excel visible en cada celda', '', 'UMBRAL', ...periods.map(() => cov.threshold ? parseFloat(cov.threshold) : null)]);
+    if (cov.operator !== 'none' && cov.threshold) {
+      rows.push([
+        '',
+        'Cumplimiento',
+        '',
+        '',
+        ...periods.map((_, i) => {
+          const cell = `${colName(5 + i)}${valueRow}`;
+          const op =
+            cov.operator === 'gt' ? '>' :
+            cov.operator === 'gte' ? '>=' :
+            cov.operator === 'lt' ? '<' :
+            '<=';
+          return `=IFERROR(IF(${cell}${op}${Number(cov.threshold)},"CUMPLE","INCUMPLE"),"")`;
+        }),
+      ]);
+    }
     rows.push([]); // spacer
   }
 
   return {
     name: 'Monitoreo',
     rows,
-    colWidths: [30, 18, 10, 10, ...Array(sorted.length).fill(14)],
+    colWidths: [30, 46, 10, 10, ...Array(periods.length).fill(14)],
   };
 }
 
 function evaluateCovValue(cov: Covenant_DB, s: FinancialStatement_DB): number | null {
+  const formula = cov.formulaByPeriod?.[s.period] || cov.formula || cov.name;
+  const computed = evaluateFormula(formula, s);
+  if (computed !== null) return computed;
   const m = s.mappedData;
-  const formula = cov.formula.toLowerCase();
-  if (formula.includes('deuda') && formula.includes('ebitda')) return m.ebitda ? m.totalDebt / m.ebitda : null;
-  if (formula.includes('dscr') || (formula.includes('ebitda') && formula.includes('interes'))) return m.interestExpense ? m.ebitda / m.interestExpense : null;
-  if (formula.includes('corriente') || formula.includes('liquidez')) return m.currentLiabilities ? m.currentAssets / m.currentLiabilities : null;
-  if (formula.includes('capital') || formula.includes('equity')) return m.totalAssets ? (m.equity / m.totalAssets) * 100 : null;
-  if (formula.includes('capitalización') || formula.includes('capitalizacion')) return m.totalAssets ? m.equity / m.totalAssets : null;
-  if (formula.includes('vencida')) return m.totalDebt && m.currentLiabilities ? m.currentLiabilities / m.totalDebt : null;
+  const low = formula.toLowerCase();
+  if (low.includes('deuda') && low.includes('ebitda')) return m.ebitda ? m.totalDebt / m.ebitda : null;
+  if (low.includes('dscr') || (low.includes('ebitda') && low.includes('interes'))) return m.interestExpense ? m.ebitda / m.interestExpense : null;
+  if (low.includes('corriente') || low.includes('liquidez')) return m.currentLiabilities ? m.currentAssets / m.currentLiabilities : null;
+  if (low.includes('capital') || low.includes('equity')) return m.totalAssets ? (m.equity / m.totalAssets) * 100 : null;
+  if (low.includes('capitalización') || low.includes('capitalizacion')) return m.totalAssets ? m.equity / m.totalAssets : null;
+  if (low.includes('vencida')) return m.totalDebt && m.currentLiabilities ? m.currentLiabilities / m.totalDebt : null;
   return null;
 }
 
@@ -658,6 +1003,79 @@ export function buildLoanTape(tapes: LoanTape_DB[]): SheetDef {
   };
 }
 
+function rowsFromObjects(title: string, rowsIn?: any[], preferredKeys?: string[]): SheetDef['rows'] {
+  const rows: SheetDef['rows'] = [[title], []];
+  if (!rowsIn?.length) {
+    rows.push(['Sin datos']);
+    return rows;
+  }
+  const keys = preferredKeys?.length ? preferredKeys : Array.from(new Set(rowsIn.flatMap(row => Object.keys(row || {}))));
+  rows.push(keys);
+  rowsIn.forEach(row => rows.push(keys.map(k => row?.[k] ?? null)));
+  return rows;
+}
+
+export function buildLoanTapeSheets(tapes: LoanTape_DB[]): SheetDef[] {
+  const summary = buildLoanTape(tapes);
+  const allStandardized = tapes.flatMap(t => Array.isArray(t.extractedData?._standardized) ? t.extractedData._standardized.map((r: any) => ({ archivo: t.fileName || t.name, ...r })) : []);
+  const mapping = tapes.flatMap(t => Array.isArray(t.extractedData?._mappingReport) ? t.extractedData._mappingReport.map((r: any) => ({ archivo: t.fileName || t.name, ...r })) : []);
+  const latestAnalyzed = tapes.find(t => t.extractedData?._analysis) || tapes[0];
+  const analysis = latestAnalyzed?.extractedData?._analysis || {};
+  const concentrations = analysis.concentrations || {};
+  const anomalies = analysis.anomalies || {};
+
+  return [
+    summary,
+    {
+      name: 'Datos Estandarizados',
+      rows: rowsFromObjects('DATOS ESTANDARIZADOS', allStandardized, ['archivo', 'loan_id', 'client', 'amount', 'outstanding_balance', 'interest_rate', 'loan_status', 'start_date', 'end_date', 'loan_type', 'days_overdue', 'currency', 'industry', 'state', 'file_date']),
+      colWidths: [32, 18, 28, 16, 18, 14, 16, 14, 14, 20, 12, 10, 18, 18, 14],
+    },
+    {
+      name: 'Mapeo',
+      rows: rowsFromObjects('MAPEO DE COLUMNAS', mapping, ['archivo', 'source_header', 'target_term', 'confidence', 'reasoning']),
+      colWidths: [32, 28, 22, 14, 42],
+    },
+    {
+      name: 'Validacion',
+      rows: rowsFromObjects('VALIDACION DE DATOS', analysis.validation, ['loan_id', 'rule_id', 'field', 'message', 'severity']),
+      colWidths: [20, 22, 20, 55, 14],
+    },
+    {
+      name: 'Concentraciones',
+      rows: [
+        ...rowsFromObjects('CONCENTRACION POR CLIENTE', concentrations.by_client, ['name', 'count', 'balance', 'pct']),
+        [],
+        ...rowsFromObjects('CONCENTRACION POR PRODUCTO', concentrations.by_loan_type, ['name', 'count', 'balance', 'pct', 'avg_interest_rate', 'avg_term_months', 'avg_days_overdue', 'min_amount', 'max_amount', 'avg_amount']),
+        [],
+        ...rowsFromObjects('CONCENTRACION POR ESTADO', concentrations.by_state, ['name', 'count', 'balance', 'pct']),
+        [],
+        ...rowsFromObjects('CONCENTRACION POR INDUSTRIA', concentrations.by_industry, ['name', 'count', 'balance', 'pct']),
+      ],
+      colWidths: [28, 14, 18, 12, 14, 14, 14, 16, 16, 16],
+    },
+    {
+      name: 'Anomalias',
+      rows: [
+        ...rowsFromObjects('NUEVOS CREDITOS', anomalies.new_loans, ['loan_id', 'outstanding_balance', 'start_date', 'category', 'percentage']),
+        [],
+        ...rowsFromObjects('CREDITOS QUE DESAPARECEN', anomalies.disappeared_loans, ['loan_id', 'outstanding_balance', 'end_date', 'category', 'days_overdue_prev', 'percentage']),
+        [],
+        ...rowsFromObjects('VENCIDOS AUN ACTIVOS', anomalies.ended_loans, ['loan_id', 'outstanding_balance', 'end_date', 'days_overdue']),
+        [],
+        ...rowsFromObjects('DPD DETERIORO', anomalies.dpd_deterioration, ['loan_id', 'days_overdue_prev', 'days_overdue_latest']),
+        [],
+        ...rowsFromObjects('DPD MEJORA', anomalies.dpd_improvement, ['loan_id', 'days_overdue_prev', 'days_overdue_latest']),
+        [],
+        ...rowsFromObjects('DPD INCONSISTENTE', anomalies.dpd_inconsistency, ['loan_id', 'days_overdue_prev', 'days_overdue_latest', 'delta_days_overdue', 'category']),
+        [],
+        ...rowsFromObjects('CAMBIOS DE CONDICION', anomalies.condition_changes, ['loan_id', 'field_changed', 'value_prev', 'value_latest']),
+      ],
+      colWidths: [22, 18, 14, 24, 18, 14],
+    },
+  ];
+}
+
 // 9. BLANK TEMPLATE SHELLS (GR, CF, Fondeo, Cartera)
 export function buildBlankShells(): SheetDef[] {
   return [
@@ -707,12 +1125,16 @@ export async function exportTransacciones(
 }
 
 export async function exportEstadosFinancieros(
-  statements: FinancialStatement_DB[], clientName: string, format: 'excel' | 'pdf', el?: HTMLElement,
+  statements: FinancialStatement_DB[], clientName: string, format: 'excel' | 'pdf', el?: HTMLElement, covenants: Covenant_DB[] = [], verticalBases: VerticalBaseConfig = {}, concepts: DefinedConcept[] = [],
 ): Promise<void> {
   if (format === 'excel') {
     await exportToExcel([
-      buildBG(statements),
-      buildER(statements),
+      buildEFFDashboard(statements, clientName),
+      buildBG(statements, verticalBases, concepts, covenants),
+      buildER(statements, verticalBases, concepts),
+      buildDefinedConcepts(statements, concepts),
+      buildCovenantDataSheet(statements, concepts),
+      buildMonitoreo(covenants, statements, concepts),
       buildVariacion(statements, clientName),
       ...buildBlankShells(),
     ], `EFF_${clientName}`);
@@ -725,7 +1147,7 @@ export async function exportLoanTape(
   tapes: LoanTape_DB[], clientName: string, format: 'excel' | 'pdf', el?: HTMLElement,
 ): Promise<void> {
   if (format === 'excel') {
-    await exportToExcel([buildLoanTape(tapes)], `LoanTape_${clientName}`);
+    await exportToExcel(buildLoanTapeSheets(tapes), `LoanTape_${clientName}`);
   } else {
     if (el) await exportToPdf([el], `LoanTape_${clientName}`);
   }
@@ -735,7 +1157,10 @@ export async function exportCovenantsFinancieros(
   covenants: Covenant_DB[], statements: FinancialStatement_DB[], clientName: string, format: 'excel' | 'pdf', el?: HTMLElement,
 ): Promise<void> {
   if (format === 'excel') {
-    await exportToExcel([buildMonitoreo(covenants, statements)], `Monitoreo_${clientName}`);
+    let concepts: DefinedConcept[] = [];
+    const clientId = statements[0]?.clientId || covenants[0]?.clientId || '';
+    try { concepts = JSON.parse(localStorage.getItem(`finmonitor_defined_concepts_${clientId}`) || '[]'); } catch {}
+    await exportToExcel([buildCovenantDataSheet(statements, concepts), buildMonitoreo(covenants, statements, concepts)], `Monitoreo_${clientName}`);
   } else {
     if (el) await exportToPdf([el], `Monitoreo_${clientName}`);
   }

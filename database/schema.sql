@@ -49,6 +49,16 @@ CREATE TABLE IF NOT EXISTS custom_fields (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- ── Client Settings / SaaS Preferences ───────────────────────────────────────
+CREATE TABLE IF NOT EXISTS client_settings (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id  UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  key        TEXT NOT NULL,
+  value      JSONB NOT NULL DEFAULT '{}',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(client_id, key)
+);
+
 -- ── Transactions ──────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS transactions (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -186,6 +196,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
 ALTER TABLE profiles              ENABLE ROW LEVEL SECURITY;
 ALTER TABLE clients               ENABLE ROW LEVEL SECURITY;
 ALTER TABLE custom_fields         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE client_settings       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE transactions          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE contract_files        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE covenants             ENABLE ROW LEVEL SECURITY;
@@ -201,6 +212,7 @@ ALTER TABLE audit_events          ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "auth_all" ON profiles             FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "auth_all" ON clients              FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "auth_all" ON custom_fields        FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "auth_all" ON client_settings      FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "auth_all" ON transactions         FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "auth_all" ON contract_files       FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "auth_all" ON covenants            FOR ALL TO authenticated USING (true) WITH CHECK (true);

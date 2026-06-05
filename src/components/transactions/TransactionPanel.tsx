@@ -7,6 +7,7 @@ import {
   Sparkles, Save, X, Calendar, DollarSign, FileSignature, Download,
 } from 'lucide-react';
 import { exportTransacciones } from '../../lib/export';
+import WorkingOverlay from '../common/WorkingOverlay';
 
 const nanoid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
@@ -266,6 +267,22 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
 
   return (
     <div ref={panelRef} className="space-y-6">
+      <WorkingOverlay
+        show={!!uploadingFor || !!analyzing || !!savingCovenants || !!exporting}
+        title={exporting ? 'Exportando' : analyzing ? 'Analizando contrato' : savingCovenants ? 'Guardando covenants' : 'Procesando contrato'}
+        messages={[
+          'Almost there...',
+          'Working on it...',
+          'Still moving...',
+          'One more pass...',
+          exporting ? 'Construyendo archivo...' : 'Leyendo contrato...',
+          exporting ? 'Aplicando formato...' : 'Extrayendo obligaciones...',
+          exporting ? 'Preparando descarga...' : 'Preparando covenants...',
+          exporting ? 'Acomodando hojas...' : 'Separando hacer y no hacer...',
+          exporting ? 'Casi queda...' : 'Revisando covenants financieros...',
+          exporting ? 'Listo en un momento...' : 'Preparando resultado...',
+        ]}
+      />
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-black text-slate-900">Transacciones y Contratos</h2>

@@ -1,9 +1,9 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { db, Client, FinancialStatement_DB, Covenant_DB, LoanTape_DB } from '../../db/index';
+import { db, Client, FinancialStatement_DB, Covenant_DB, LoanTape_DB, CustomField } from '../../db/index';
 import { StructuredLoanTapeAnalysis } from '../../services/ai';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
-import { Download, ChevronDown, ChevronRight, MessageSquare, FileSpreadsheet, Upload, Trash2, ImageDown } from 'lucide-react';
+import { Download, ChevronDown, ChevronRight, MessageSquare, FileSpreadsheet, Upload, Trash2, ImageDown, ArrowUp, ArrowDown, Save, LayoutGrid } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { evaluateCovenantAuto } from '../../lib/financialMetrics';
 
@@ -12,6 +12,8 @@ interface Props {
   statements: FinancialStatement_DB[];
   covenants: Covenant_DB[];
   loanTapes: LoanTape_DB[];
+  customFields?: CustomField[];
+  onCustomFieldsChange?: (fields: CustomField[]) => void;
   onClientUpdate: (updates: Partial<Client>) => void;
   onClose: () => void;
 }
@@ -22,6 +24,7 @@ const vcc: React.CSSProperties = { display: 'flex', alignItems: 'center', justif
 const vccCol: React.CSSProperties = { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' };
 const tdV: React.CSSProperties = { verticalAlign: 'middle' };
 const tdVC: React.CSSProperties = { verticalAlign: 'middle', textAlign: 'center' };
+const cleanKey = (v: string) => v.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
 
 const sanitizeColors = (clonedDoc: Document) => {
   Array.from(clonedDoc.getElementsByTagName('style')).forEach(tag => {
@@ -149,7 +152,28 @@ const TAPE_PLACEHOLDER = `Describe el estado de la cartera. Considera incluir:
 • Situaciones especiales: créditos en reestructura, litigio o monitoreo especial
 • Perspectiva: expectativa para el siguiente período de reporte`;
 
-const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loanTapes, onClientUpdate, onClose }) => {
+type ReportBlockId = 'payment' | 'aforo' | 'financialCovenants' | 'loanTape' | 'documentation' | 'opinion';
+
+interface ReportBlockConfig {
+  id: ReportBlockId;
+  label: string;
+  visible: boolean;
+  order: number;
+}
+
+const DEFAULT_BLOCKS: ReportBlockConfig[] = [
+  { id: 'payment', label: 'Historial de Pagos', visible: true, order: 10 },
+  { id: 'aforo', label: 'Aforo', visible: true, order: 20 },
+  { id: 'financialCovenants', label: 'Covenants Financieros', visible: true, order: 30 },
+  { id: 'loanTape', label: 'Loan Tape', visible: true, order: 40 },
+  { id: 'documentation', label: 'Documentación', visible: true, order: 50 },
+  { id: 'opinion', label: 'Opinión del Analista', visible: true, order: 60 },
+];
+
+const layoutKey = (clientId: string) => `finmonitor_report_layout_${clientId}`;
+const templatesKey = (clientId: string) => `finmonitor_report_templates_${clientId}`;
+
+const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loanTapes, customFields = [], onCustomFieldsChange, onClientUpdate, onClose }) => {
   const page1Ref = useRef<HTMLDivElement>(null);
   const condRef = useRef<HTMLDivElement>(null);
   const [isExporting, setIsExporting] = useState(false);
@@ -159,11 +183,30 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
   const [showCovenants, setShowCovenants] = useState(true);
   const [showDocs, setShowDocs] = useState(true);
   const [showLoanTape, setShowLoanTape] = useState(true);
+  const [blocks, setBlocks] = useState<ReportBlockConfig[]>(() => {
+    try {
+      const saved = localStorage.getItem(layoutKey(client.id));
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return DEFAULT_BLOCKS;
+  });
+  const [templateName, setTemplateName] = useState('Mi plantilla');
+  const [savedTemplates, setSavedTemplates] = useState<Array<{ name: string; blocks: ReportBlockConfig[] }>>(() => {
+    try { return JSON.parse(localStorage.getItem(templatesKey(client.id)) || '[]'); } catch { return []; }
+  });
+  const [showContractFooter, setShowContractFooter] = useState(() => localStorage.getItem(`finmonitor_report_show_contract_${client.id}`) !== 'false');
+  const commercialField = customFields.find(f => f.id === 'commercial_name' || f.label === 'Nombre comercial');
+  const commercialName = commercialField?.value || client.name;
 
   // ── Comment state ────────────────────────────────────────────────────────────
   const [condStatuses, setCondStatuses] = useState<Record<string, CondStatus>>({});
   const [condComments, setCondComments] = useState<Record<string, string>>({});
   const [tapeComment, setTapeComment] = useState('');
+  const [contractCovenantKeys, setContractCovenantKeys] = useState<string[]>([]);
+
+  useEffect(() => {
+    db.getClientSetting<string[]>(client.id, `finmonitor_contract_covs_${client.id}`, []).then(setContractCovenantKeys);
+  }, [client.id]);
 
   const sortedStatements = [...statements].sort((a, b) => a.periodDate.localeCompare(b.periodDate));
   const latest = sortedStatements.length > 0 ? sortedStatements[sortedStatements.length - 1] : null;
@@ -174,10 +217,60 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
   const aforoHistory = [...(client.aforoHistory || [])].slice(0, 6);
   const reportPeriods = paymentHistory.map(p => p.month || '').filter(Boolean);
   const reportPeriod = latest?.period || client.lastPeriod || reportPeriods[0] || '—';
-  const financialCovenants = covenants.filter(c => c.type === 'financial');
+  const isContractCovenant = (cov: Covenant_DB) => contractCovenantKeys.some(key => key === cov.id || key === `formula:${cov.formula}` || key === `name:${cleanKey(cov.name)}`);
+  const financialCovenants = covenants
+    .filter(c => c.type === 'financial')
+    .sort((a, b) => Number(isContractCovenant(b)) - Number(isContractCovenant(a)));
   const hacerCovenants = covenants.filter(c => c.type === 'hacer');
   const noHacerCovenants = covenants.filter(c => c.type === 'noHacer');
   const condCovenants = [...hacerCovenants, ...noHacerCovenants];
+
+  const updateCommercialName = async (value: string) => {
+    const next = [
+      ...customFields.filter(f => f.id !== 'commercial_name' && f.label !== 'Nombre comercial'),
+      { id: 'commercial_name', clientId: client.id, label: 'Nombre comercial', value, fieldType: 'text' as const },
+    ];
+    onCustomFieldsChange?.(next);
+    await db.setCustomFields(client.id, next);
+  };
+
+  const updateShowContractFooter = (value: boolean) => {
+    setShowContractFooter(value);
+    localStorage.setItem(`finmonitor_report_show_contract_${client.id}`, String(value));
+  };
+
+  useEffect(() => {
+    localStorage.setItem(layoutKey(client.id), JSON.stringify(blocks));
+  }, [client.id, blocks]);
+
+  const orderedBlocks = [...blocks].sort((a, b) => a.order - b.order);
+  const block = (id: ReportBlockId) => blocks.find(b => b.id === id) || DEFAULT_BLOCKS.find(b => b.id === id)!;
+  const blockVisible = (id: ReportBlockId) => block(id).visible;
+  const blockStyle = (id: ReportBlockId): React.CSSProperties => ({ order: block(id).order, display: blockVisible(id) ? undefined : 'none' });
+  const toggleBlock = (id: ReportBlockId) => setBlocks(prev => prev.map(b => b.id === id ? { ...b, visible: !b.visible } : b));
+  const moveBlock = (id: ReportBlockId, dir: -1 | 1) => {
+    setBlocks(prev => {
+      const sorted = [...prev].sort((a, b) => a.order - b.order);
+      const idx = sorted.findIndex(b => b.id === id);
+      const swapIdx = idx + dir;
+      if (idx < 0 || swapIdx < 0 || swapIdx >= sorted.length) return prev;
+      const next = [...sorted];
+      const currentOrder = next[idx].order;
+      next[idx] = { ...next[idx], order: next[swapIdx].order };
+      next[swapIdx] = { ...next[swapIdx], order: currentOrder };
+      return next;
+    });
+  };
+  const saveTemplate = () => {
+    const name = templateName.trim() || 'Plantilla';
+    const next = [...savedTemplates.filter(t => t.name !== name), { name, blocks }];
+    setSavedTemplates(next);
+    localStorage.setItem(templatesKey(client.id), JSON.stringify(next));
+  };
+  const applyTemplate = (name: string) => {
+    const template = savedTemplates.find(t => t.name === name);
+    if (template) setBlocks(template.blocks);
+  };
 
   // Load saved comments from DB
   useEffect(() => {
@@ -394,19 +487,19 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
   };
 
   const ReportFooter = () => (
-    <div style={{ ...vc, justifyContent: 'space-between', borderTop: '2px solid #0018E6', paddingTop: 16, marginTop: 32 }}>
-      <div style={{ ...vccCol, flex: 1 }}>
+    <div style={{ position: 'absolute', left: 44, right: 44, bottom: 24, display: 'grid', gridTemplateColumns: showContractFooter ? '1fr 1fr 1fr' : '1fr 1fr', gap: 12, borderTop: '2px solid #0018E6', paddingTop: 12, backgroundColor: '#ffffff' }}>
+      <div style={{ ...vccCol, textAlign: 'center' }}>
         <p style={{ fontSize: 8, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.1em', color: '#94a3b8', margin: 0 }}>Analista Responsable</p>
         <p style={{ fontSize: 12, fontWeight: 900, color: '#0066E6', margin: '2px 0 0 0' }}>{client.analystName || 'No asignado'}</p>
       </div>
-      <div style={{ ...vccCol, flex: 1 }}>
+      <div style={{ ...vccCol, textAlign: 'center' }}>
         <p style={{ fontSize: 8, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.1em', color: '#94a3b8', margin: 0 }}>Fecha de Reporte</p>
         <p style={{ fontSize: 12, fontWeight: 900, color: '#334155', margin: '2px 0 0 0' }}>{fmtDate(client.reportDate)}</p>
       </div>
-      <div style={{ ...vccCol, flex: 1 }}>
+      {showContractFooter && <div style={{ ...vccCol, textAlign: 'center' }}>
         <p style={{ fontSize: 8, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.1em', color: '#94a3b8', margin: 0 }}>Contrato</p>
         <p style={{ fontSize: 12, fontWeight: 900, color: '#334155', margin: '2px 0 0 0' }}>{client.contractName || '—'}</p>
-      </div>
+      </div>}
     </div>
   );
 
@@ -463,15 +556,46 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
         <div className="flex gap-3 bg-white p-2 rounded-2xl shadow-sm border border-slate-200 items-center">
           <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-2">Incluir:</span>
           {[
-            { label: 'Aforo', state: showAforo, set: setShowAforo },
-            { label: 'Covenants', state: showCovenants, set: setShowCovenants },
-            { label: 'Doc.', state: showDocs, set: setShowDocs },
-            { label: 'Loan Tape', state: showLoanTape, set: setShowLoanTape },
-          ].map(({ label, state, set }) => (
-            <button key={label} onClick={() => set(!state)}
-              className={`px-3 py-1.5 rounded-xl text-[9px] font-black uppercase transition-all ${state ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-400'}`}>
+            { label: 'Aforo', id: 'aforo' as ReportBlockId },
+            { label: 'Covenants', id: 'financialCovenants' as ReportBlockId },
+            { label: 'Doc.', id: 'documentation' as ReportBlockId },
+            { label: 'Loan Tape', id: 'loanTape' as ReportBlockId },
+          ].map(({ label, id }) => (
+            <button key={label} onClick={() => toggleBlock(id)}
+              className={`px-3 py-1.5 rounded-xl text-[9px] font-black uppercase transition-all ${blockVisible(id) ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-400'}`}>
               {label}
             </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="w-full max-w-5xl bg-white border border-slate-200 rounded-2xl p-6 shadow-sm print:hidden">
+        <div className="flex items-center justify-between gap-4 mb-4">
+          <div className="flex items-center gap-2">
+            <LayoutGrid className="w-4 h-4 text-indigo-600" />
+            <p className="text-xs font-black text-slate-500 uppercase tracking-widest">Canvas del Reporte</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <input value={templateName} onChange={e => setTemplateName(e.target.value)} className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold" />
+            <button onClick={saveTemplate} className="flex items-center gap-1 bg-indigo-600 text-white rounded-xl px-3 py-2 text-xs font-black">
+              <Save className="w-3.5 h-3.5" /> Guardar plantilla
+            </button>
+            {savedTemplates.length > 0 && (
+              <select onChange={e => applyTemplate(e.target.value)} defaultValue="" className="bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold">
+                <option value="" disabled>Cargar plantilla</option>
+                {savedTemplates.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
+              </select>
+            )}
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {orderedBlocks.map((b, idx) => (
+            <div key={b.id} className="flex items-center gap-3 border border-slate-200 rounded-xl px-4 py-3 bg-slate-50">
+              <input type="checkbox" checked={b.visible} onChange={() => toggleBlock(b.id)} />
+              <span className="flex-1 text-sm font-black text-slate-800">{b.label}</span>
+              <button onClick={() => moveBlock(b.id, -1)} disabled={idx === 0} className="p-1.5 rounded-lg bg-white border border-slate-200 disabled:opacity-30"><ArrowUp className="w-3.5 h-3.5" /></button>
+              <button onClick={() => moveBlock(b.id, 1)} disabled={idx === orderedBlocks.length - 1} className="p-1.5 rounded-lg bg-white border border-slate-200 disabled:opacity-30"><ArrowDown className="w-3.5 h-3.5" /></button>
+            </div>
           ))}
         </div>
       </div>
@@ -480,8 +604,16 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
         <p className="text-xs font-black text-slate-400 uppercase tracking-widest mb-4">Campos del Reporte</p>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <label>
+            <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Nombre comercial / acreditado</span>
+            <input value={commercialName} onChange={e => updateCommercialName(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-400" />
+          </label>
+          <label>
             <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Contrato</span>
             <input value={client.contractName || ''} onChange={e => onClientUpdate({ contractName: e.target.value })} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-400" />
+          </label>
+          <label className="flex items-end gap-2 pb-2">
+            <input type="checkbox" checked={showContractFooter} onChange={e => updateShowContractFooter(e.target.checked)} />
+            <span className="text-xs font-black text-slate-500 uppercase tracking-widest">Mostrar contrato en footer</span>
           </label>
           <label>
             <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Analista</span>
@@ -710,7 +842,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
         ref={page1Ref}
         id="pdf-page-1"
         className={`${pageClass} shadow-2xl mb-4`}
-        style={{ fontFamily: "Arial, Helvetica, sans-serif", boxSizing: 'border-box' }}
+        style={{ fontFamily: "Arial, Helvetica, sans-serif", boxSizing: 'border-box', minHeight: 1123, paddingBottom: 96, position: 'relative' }}
       >
         <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 0 }}>
           {/* Header */}
@@ -740,7 +872,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 16 }}>
             <div style={{ gridColumn: '1 / 3', display: 'flex', flexDirection: 'column', gap: 4 }}>
               {[
-                { label: 'Acreditado', value: client.name },
+                { label: 'Acreditado', value: commercialName },
                 { label: 'Score AXCESS', value: client.score || 'N/A' },
                 { label: 'Tipo de Crédito', value: (client.creditType || []).join(', ') || 'N/A' },
               ].map(({ label, value }) => (
@@ -748,7 +880,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
                   <div style={{ ...vcc, width: 112, minWidth: 112, backgroundColor: '#0018E6', color: 'white', padding: '6px 12px', fontSize: 9, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em', alignSelf: 'stretch' }}>
                     {label}
                   </div>
-                  <div style={{ ...vcc, flex: 1, border: '1px solid #e2e8f0', padding: '6px 12px', fontSize: 12, fontWeight: 700, alignSelf: 'stretch' }}>
+                  <div style={{ ...vcc, flex: 1, border: '1px solid #e2e8f0', padding: '6px 12px', fontSize: 12, fontWeight: 700, alignSelf: 'stretch', textAlign: 'center' }}>
                     {value}
                   </div>
                 </div>
@@ -787,8 +919,8 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
           </div>
 
           {/* Payment history */}
-          {paymentHistory.length > 0 && (
-          <div style={{ marginBottom: 24 }}>
+          {paymentHistory.length > 0 && blockVisible('payment') && (
+          <div style={{ marginBottom: 24, ...blockStyle('payment') }}>
             <h3 style={{ fontSize: 12, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.1em', color: '#0066E6', margin: '0 0 16px 0' }}>Historial de Pagos</h3>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
@@ -812,8 +944,8 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
         )}
 
         {/* Aforo */}
-        {showAforo && aforoHistory.length > 0 && (
-          <div style={{ marginBottom: 24, width: '100%' }}>
+        {aforoHistory.length > 0 && blockVisible('aforo') && (
+          <div style={{ marginBottom: 24, width: '100%', ...blockStyle('aforo') }}>
             <h3 style={{ fontSize: 9, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.1em', color: '#0066E6', margin: '0 0 8px 0' }}>Aforo</h3>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <tbody>
@@ -831,8 +963,8 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
         )}
 
         {/* Financial covenants */}
-        {showCovenants && financialCovenants.length > 0 && (
-          <div style={{ marginBottom: 24, width: '100%' }}>
+        {financialCovenants.length > 0 && blockVisible('financialCovenants') && (
+          <div style={{ marginBottom: 24, width: '100%', ...blockStyle('financialCovenants') }}>
             <h3 style={{ fontSize: 12, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.1em', color: '#0066E6', margin: '0 0 16px 0' }}>Covenants Financieros</h3>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
@@ -846,7 +978,11 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
                 {financialCovenants.map((cov, i) => {
                   return (
                     <tr key={cov.id} style={{ backgroundColor: i % 2 === 0 ? '#fff' : '#f8fafc' }}>
-                      <TD><span style={{ fontWeight: 900, color: '#0070c9' }}>{cov.name}</span><br/><span style={{ fontSize: 7, color: '#94a3b8' }}>{cov.description}</span></TD>
+                      <TD>
+                        <span style={{ fontWeight: 900, color: '#0070c9' }}>{cov.name}</span>
+                        {isContractCovenant(cov) && <span style={{ marginLeft: 6, fontSize: 7, fontWeight: 900, color: '#92400e', backgroundColor: '#fef3c7', border: '1px solid #fde68a', borderRadius: 4, padding: '1px 4px' }}>CONTRATO</span>}
+                        <br/><span style={{ fontSize: 7, color: '#94a3b8' }}>{cov.description}</span>
+                      </TD>
                       <TD style={{ ...cellCStyle, fontFamily: 'monospace', fontWeight: 900 }}>{cov.threshold}</TD>
                       {sortedStatements.slice(-6).reverse().map(statement => {
                         const { value, status } = evaluateCovenant(cov, [statement]);
@@ -866,8 +1002,8 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
         )}
 
         {/* Loan tape summary + commentary */}
-        {showLoanTape && reportMode === 'interno' && (tapeAnalysis || tapeComment) && (
-          <div style={sectionCard}>
+        {blockVisible('loanTape') && reportMode === 'interno' && (tapeAnalysis || tapeComment) && (
+          <div style={{ ...sectionCard, ...blockStyle('loanTape') }}>
             <div style={sectionKicker}>Cartera</div>
             <div style={sectionTitle}>Análisis de Cartera</div>
             {tapeAnalysis && (
@@ -917,8 +1053,8 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
         )}
 
         {/* Documentation */}
-        {showDocs && client.documentation?.length > 0 && (
-          <div style={{ marginBottom: 24, width: '100%' }}>
+        {client.documentation?.length > 0 && blockVisible('documentation') && (
+          <div style={{ marginBottom: 24, width: '100%', ...blockStyle('documentation') }}>
             <h3 style={{ fontSize: 12, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.1em', color: '#0066E6', margin: '0 0 16px 0' }}>Documentación</h3>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
@@ -946,8 +1082,8 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
         )}
 
         {/* Analyst opinion */}
-        {reportMode === 'interno' && client.opinion && (
-          <div style={{ ...sectionCard, backgroundColor: '#f8fbff', borderColor: '#bfdbfe' }}>
+        {reportMode === 'interno' && client.opinion && blockVisible('opinion') && (
+          <div style={{ ...sectionCard, ...blockStyle('opinion'), backgroundColor: '#f8fbff', borderColor: '#bfdbfe' }}>
             <div style={sectionKicker}>Comentario</div>
             <div style={sectionTitle}>Opinión del Analista</div>
             <p style={{ fontSize: 9, color: '#334155', lineHeight: 1.6, whiteSpace: 'pre-wrap', margin: 0 }}>{client.opinion}</p>
@@ -968,7 +1104,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
           <div style={{ ...vc, gap: 14, marginBottom: 24 }}>
             <div style={{ ...vcc, width: 46, height: 46, borderRadius: 14, backgroundColor: '#ffffff', color: '#0018E6', fontSize: 20, fontWeight: 900, border: '1px solid #dbe3ef' }}>FM</div>
             <div>
-              <div style={{ fontSize: 24, fontWeight: 900, color: '#020617', letterSpacing: '-0.04em', lineHeight: 1 }}>{client.name}</div>
+              <div style={{ fontSize: 24, fontWeight: 900, color: '#020617', letterSpacing: '-0.04em', lineHeight: 1 }}>{commercialName}</div>
               <div style={{ fontSize: 12, fontWeight: 900, color: '#6b98ff', marginTop: 5 }}>Condiciones Contractuales</div>
             </div>
           </div>

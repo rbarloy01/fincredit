@@ -110,7 +110,7 @@ export interface FinancialStatement_DB {
   periodDate: string;
   uploadDate: string;
   fileName: string;
-  rawLineItems: Array<{ name: string; value: number; source?: string; statementType?: 'balance_general' | 'estado_resultados' | 'flujo_efectivo' | 'otro' }>;
+  rawLineItems: Array<{ name: string; value: number; source?: string; sectionPath?: string | null; statementType?: 'balance_general' | 'estado_resultados' | 'flujo_efectivo' | 'otro' }>;
   mappedData: {
     revenue: number; cogs: number; operatingExpenses: number; ebitda: number;
     interestExpense: number; netIncome: number; currentAssets: number;
@@ -319,9 +319,61 @@ export const db = {
     if (error) err('deleteClient', error);
   },
 
+  async getClientSetting<T>(clientId: string, key: string, fallback: T): Promise<T> {
+    const localFallback = () => {
+      try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback)); } catch { return fallback; }
+    };
+    const { data, error } = await supabase
+      .from('client_settings')
+      .select('value')
+      .eq('client_id', clientId)
+      .eq('key', key)
+      .maybeSingle();
+    if (error) {
+      const legacy = await supabase
+        .from('custom_fields')
+        .select('value')
+        .eq('client_id', clientId)
+        .eq('label', `__setting:${key}`)
+        .maybeSingle();
+      if (!legacy.error && legacy.data?.value) {
+        try {
+          const parsed = JSON.parse(legacy.data.value);
+          localStorage.setItem(key, JSON.stringify(parsed));
+          return parsed as T;
+        } catch {}
+      }
+      const value = localFallback();
+      if (value !== fallback) void this.setClientSetting(clientId, key, value);
+      return value;
+    }
+    if (data?.value === undefined || data?.value === null) {
+      return localFallback();
+    }
+    localStorage.setItem(key, JSON.stringify(data.value));
+    return data.value as T;
+  },
+
+  async setClientSetting<T>(clientId: string, key: string, value: T): Promise<void> {
+    localStorage.setItem(key, JSON.stringify(value));
+    const { error } = await supabase
+      .from('client_settings')
+      .upsert({ client_id: clientId, key, value, updated_at: new Date().toISOString() }, { onConflict: 'client_id,key' });
+    if (error) {
+      await supabase.from('custom_fields').delete().eq('client_id', clientId).eq('label', `__setting:${key}`);
+      const legacy = await supabase.from('custom_fields').insert({
+        client_id: clientId,
+        label: `__setting:${key}`,
+        value: JSON.stringify(value),
+        field_type: 'setting',
+      });
+      if (legacy.error) console.warn(`setClientSetting fallback local (${key}):`, legacy.error.message);
+    }
+  },
+
   // ── Custom Fields ──────────────────────────────────────────────────────────
   async setCustomFields(clientId: string, fields: CustomField[]): Promise<void> {
-    await supabase.from('custom_fields').delete().eq('client_id', clientId);
+    await supabase.from('custom_fields').delete().eq('client_id', clientId).not('label', 'like', '__setting:%');
     if (fields.length > 0) {
       const rows = fields.map(f => ({ id: f.id, client_id: clientId, label: f.label, value: f.value, field_type: f.fieldType }));
       const { error } = await supabase.from('custom_fields').insert(rows);
@@ -410,14 +462,21 @@ export const db = {
 
   // ── Covenants ──────────────────────────────────────────────────────────────
   async createCovenant(data: Omit<Covenant_DB, 'id' | 'createdAt'>): Promise<Covenant_DB> {
-    const { data: row, error } = await supabase.from('covenants').insert({
+    const payload: any = {
       client_id: data.clientId, transaction_id: data.transactionId || null,
       name: data.name, type: data.type, formula: data.formula, threshold: data.threshold,
       operator: data.operator, description: data.description,
       compliance_status: data.complianceStatus || 'pendiente',
       formula_by_period: data.formulaByPeriod || {},
       is_custom: data.isCustom, extracted_from: data.extractedFrom || null,
-    }).select().single();
+    };
+    let { data: row, error } = await supabase.from('covenants').insert(payload).select().single();
+    if (error && String(error.message || '').includes('formula_by_period')) {
+      delete payload.formula_by_period;
+      const retry = await supabase.from('covenants').insert(payload).select().single();
+      row = retry.data;
+      error = retry.error;
+    }
     if (error) err('createCovenant', error);
     return toCovenant(row);
   },
@@ -442,7 +501,13 @@ export const db = {
     if (updates.description !== undefined) row.description = updates.description;
     if (updates.formulaByPeriod !== undefined) row.formula_by_period = updates.formulaByPeriod;
     if ((updates as any).complianceStatus !== undefined) row.compliance_status = (updates as any).complianceStatus;
-    const { error } = await supabase.from('covenants').update(row).eq('id', id);
+    let { error } = await supabase.from('covenants').update(row).eq('id', id);
+    if (error && String(error.message || '').includes('formula_by_period')) {
+      delete row.formula_by_period;
+      if (Object.keys(row).length === 0) return;
+      const retry = await supabase.from('covenants').update(row).eq('id', id);
+      error = retry.error;
+    }
     if (error) err('updateCovenant', error);
   },
 
@@ -453,8 +518,11 @@ export const db = {
 
   // ── Covenant Annotations ───────────────────────────────────────────────────
   async addAnnotation(data: Omit<CovenantAnnotation, 'id' | 'createdAt'>): Promise<CovenantAnnotation> {
+    const userId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(data.userId || '')
+      ? data.userId
+      : null;
     const { data: row, error } = await supabase.from('covenant_annotations').insert({
-      covenant_id: data.covenantId, user_id: data.userId || null,
+      covenant_id: data.covenantId, user_id: userId,
       user_name: data.userName, text: data.text,
     }).select().single();
     if (error) err('addAnnotation', error);

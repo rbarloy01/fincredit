@@ -192,6 +192,10 @@ const App: React.FC = () => {
             session={session}
             aiSettings={aiSettings}
             onBack={() => setRoute('clients')}
+            onDeleted={() => {
+              setSelectedClientId(null);
+              setRoute('clients');
+            }}
           />
         )}
 

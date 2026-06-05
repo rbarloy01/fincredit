@@ -91,6 +91,11 @@ function parseFileDate(fileName?: string): string | null {
   const raw = fileName || '';
   const ymd = raw.match(/(20\d{2})[-_. ]?(\d{2})[-_. ]?(\d{2})/);
   if (ymd) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
+  const yymmdd = raw.match(/\b(\d{2})[-_. ]?(\d{2})[-_. ]?(\d{2})\b/);
+  if (yymmdd) {
+    const year = Number(yymmdd[1]) >= 70 ? `19${yymmdd[1]}` : `20${yymmdd[1]}`;
+    return `${year}-${yymmdd[2]}-${yymmdd[3]}`;
+  }
   return null;
 }
 
@@ -236,6 +241,60 @@ function groupBy(rows: StandardLoan[], field: keyof StandardLoan, limit = 10) {
     .slice(0, limit);
 }
 
+function loanTypeProfile(rows: StandardLoan[]) {
+  const total = sum(rows);
+  const map = new Map<string, StandardLoan[]>();
+  for (const row of rows) {
+    const key = String(row.loan_type || '').trim();
+    if (!key) continue;
+    map.set(key, [...(map.get(key) || []), row]);
+  }
+  return Array.from(map.entries()).map(([name, items]) => {
+    const balance = sum(items);
+    const avg = (field: keyof StandardLoan) => {
+      const values = items.map(i => Number(i[field])).filter(Number.isFinite);
+      return values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
+    };
+    const terms = items.map(i => {
+      if (!i.start_date || !i.end_date) return null;
+      const a = new Date(i.start_date).getTime();
+      const b = new Date(i.end_date).getTime();
+      return Number.isFinite(a) && Number.isFinite(b) ? (b - a) / (86400 * 1000 * 30.44) : null;
+    }).filter((v): v is number => v !== null);
+    return {
+      name,
+      count: items.length,
+      balance,
+      pct: pct(balance, total),
+      avg_interest_rate: avg('interest_rate'),
+      avg_term_months: terms.length ? terms.reduce((a, b) => a + b, 0) / terms.length : null,
+      avg_days_overdue: avg('days_overdue'),
+      min_amount: Math.min(...items.map(i => i.amount || 0).filter(v => v > 0)),
+      max_amount: Math.max(...items.map(i => i.amount || 0).filter(v => v > 0)),
+      avg_amount: avg('amount'),
+    };
+  }).sort((a, b) => b.balance - a.balance);
+}
+
+function buckets(rows: StandardLoan[], field: 'amount' | 'outstanding_balance') {
+  const values = rows.map(r => r[field]).filter((v): v is number => v !== null && Number.isFinite(v));
+  if (!values.length) return [];
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const hi = min === max ? min + 1 : max;
+  const total = rows.reduce((acc, row) => acc + (row[field] || 0), 0);
+  return Array.from({ length: 5 }, (_, i) => {
+    const lo = min + i * (hi - min) / 5;
+    const upper = min + (i + 1) * (hi - min) / 5;
+    const items = rows.filter(r => {
+      const value = r[field];
+      return value !== null && value >= lo && (i === 4 ? value <= upper : value < upper);
+    });
+    const balance = items.reduce((acc, row) => acc + (row[field] || 0), 0);
+    return { bucket: `${fmtMoney(lo)} - ${fmtMoney(upper)}`, count: items.length, balance, pct: pct(balance, total) };
+  });
+}
+
 function validate(rows: StandardLoan[]) {
   const issues: Array<{ loan_id: string; rule_id: string; field: string; message: string; severity: Severity }> = [];
   const byDateId = new Set<string>();
@@ -276,8 +335,29 @@ function anomalies(rows: StandardLoan[]) {
   const prevMap = new Map(prev.filter(r => r.loan_id).map(r => [r.loan_id as string, r]));
   const latestMap = new Map(latest.filter(r => r.loan_id).map(r => [r.loan_id as string, r]));
 
-  const new_loans = latest.filter(r => r.loan_id && !prevMap.has(r.loan_id)).map(r => ({ loan_id: r.loan_id, outstanding_balance: r.outstanding_balance, start_date: r.start_date }));
-  const disappeared_loans = prev.filter(r => r.loan_id && !latestMap.has(r.loan_id)).map(r => ({ loan_id: r.loan_id, outstanding_balance: r.outstanding_balance, end_date: r.end_date, days_overdue_prev: r.days_overdue }));
+  const latestTotal = sum(latest);
+  const previousTotal = sum(prev);
+  const latestMonth = latestDate.slice(0, 7);
+  const previousTime = new Date(previousDate).getTime();
+  const latestTime = new Date(latestDate).getTime();
+  const new_loans = latest.filter(r => r.loan_id && !prevMap.has(r.loan_id)).map(r => ({
+    loan_id: r.loan_id,
+    outstanding_balance: r.outstanding_balance,
+    start_date: r.start_date,
+    category: r.start_date?.slice(0, 7) === latestMonth ? 'Expected' : 'Not Expected',
+    percentage: pct(r.outstanding_balance || 0, latestTotal),
+  }));
+  const disappeared_loans = prev.filter(r => r.loan_id && !latestMap.has(r.loan_id)).map(r => {
+    const endTime = r.end_date ? new Date(r.end_date).getTime() : 0;
+    return {
+      loan_id: r.loan_id,
+      outstanding_balance: r.outstanding_balance,
+      end_date: r.end_date,
+      category: endTime > latestTime ? 'Early payment' : endTime > previousTime ? 'On time' : 'Delayed',
+      days_overdue_prev: r.days_overdue,
+      percentage: pct(r.outstanding_balance || 0, previousTotal),
+    };
+  });
   const ended_loans = latest.filter(r => r.end_date && r.end_date < latestDate).map(r => ({ loan_id: r.loan_id, outstanding_balance: r.outstanding_balance, end_date: r.end_date, days_overdue: r.days_overdue }));
   const dpd_improvement: any[] = [];
   const dpd_deterioration: any[] = [];
@@ -292,7 +372,7 @@ function anomalies(rows: StandardLoan[]) {
     if (prevDpd >= 1 && latestDpd === 0) dpd_improvement.push({ loan_id: id, days_overdue_prev: prevDpd, days_overdue_latest: latestDpd });
     if (prevDpd === 0 && latestDpd >= 1) dpd_deterioration.push({ loan_id: id, days_overdue_prev: prevDpd, days_overdue_latest: latestDpd });
     if (prevDpd > 0 && latestDpd > 0 && (prevDpd === latestDpd || Math.abs(latestDpd - prevDpd) > 30)) {
-      dpd_inconsistency.push({ loan_id: id, days_overdue_prev: prevDpd, days_overdue_latest: latestDpd, delta_days_overdue: latestDpd - prevDpd });
+      dpd_inconsistency.push({ loan_id: id, days_overdue_prev: prevDpd, days_overdue_latest: latestDpd, delta_days_overdue: latestDpd - prevDpd, category: prevDpd === latestDpd ? 'No change in days' : 'Increment bigger than monthly cadence' });
     }
     (['start_date', 'end_date', 'loan_type', 'industry', 'currency', 'state', 'client'] as Array<keyof StandardLoan>).forEach(field => {
       if ((prior[field] || '') !== (current[field] || '')) condition_changes.push({ loan_id: id, field_changed: field, value_prev: prior[field], value_latest: current[field] });
@@ -324,9 +404,11 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
   const validation = validate(selectedRows);
   const concentrations = {
     by_client: groupBy(latest, 'client', 20),
-    by_loan_type: groupBy(latest, 'loan_type', 20),
+    by_loan_type: loanTypeProfile(latest),
     by_state: groupBy(latest, 'state', 20),
     by_industry: groupBy(latest, 'industry', 20),
+    buckets_outstanding: buckets(latest, 'outstanding_balance'),
+    buckets_amount: buckets(latest, 'amount'),
   };
   const vencidaPct = q.vencida?.pct || 0;
   const atrasadaPct = q.atrasada?.pct || 0;

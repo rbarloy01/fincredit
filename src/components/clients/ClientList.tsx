@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { db, Client } from '../../db/index';
 import { Session } from '../../services/auth';
-import { Plus, Search, Building2, Hash, Briefcase, TrendingUp, ChevronRight, AlertTriangle, FileClock, CalendarClock } from 'lucide-react';
+import { Plus, Search, Building2, Hash, Briefcase, TrendingUp, ChevronRight, AlertTriangle, FileClock, CalendarClock, Trash2 } from 'lucide-react';
 import { evaluateCovenantAuto } from '../../lib/financialMetrics';
+import WorkingOverlay from '../common/WorkingOverlay';
 
 interface Props {
   session: Session;
@@ -30,8 +31,10 @@ const ClientList: React.FC<Props> = ({ session, onSelectClient, onNewClient }) =
   const [watch, setWatch] = useState({ breaches: 0, overdueDocs: 0, missingTapes: 0, maturities: 0 });
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  useEffect(() => {
+  const loadClients = async () => {
+    setLoading(true);
     db.getClients().then(async list => {
       setClients(list);
       const rows = await Promise.all(list.map(async client => {
@@ -55,7 +58,23 @@ const ClientList: React.FC<Props> = ({ session, onSelectClient, onNewClient }) =
       });
       setLoading(false);
     });
-  }, []);
+  };
+
+  useEffect(() => { loadClients(); }, []);
+
+  const handleDeleteClient = async (client: Client) => {
+    if (session.role !== 'manager') return;
+    if (!confirm(`¿Eliminar cliente "${client.name}" y toda su información cargada?`)) return;
+    setDeletingId(client.id);
+    try {
+      await db.deleteClient(client.id);
+      await loadClients();
+    } catch (err: any) {
+      alert(`Error al eliminar cliente: ${err.message}`);
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   const filtered = clients.filter(c => {
     const q = search.toLowerCase();
@@ -69,6 +88,11 @@ const ClientList: React.FC<Props> = ({ session, onSelectClient, onNewClient }) =
 
   return (
     <div className="flex-1 bg-slate-50 min-h-screen p-8">
+      <WorkingOverlay
+        show={!!deletingId}
+        title="Eliminando cliente"
+        messages={['Almost there...', 'Working on it...', 'Borrando documentos ligados...', 'Limpiando covenants...', 'Actualizando portafolio...']}
+      />
       {/* Header */}
       <div className="flex items-center justify-between mb-8">
         <div>
@@ -159,10 +183,10 @@ const ClientList: React.FC<Props> = ({ session, onSelectClient, onNewClient }) =
       {!loading && filtered.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
           {filtered.map(client => (
-            <button
+            <div
               key={client.id}
               onClick={() => onSelectClient(client.id)}
-              className="bg-white border border-slate-200 rounded-2xl p-6 text-left hover:border-indigo-300 hover:shadow-lg hover:shadow-indigo-50 transition-all group"
+              className="bg-white border border-slate-200 rounded-2xl p-6 text-left hover:border-indigo-300 hover:shadow-lg hover:shadow-indigo-50 transition-all group cursor-pointer"
             >
               {/* Top row */}
               <div className="flex items-start justify-between mb-4">
@@ -212,7 +236,20 @@ const ClientList: React.FC<Props> = ({ session, onSelectClient, onNewClient }) =
                 </div>
                 <span className="text-[10px] text-slate-400 font-medium">{client.analystName}</span>
               </div>
-            </button>
+              {session.role === 'manager' && (
+                <button
+                  onClick={e => {
+                    e.stopPropagation();
+                    handleDeleteClient(client);
+                  }}
+                  disabled={deletingId === client.id}
+                  className="mt-4 flex items-center gap-1.5 text-xs font-black text-slate-400 hover:text-rose-600 disabled:opacity-40"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Eliminar cliente
+                </button>
+              )}
+            </div>
           ))}
         </div>
       )}

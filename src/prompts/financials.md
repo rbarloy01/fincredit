@@ -49,6 +49,18 @@ Cuentas típicas: Cobros a clientes, Pagos a proveedores, Adquisición de activo
 ### `otro`
 Usa solo si genuinamente no puedes determinar el estado al que pertenece la cuenta.
 
+Además conserva la jerarquía visual/OCR del documento:
+- Para cada línea con valor, incluye `sectionPath`.
+- `sectionPath` debe reflejar el encabezado visual bajo el cual apareció la cuenta, no una inferencia genérica.
+- Ejemplos:
+  - `"Balance General > ACTIVO > Activo circulante"`
+  - `"Balance General > PASIVO > Pasivo corto plazo"`
+  - `"Balance General > CAPITAL"`
+  - `"Estado de Resultados > Gastos Operativos"`
+  - `"Estado de Resultados > Otros ingresos/gastos"`
+- Si una cuenta está debajo de un encabezado PASIVO en el PDF escaneado, `sectionPath` debe contener `PASIVO` aunque el nombre de la cuenta no diga “pasivo”.
+- Si no puedes ver la jerarquía, usa `sectionPath: null`.
+
 ---
 
 ## PASO 4 — Cuentas específicas de IFNBs mexicanas
@@ -141,7 +153,8 @@ Si el documento tiene columnas comparativas (por ejemplo, "Mar 2025" y "Dic 2024
         {
           "statementType": "balance_general|estado_resultados|flujo_efectivo|otro",
           "name": "nombre exacto de la cuenta tal como aparece",
-          "value": 123456.78
+          "value": 123456.78,
+          "sectionPath": "ruta visual de sección, o null"
         }
       ]
     }

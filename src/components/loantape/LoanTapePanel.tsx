@@ -11,6 +11,7 @@ import {
 import { exportLoanTape } from '../../lib/export';
 import { analyzeLoanTapesLocally, standardizeLoanTape } from '../../lib/loanTapeAnalytics';
 import * as XLSX from 'xlsx';
+import WorkingOverlay from '../common/WorkingOverlay';
 
 interface Props {
   clientId: string;
@@ -76,6 +77,7 @@ const SEVERITY_COLORS: Record<string, string> = {
 
 const fmtMoney = (value: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 0 }).format(value || 0);
 const fmtPct = (value: number) => `${((value || 0) * 100).toFixed(1)}%`;
+const fmtNum = (value: number) => Number.isFinite(Number(value)) ? Number(value).toFixed(2) : '—';
 
 function SmallDataTable({ title, rows, columns }: { title: string; rows?: any[]; columns: Array<{ key: string; label: string; format?: (value: any) => string }> }) {
   if (!rows?.length) return null;
@@ -132,34 +134,42 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
 
   useEffect(() => { loadTapes(); }, [clientId]);
 
-  const handleFileSelect = async (file: File) => {
+  const saveLoanTapeFile = async (file: File) => {
     if (!file.name.endsWith('.xlsx') && !file.name.endsWith('.xls') && !file.name.endsWith('.csv')) {
-      alert('Solo se aceptan archivos Excel (.xlsx, .xls) o CSV');
-      return;
+      throw new Error(`${file.name}: solo se aceptan archivos Excel (.xlsx, .xls) o CSV`);
     }
+    const buffer = await file.arrayBuffer();
+    const workbook = XLSX.read(new Uint8Array(buffer), { type: 'array' });
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: null });
+    const local = standardizeLoanTape(rows, file.name);
+
+    const headers = rows.length > 0 ? Object.keys(rows[0] as any) : [];
+    let tapeType: 'credito' | 'factoraje' | 'otro' = 'otro';
+    if (headers.some(h => /factoraje|factor|cedente/i.test(h))) tapeType = 'factoraje';
+    else if (headers.some(h => /credito|prestamo|loan|vencimiento|saldo/i.test(h))) tapeType = 'credito';
+
+    return db.createLoanTape({
+      clientId,
+      name: file.name.replace(/\.[^.]+$/, ''),
+      fileName: file.name,
+      tapeType,
+      extractedData: { rows, _standardized: local.standardized, _mappingReport: local.mappingReport },
+    });
+  };
+
+  const handleFilesSelect = async (files: FileList | File[]) => {
+    const selected = Array.from(files);
+    if (selected.length === 0) return;
     setUploading(true);
     try {
-      const buffer = await file.arrayBuffer();
-      const workbook = XLSX.read(new Uint8Array(buffer), { type: 'array' });
-      const sheetName = workbook.SheetNames[0];
-      const sheet = workbook.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json(sheet, { defval: null });
-      const local = standardizeLoanTape(rows, file.name);
-
-      const headers = rows.length > 0 ? Object.keys(rows[0] as any) : [];
-      let tapeType: 'credito' | 'factoraje' | 'otro' = 'otro';
-      if (headers.some(h => /factoraje|factor|cedente/i.test(h))) tapeType = 'factoraje';
-      else if (headers.some(h => /credito|prestamo|loan|vencimiento|saldo/i.test(h))) tapeType = 'credito';
-
-      const tape = await db.createLoanTape({
-        clientId,
-        name: file.name.replace(/\.[^.]+$/, ''),
-        fileName: file.name,
-        tapeType,
-        extractedData: { rows, _standardized: local.standardized, _mappingReport: local.mappingReport },
-      });
-
-      setExpanded(tape.id);
+      let lastId: string | null = null;
+      for (const file of selected) {
+        const tape = await saveLoanTapeFile(file);
+        lastId = tape.id;
+      }
+      if (lastId) setExpanded(lastId);
       await loadTapes();
     } catch (err: any) {
       alert(`Error al procesar archivo: ${err.message}`);
@@ -212,6 +222,22 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
 
   return (
     <div ref={panelRef} className="space-y-6">
+      <WorkingOverlay
+        show={uploading || !!analyzing || !!exporting}
+        title={exporting ? 'Exportando' : analyzing ? 'Analizando Loan Tape' : 'Procesando Loan Tape'}
+        messages={[
+          'Almost there...',
+          'Working on it...',
+          'Still moving...',
+          'One more pass...',
+          exporting ? 'Construyendo archivo...' : 'Leyendo columnas y saldos...',
+          exporting ? 'Aplicando formato...' : 'Normalizando cartera...',
+          exporting ? 'Preparando descarga...' : 'Construyendo dashboard...',
+          exporting ? 'Acomodando hojas...' : 'Revisando concentraciones...',
+          exporting ? 'Casi queda...' : 'Detectando alertas...',
+          exporting ? 'Listo en un momento...' : 'Preparando métricas...',
+        ]}
+      />
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-black text-slate-900">Loan Tape</h2>
@@ -230,15 +256,18 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
               </button>
             </>
           )}
-          <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" className="hidden"
-            onChange={e => e.target.files?.[0] && handleFileSelect(e.target.files[0])} />
+          <input ref={fileInputRef} type="file" multiple accept=".xlsx,.xls,.csv" className="hidden"
+            onChange={e => {
+              if (e.target.files?.length) handleFilesSelect(e.target.files);
+              e.currentTarget.value = '';
+            }} />
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={uploading}
             className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-400 text-white font-bold px-4 py-2.5 rounded-xl text-sm transition-all"
           >
             <Upload className="w-4 h-4" />
-            {uploading ? 'Procesando...' : 'Subir Loan Tape'}
+            {uploading ? 'Procesando...' : 'Subir Loan Tape(s)'}
           </button>
         </div>
       </div>
@@ -256,6 +285,8 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
           const isExpanded = expanded === tape.id;
           const data = tape.extractedData;
           const rows: any[] = Array.isArray(data) ? data : (data?.rows || []);
+          const mappingRows: any[] = Array.isArray(data?._mappingReport) ? data._mappingReport : [];
+          const standardizedRows: any[] = Array.isArray(data?._standardized) ? data._standardized : [];
           const analysis: StructuredLoanTapeAnalysis | null = data?._analysis || null;
 
           return (
@@ -363,6 +394,54 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                         { key: 'count', label: 'Créditos' },
                         { key: 'balance', label: 'Saldo', format: fmtMoney },
                         { key: 'pct', label: '%', format: fmtPct },
+                        { key: 'avg_interest_rate', label: 'Tasa Prom.', format: fmtNum },
+                        { key: 'avg_days_overdue', label: 'DPD Prom.', format: fmtNum },
+                      ]}
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                    <SmallDataTable
+                      title="Concentración por Estado"
+                      rows={analysis.concentrations?.by_state}
+                      columns={[
+                        { key: 'name', label: 'Estado' },
+                        { key: 'count', label: 'Créditos' },
+                        { key: 'balance', label: 'Saldo', format: fmtMoney },
+                        { key: 'pct', label: '%', format: fmtPct },
+                      ]}
+                    />
+                    <SmallDataTable
+                      title="Concentración por Industria"
+                      rows={analysis.concentrations?.by_industry}
+                      columns={[
+                        { key: 'name', label: 'Industria' },
+                        { key: 'count', label: 'Créditos' },
+                        { key: 'balance', label: 'Saldo', format: fmtMoney },
+                        { key: 'pct', label: '%', format: fmtPct },
+                      ]}
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                    <SmallDataTable
+                      title="Buckets por Saldo"
+                      rows={analysis.concentrations?.buckets_outstanding}
+                      columns={[
+                        { key: 'bucket', label: 'Bucket' },
+                        { key: 'count', label: 'Créditos' },
+                        { key: 'balance', label: 'Saldo', format: fmtMoney },
+                        { key: 'pct', label: '%', format: fmtPct },
+                      ]}
+                    />
+                    <SmallDataTable
+                      title="Buckets por Línea"
+                      rows={analysis.concentrations?.buckets_amount}
+                      columns={[
+                        { key: 'bucket', label: 'Bucket' },
+                        { key: 'count', label: 'Créditos' },
+                        { key: 'balance', label: 'Monto', format: fmtMoney },
+                        { key: 'pct', label: '%', format: fmtPct },
                       ]}
                     />
                   </div>
@@ -375,6 +454,8 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                         { key: 'loan_id', label: 'Crédito' },
                         { key: 'outstanding_balance', label: 'Saldo', format: fmtMoney },
                         { key: 'start_date', label: 'Inicio' },
+                        { key: 'category', label: 'Categoría' },
+                        { key: 'percentage', label: '%', format: fmtPct },
                       ]}
                     />
                     <SmallDataTable
@@ -384,6 +465,85 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                         { key: 'loan_id', label: 'Crédito' },
                         { key: 'days_overdue_prev', label: 'DPD Ant.' },
                         { key: 'days_overdue_latest', label: 'DPD Act.' },
+                      ]}
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                    <SmallDataTable
+                      title="Anomalías: Créditos que Desaparecen"
+                      rows={analysis.anomalies?.disappeared_loans}
+                      columns={[
+                        { key: 'loan_id', label: 'Crédito' },
+                        { key: 'outstanding_balance', label: 'Saldo', format: fmtMoney },
+                        { key: 'end_date', label: 'Vencimiento' },
+                        { key: 'category', label: 'Categoría' },
+                        { key: 'percentage', label: '%', format: fmtPct },
+                      ]}
+                    />
+                    <SmallDataTable
+                      title="Anomalías: Vencidos aún Activos"
+                      rows={analysis.anomalies?.ended_loans}
+                      columns={[
+                        { key: 'loan_id', label: 'Crédito' },
+                        { key: 'outstanding_balance', label: 'Saldo', format: fmtMoney },
+                        { key: 'end_date', label: 'Vencimiento' },
+                        { key: 'days_overdue', label: 'DPD' },
+                      ]}
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+                    <SmallDataTable
+                      title="DPD Mejora"
+                      rows={analysis.anomalies?.dpd_improvement}
+                      columns={[
+                        { key: 'loan_id', label: 'Crédito' },
+                        { key: 'days_overdue_prev', label: 'DPD Ant.' },
+                        { key: 'days_overdue_latest', label: 'DPD Act.' },
+                      ]}
+                    />
+                    <SmallDataTable
+                      title="DPD Inconsistente"
+                      rows={analysis.anomalies?.dpd_inconsistency}
+                      columns={[
+                        { key: 'loan_id', label: 'Crédito' },
+                        { key: 'delta_days_overdue', label: 'Delta' },
+                        { key: 'category', label: 'Categoría' },
+                      ]}
+                    />
+                    <SmallDataTable
+                      title="Cambios de Condición"
+                      rows={analysis.anomalies?.condition_changes}
+                      columns={[
+                        { key: 'loan_id', label: 'Crédito' },
+                        { key: 'field_changed', label: 'Campo' },
+                        { key: 'value_prev', label: 'Anterior' },
+                        { key: 'value_latest', label: 'Actual' },
+                      ]}
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                    <SmallDataTable
+                      title="Mapeo de Columnas"
+                      rows={mappingRows}
+                      columns={[
+                        { key: 'source_header', label: 'Columna Fuente' },
+                        { key: 'target_term', label: 'Campo Estándar' },
+                        { key: 'confidence', label: 'Confianza' },
+                        { key: 'reasoning', label: 'Razón' },
+                      ]}
+                    />
+                    <SmallDataTable
+                      title="Datos Estandarizados"
+                      rows={standardizedRows}
+                      columns={[
+                        { key: 'loan_id', label: 'Crédito' },
+                        { key: 'client', label: 'Cliente' },
+                        { key: 'outstanding_balance', label: 'Saldo', format: fmtMoney },
+                        { key: 'days_overdue', label: 'DPD' },
+                        { key: 'file_date', label: 'Fecha Corte' },
                       ]}
                     />
                   </div>

@@ -6,9 +6,25 @@ export interface RatioResult {
   key: string;
   label: string;
   value: number | null;
+  formula: string;
+  missing: string[];
 }
 
 const norm = (v: string) => v.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+
+interface LocalConcept {
+  id: string;
+  name: string;
+  tokens: string[];
+}
+
+function localConcepts(clientId: string): LocalConcept[] {
+  try {
+    return JSON.parse(localStorage.getItem(`finmonitor_defined_concepts_${clientId}`) || '[]');
+  } catch {
+    return [];
+  }
+}
 
 export function rawAccountKey(item: FinancialStatement_DB['rawLineItems'][number]): string {
   return `${item.statementType || 'otro'}::${item.name}`;
@@ -42,15 +58,19 @@ export function getMetric(stmt: FinancialStatement_DB, key: string): number | nu
   const raw = (names: string[], types?: string[]) => findRaw(stmt, names, types);
   switch (key) {
     case 'revenue': return m.revenue || raw(['ingresos', 'ventas'], ['estado_resultados']);
-    case 'ebitda': return m.ebitda || raw(['ebitda'], ['estado_resultados']) || raw(['utilidad operacion', 'utilidad de operacion'], ['estado_resultados']);
-    case 'interestExpense': return m.interestExpense || raw(['interes', 'gasto financiero'], ['estado_resultados']);
-    case 'netIncome': return m.netIncome || raw(['utilidad neta', 'resultado neto'], ['estado_resultados']);
-    case 'currentAssets': return m.currentAssets || raw(['activo circulante', 'activo corriente'], ['balance_general']);
-    case 'currentLiabilities': return m.currentLiabilities || raw(['pasivo circulante', 'pasivo corriente'], ['balance_general']);
-    case 'totalDebt': return m.totalDebt || raw(['deuda total', 'pasivo con costo', 'deuda'], ['balance_general']);
-    case 'totalAssets': return m.totalAssets || raw(['total activo', 'activos totales'], ['balance_general']);
-    case 'equity': return m.equity || raw(['capital contable', 'patrimonio', 'capital'], ['balance_general']);
+    case 'ebitda': return m.ebitda || raw(['ebitda'], ['estado_resultados']) || raw(['utilidad operacion', 'utilidad de operacion', 'resultado de operacion', 'utilidad antes de intereses'], ['estado_resultados']);
+    case 'interestExpense': return m.interestExpense || raw(['gasto financiero', 'intereses pagados', 'intereses devengados', 'resultado integral de financiamiento'], ['estado_resultados']);
+    case 'netIncome': return m.netIncome || raw(['utilidad neta', 'resultado neto', 'utilidad o perdida', 'utilidad (o perdida)', 'perdida del ejercicio'], ['estado_resultados']);
+    case 'currentAssets': return m.currentAssets || raw(['activo circulante', 'activo corriente', 'total activo a corto plazo', 'activo a corto plazo'], ['balance_general']);
+    case 'currentLiabilities': return m.currentLiabilities || raw(['pasivo circulante', 'pasivo corriente', 'total pasivo a corto plazo', 'pasivo a corto plazo'], ['balance_general']);
+    case 'totalDebt': return m.totalDebt || raw(['deuda total', 'pasivo con costo', 'deuda', 'suma del pasivo', 'total pasivo'], ['balance_general']);
+    case 'totalAssets': return m.totalAssets || raw(['total activo', 'activos totales', 'suma del activo'], ['balance_general']);
+    case 'equity': return m.equity || raw(['capital contable', 'patrimonio', 'suma del capital', 'total capital'], ['balance_general']);
     default: {
+      if (key.startsWith('concept:')) {
+        const concept = localConcepts(stmt.clientId).find(c => c.id === key.slice('concept:'.length));
+        return concept ? evaluateFormula(`expr:${JSON.stringify(concept.tokens)}`, stmt) : null;
+      }
       if (key.startsWith('account:')) {
         const accountKey = key.slice('account:'.length);
         const item = stmt.rawLineItems.find(i => rawAccountKey(i) === accountKey);
@@ -76,16 +96,42 @@ export function standardRatios(stmt: FinancialStatement_DB): RatioResult[] {
   const totalDebt = getMetric(stmt, 'totalDebt');
   const totalAssets = getMetric(stmt, 'totalAssets');
   const equity = getMetric(stmt, 'equity');
+  const miss = (items: Array<[string, number | null]>) => items.filter(([, value]) => value === null).map(([label]) => label);
   return [
-    { key: 'revenue', label: 'Ingresos', value: revenue },
-    { key: 'ebitda', label: 'EBITDA', value: ebitda },
-    { key: 'debt_ebitda', label: 'Deuda / EBITDA', value: div(totalDebt, ebitda) },
-    { key: 'dscr', label: 'DSCR', value: div(ebitda, interest) },
-    { key: 'current_ratio', label: 'Razón Corriente', value: div(currentAssets, currentLiabilities) },
-    { key: 'leverage', label: 'Deuda / Capital', value: div(totalDebt, equity) },
-    { key: 'roa', label: 'ROA', value: div(netIncome, totalAssets) },
-    { key: 'roe', label: 'ROE', value: div(netIncome, equity) },
+    { key: 'revenue', label: 'Ingresos', value: revenue, formula: 'Cuenta extraída: ingresos/ventas', missing: miss([['Ingresos', revenue]]) },
+    { key: 'ebitda', label: 'EBITDA', value: ebitda, formula: 'EBITDA o utilidad de operación', missing: miss([['EBITDA', ebitda]]) },
+    { key: 'debt_ebitda', label: 'Deuda / EBITDA', value: div(totalDebt, ebitda), formula: 'Deuda total / EBITDA', missing: miss([['Deuda total', totalDebt], ['EBITDA', ebitda]]) },
+    { key: 'dscr', label: 'DSCR', value: div(ebitda, interest), formula: 'EBITDA / gasto financiero', missing: miss([['EBITDA', ebitda], ['Gasto financiero', interest]]) },
+    { key: 'current_ratio', label: 'Razón Corriente', value: div(currentAssets, currentLiabilities), formula: 'Activo corriente / Pasivo corriente', missing: miss([['Activo corriente', currentAssets], ['Pasivo corriente', currentLiabilities]]) },
+    { key: 'leverage', label: 'Deuda / Capital', value: div(totalDebt, equity), formula: 'Deuda total / capital contable', missing: miss([['Deuda total', totalDebt], ['Capital contable', equity]]) },
+    { key: 'roa', label: 'ROA', value: div(netIncome, totalAssets), formula: 'Utilidad neta / activos totales', missing: miss([['Utilidad neta', netIncome], ['Activos totales', totalAssets]]) },
+    { key: 'roe', label: 'ROE', value: div(netIncome, equity), formula: 'Utilidad neta / capital contable', missing: miss([['Utilidad neta', netIncome], ['Capital contable', equity]]) },
   ];
+}
+
+export function standardRatioFormula(key: string): string {
+  return (
+    key === 'debt_ebitda' ? 'ratio:totalDebt/ebitda' :
+    key === 'dscr' ? 'ratio:ebitda/interestExpense' :
+    key === 'current_ratio' ? 'ratio:currentAssets/currentLiabilities' :
+    key === 'leverage' ? 'ratio:totalDebt/equity' :
+    key === 'roa' ? 'ratio:netIncome/totalAssets' :
+    key === 'roe' ? 'ratio:netIncome/equity' :
+    key
+  );
+}
+
+export function suggestedCovenants(statements: FinancialStatement_DB[]) {
+  const latest = [...statements].sort((a, b) => a.periodDate.localeCompare(b.periodDate)).at(-1);
+  if (!latest) return [];
+  return standardRatios(latest)
+    .filter(r => r.value !== null && !['revenue', 'ebitda'].includes(r.key))
+    .map(r => ({
+      name: r.label,
+      formula: standardRatioFormula(r.key),
+      description: `Sugerido por cuentas detectadas: ${r.formula}. Valor actual ${r.value?.toLocaleString('es-MX', { maximumFractionDigits: 4 })}.`,
+      currentValue: r.value,
+    }));
 }
 
 export function evaluateFormula(formula: string, stmt: FinancialStatement_DB): number | null {
