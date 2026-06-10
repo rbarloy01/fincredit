@@ -11,13 +11,15 @@ interface Props {
   onNewClient: () => void;
 }
 
-const scoreColor: Record<string, string> = {
-  A: 'bg-emerald-100 text-emerald-800 border-emerald-200',
-  B: 'bg-blue-100 text-blue-800 border-blue-200',
-  C: 'bg-amber-100 text-amber-800 border-amber-200',
-  D: 'bg-orange-100 text-orange-800 border-orange-200',
-  E: 'bg-rose-100 text-rose-800 border-rose-200',
-};
+function scoreBadgeClass(score: string) {
+  const value = Number(score);
+  if (!Number.isFinite(value)) return 'bg-slate-100 text-slate-600 border-slate-200';
+  if (value >= 80) return 'bg-emerald-100 text-emerald-800 border-emerald-200';
+  if (value >= 60) return 'bg-blue-100 text-blue-800 border-blue-200';
+  if (value >= 40) return 'bg-amber-100 text-amber-800 border-amber-200';
+  if (value >= 20) return 'bg-orange-100 text-orange-800 border-orange-200';
+  return 'bg-rose-100 text-rose-800 border-rose-200';
+}
 
 function fmtCurrency(value: number, currency: string): string {
   const prefix = currency === 'MXN' ? '$' : currency === 'USD' ? 'USD ' : '€';
@@ -195,8 +197,8 @@ const ClientList: React.FC<Props> = ({ session, onSelectClient, onNewClient }) =
                 </div>
                 <div className="flex items-center gap-2">
                   {client.score && (
-                    <span className={`text-xs font-black px-2.5 py-1 rounded-lg border ${scoreColor[client.score.toUpperCase()] || 'bg-slate-100 text-slate-600 border-slate-200'}`}>
-                      {client.score}
+                    <span className={`text-xs font-black px-2.5 py-1 rounded-lg border ${scoreBadgeClass(client.score)}`}>
+                      {client.score}/100
                     </span>
                   )}
                   <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-indigo-500 transition-colors" />

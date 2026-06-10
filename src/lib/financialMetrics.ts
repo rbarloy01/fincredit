@@ -1,4 +1,5 @@
 import { Covenant_DB, FinancialStatement_DB } from '../db/index';
+import { findConsolidatedMetricValue, metricAliases } from './accountConsolidation';
 
 export type RatioStatus = 'cumple' | 'alerta' | 'incumple';
 
@@ -57,15 +58,15 @@ export function getMetric(stmt: FinancialStatement_DB, key: string): number | nu
   const m = (stmt.mappedData || {}) as FinancialStatement_DB['mappedData'];
   const raw = (names: string[], types?: string[]) => findRaw(stmt, names, types);
   switch (key) {
-    case 'revenue': return m.revenue || raw(['ingresos', 'ventas'], ['estado_resultados']);
-    case 'ebitda': return m.ebitda || raw(['ebitda'], ['estado_resultados']) || raw(['utilidad operacion', 'utilidad de operacion', 'resultado de operacion', 'utilidad antes de intereses'], ['estado_resultados']);
-    case 'interestExpense': return m.interestExpense || raw(['gasto financiero', 'intereses pagados', 'intereses devengados', 'resultado integral de financiamiento'], ['estado_resultados']);
-    case 'netIncome': return m.netIncome || raw(['utilidad neta', 'resultado neto', 'utilidad o perdida', 'utilidad (o perdida)', 'perdida del ejercicio'], ['estado_resultados']);
-    case 'currentAssets': return m.currentAssets || raw(['activo circulante', 'activo corriente', 'total activo a corto plazo', 'activo a corto plazo'], ['balance_general']);
-    case 'currentLiabilities': return m.currentLiabilities || raw(['pasivo circulante', 'pasivo corriente', 'total pasivo a corto plazo', 'pasivo a corto plazo'], ['balance_general']);
-    case 'totalDebt': return m.totalDebt || raw(['deuda total', 'pasivo con costo', 'deuda', 'suma del pasivo', 'total pasivo'], ['balance_general']);
-    case 'totalAssets': return m.totalAssets || raw(['total activo', 'activos totales', 'suma del activo'], ['balance_general']);
-    case 'equity': return m.equity || raw(['capital contable', 'patrimonio', 'suma del capital', 'total capital'], ['balance_general']);
+    case 'revenue': return m.revenue || findConsolidatedMetricValue(stmt, 'revenue') || raw(['ingresos', 'ventas', ...metricAliases('revenue')], ['estado_resultados']);
+    case 'ebitda': return m.ebitda || findConsolidatedMetricValue(stmt, 'ebitda') || raw(['ebitda', ...metricAliases('ebitda')], ['estado_resultados']) || raw(['utilidad operacion', 'utilidad de operacion', 'resultado de operacion', 'utilidad antes de intereses'], ['estado_resultados']);
+    case 'interestExpense': return m.interestExpense || findConsolidatedMetricValue(stmt, 'interestExpense') || raw(['gasto financiero', 'intereses pagados', 'intereses devengados', 'resultado integral de financiamiento', ...metricAliases('interestExpense')], ['estado_resultados']);
+    case 'netIncome': return m.netIncome || findConsolidatedMetricValue(stmt, 'netIncome') || raw(['utilidad neta', 'resultado neto', 'utilidad o perdida', 'utilidad (o perdida)', 'perdida del ejercicio', ...metricAliases('netIncome')], ['estado_resultados']);
+    case 'currentAssets': return m.currentAssets || findConsolidatedMetricValue(stmt, 'currentAssets') || raw(['activo circulante', 'activo corriente', 'total activo a corto plazo', 'activo a corto plazo', ...metricAliases('currentAssets')], ['balance_general']);
+    case 'currentLiabilities': return m.currentLiabilities || findConsolidatedMetricValue(stmt, 'currentLiabilities') || raw(['pasivo circulante', 'pasivo corriente', 'total pasivo a corto plazo', 'pasivo a corto plazo', ...metricAliases('currentLiabilities')], ['balance_general']);
+    case 'totalDebt': return m.totalDebt || findConsolidatedMetricValue(stmt, 'totalDebt') || raw(['deuda total', 'pasivo con costo', 'deuda', 'suma del pasivo', 'total pasivo', ...metricAliases('totalDebt')], ['balance_general']);
+    case 'totalAssets': return m.totalAssets || findConsolidatedMetricValue(stmt, 'totalAssets') || raw(['total activo', 'activos totales', 'suma del activo', ...metricAliases('totalAssets')], ['balance_general']);
+    case 'equity': return m.equity || findConsolidatedMetricValue(stmt, 'equity') || raw(['capital contable', 'patrimonio', 'suma del capital', 'total capital', ...metricAliases('equity')], ['balance_general']);
     default: {
       if (key.startsWith('concept:')) {
         const concept = localConcepts(stmt.clientId).find(c => c.id === key.slice('concept:'.length));

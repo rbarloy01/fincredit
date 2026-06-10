@@ -396,6 +396,14 @@ function exportSegment(item: FinancialStatement_DB['rawLineItems'][number]) {
   const name = nkey(item.name || '');
   if (type === 'estado_resultados' || path.includes('estadoresultado')) return 'Estado de Resultados';
   if (type === 'flujo_efectivo' || path.includes('flujoefectivo')) return 'Flujo de Efectivo';
+  if (path.includes('manual') || path.includes('auditoria')) {
+    if (path.includes('activo')) return 'ACTIVO';
+    if (path.includes('pasivo')) return 'PASIVO';
+    if (path.includes('capital') || path.includes('patrimonio')) return 'CAPITAL';
+    if (path.includes('estadoresultado')) return 'Estado de Resultados';
+    if (path.includes('flujoefectivo')) return 'Flujo de Efectivo';
+    if (path.includes('otros')) return 'Otros';
+  }
   if (/(capital|patrimonio|resultadoacumulado|utilidadretenida|capitalcontable|resultadodelejercicio)/.test(name)) return 'CAPITAL';
   if (/(pasivo|proveedor|acreedor|deuda|obligacion|prestamo|impuesto|seguro|social|imss|isr|iva|ptu|provision|cuentaporpagar|cxp)/.test(name)) return 'PASIVO';
   if (/(activo|caja|banco|efectivo|cliente|cuentaporcobrar|inventario|propiedad|equipo|intangible)/.test(name)) return 'ACTIVO';

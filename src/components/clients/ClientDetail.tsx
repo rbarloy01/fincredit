@@ -13,6 +13,7 @@ import ClientReportView from '../report/ReportView';
 import SaaSMonitorPanel from '../monitoring/SaaSMonitorPanel';
 import AuditPanel from '../audit/AuditPanel';
 import WorkingOverlay from '../common/WorkingOverlay';
+import CompanyOverviewPanel from './CompanyOverviewPanel';
 
 interface Props {
   clientId: string;
@@ -22,11 +23,12 @@ interface Props {
   onDeleted?: () => void;
 }
 
-type Tab = 'monitor' | 'resumen' | 'transacciones' | 'estados' | 'auditoria' | 'loantape' | 'cov_financiero' | 'hacer_no_hacer' | 'reporte';
+type Tab = 'monitor' | 'resumen' | 'company_overview' | 'transacciones' | 'estados' | 'auditoria' | 'loantape' | 'cov_financiero' | 'hacer_no_hacer' | 'reporte';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'monitor', label: 'SaaS Monitor' },
   { id: 'resumen', label: 'Resumen' },
+  { id: 'company_overview', label: 'Company Overview' },
   { id: 'transacciones', label: 'Transacciones' },
   { id: 'estados', label: 'Estados Financieros' },
   { id: 'auditoria', label: 'Auditoría' },
@@ -350,6 +352,15 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
           />
         )}
         {activeTab === 'resumen' && <ResumenTab client={client} transactions={transactions} covenants={covenants} />}
+        {activeTab === 'company_overview' && (
+          <CompanyOverviewPanel
+            client={client}
+            statements={statements}
+            covenants={covenants}
+            customFields={customFields}
+            aiSettings={aiSettings}
+          />
+        )}
         {activeTab === 'transacciones' && (
           <TransactionPanel
             clientId={clientId}

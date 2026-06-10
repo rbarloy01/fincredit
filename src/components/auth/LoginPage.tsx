@@ -35,6 +35,17 @@ const LoginPage: React.FC<Props> = ({ onLogin }) => {
     }
   };
 
+  const handleGoogle = async () => {
+    setError('');
+    setLoading(true);
+    try {
+      await auth.loginWithGoogle();
+    } catch (err: any) {
+      setError(err.message || 'Error al iniciar con Google');
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 flex items-center justify-center px-4">
       {/* Background gradient blobs */}
@@ -79,6 +90,22 @@ const LoginPage: React.FC<Props> = ({ onLogin }) => {
 
           {/* Form */}
           <form onSubmit={handleSubmit} className="space-y-5">
+            <button
+              type="button"
+              onClick={handleGoogle}
+              disabled={loading}
+              className="w-full bg-white hover:bg-slate-100 disabled:opacity-60 text-slate-900 font-black py-3.5 rounded-xl transition-all duration-200 text-sm flex items-center justify-center gap-3 shadow-lg"
+            >
+              <span className="w-5 h-5 rounded-full bg-white border border-slate-200 flex items-center justify-center font-black text-sm text-blue-600">G</span>
+              Continuar con Google
+            </button>
+
+            <div className="flex items-center gap-3">
+              <div className="h-px bg-slate-800 flex-1" />
+              <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">o con password</span>
+              <div className="h-px bg-slate-800 flex-1" />
+            </div>
+
             {/* Email */}
             <div>
               <label className="block text-slate-300 text-xs font-bold uppercase tracking-widest mb-2">

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { db, Transaction, ContractFile } from '../../db/index';
 import { Session } from '../../services/auth';
-import { AISettings, extractCovenants, ContractExtractionResult, FinancialCovenant } from '../../services/ai';
+import { AISettings, AIMedia, extractCovenants, ContractExtractionResult, FinancialCovenant } from '../../services/ai';
 import {
   Plus, ChevronDown, ChevronRight, Upload, FileText, Trash2,
   Sparkles, Save, X, Calendar, DollarSign, FileSignature, Download,
@@ -26,6 +26,23 @@ function toBase64(file: File): Promise<string> {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+}
+
+function inferMimeType(file: Pick<ContractFile, 'mimeType' | 'originalName'>): string {
+  if (file.mimeType) return file.mimeType;
+  const name = file.originalName.toLowerCase();
+  if (name.endsWith('.pdf')) return 'application/pdf';
+  if (name.endsWith('.png')) return 'image/png';
+  if (name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg';
+  if (name.endsWith('.webp')) return 'image/webp';
+  if (name.endsWith('.txt')) return 'text/plain';
+  return 'application/octet-stream';
+}
+
+function decodeBase64Text(base64: string): string {
+  const binary = atob(base64);
+  const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+  return new TextDecoder('utf-8').decode(bytes);
 }
 
 const fmtDate = (d: string) => {
@@ -191,32 +208,37 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
 
     setAnalyzing(txId);
     try {
-      let contractText = '';
-      let mediaFile: { base64: string; mimeType: string } | undefined;
+      const textParts: string[] = [];
+      const mediaFiles: AIMedia[] = [];
 
       for (const f of txFiles) {
-        if (f.mimeType === 'text/plain') {
-          contractText += atob(f.base64Data) + '\n';
-        } else if (!mediaFile && (f.mimeType === 'application/pdf' || f.mimeType.startsWith('image/'))) {
-          mediaFile = { base64: f.base64Data, mimeType: f.mimeType };
+        const mimeType = inferMimeType(f);
+        if (mimeType === 'text/plain') {
+          textParts.push(`Archivo: ${f.originalName}\n${decodeBase64Text(f.base64Data)}`);
+        } else if (mimeType === 'application/pdf' || mimeType.startsWith('image/')) {
+          mediaFiles.push({ base64: f.base64Data, mimeType, fileName: f.originalName });
         }
       }
 
+      const contractText = textParts.join('\n\n');
+      const fallbackText = `Contrato: ${txFiles.map(f => f.originalName).join(', ')}`;
       const result = await extractCovenants(
         aiSettings,
-        contractText || (mediaFile ? '' : `Contrato: ${txFiles.map(f => f.originalName).join(', ')}`),
-        mediaFile,
+        contractText || (mediaFiles.length > 0 ? '' : fallbackText),
+        mediaFiles.length > 0 ? mediaFiles : undefined,
       );
       setExtractedMap(prev => ({ ...prev, [txId]: result }));
 
       for (const f of txFiles) {
-        await db.addContractFile({
-          ...f,
+        await db.updateContractFile(f.id, {
           extractionStatus: 'done',
           extractedCovenants: result,
         });
       }
+      await loadTransactions();
     } catch (err: any) {
+      await Promise.all(txFiles.map(f => db.updateContractFile(f.id, { extractionStatus: 'error' }).catch(() => undefined)));
+      await loadTransactions();
       alert(`Error al analizar: ${err.message}`);
     } finally {
       setAnalyzing(null);
@@ -228,6 +250,10 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
     if (!extraction) return;
     setSavingCovenants(txId);
     try {
+      await Promise.all((files[txId] || []).map(f => db.updateContractFile(f.id, {
+        extractionStatus: 'done',
+        extractedCovenants: extraction,
+      })));
       for (const item of extraction.condicionesHacer) {
         await db.createCovenant({
           clientId, transactionId: txId,
@@ -255,6 +281,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
       }
       setExtractedMap(prev => { const n = { ...prev }; delete n[txId]; return n; });
       onCovenantsExtracted();
+      await loadTransactions();
       alert('Covenants guardados exitosamente');
     } catch (err: any) {
       alert(`Error al guardar covenants: ${err.message}`);

@@ -5,11 +5,13 @@ import ClientList from './components/clients/ClientList';
 import ClientForm from './components/clients/ClientForm';
 import ClientDetail from './components/clients/ClientDetail';
 import SettingsPage from './components/settings/SettingsPage';
+import BenchmarkingPage from './components/benchmarking/BenchmarkingPage';
+import AccountConsolidationPage from './components/consolidation/AccountConsolidationPage';
 import { Client, CustomField } from './db/index';
 import { AISettings, loadAISettings } from './services/ai';
-import { Building2, Settings, LogOut, ShieldCheck, Moon, Sun } from 'lucide-react';
+import { BarChart3, Building2, Layers3, Settings, LogOut, ShieldCheck, Moon, Sun } from 'lucide-react';
 
-type Route = 'clients' | 'client_new' | 'client_edit' | 'client_detail' | 'settings';
+type Route = 'clients' | 'client_new' | 'client_edit' | 'client_detail' | 'benchmarking' | 'consolidation' | 'settings';
 
 const App: React.FC = () => {
   const [session, setSession] = useState<Session | null>(null);
@@ -87,6 +89,8 @@ const App: React.FC = () => {
 
   const navItems = [
     { id: 'clients' as Route, label: 'Clientes', icon: Building2 },
+    { id: 'benchmarking' as Route, label: 'Benchmarking', icon: BarChart3 },
+    { id: 'consolidation' as Route, label: 'Consolidación', icon: Layers3 },
     ...(session.role === 'manager' ? [{ id: 'settings' as Route, label: 'Configuración', icon: Settings }] : []),
   ];
 
@@ -175,6 +179,14 @@ const App: React.FC = () => {
             onSelectClient={handleSelectClient}
             onNewClient={handleNewClient}
           />
+        )}
+
+        {route === 'benchmarking' && (
+          <BenchmarkingPage />
+        )}
+
+        {route === 'consolidation' && (
+          <AccountConsolidationPage aiSettings={aiSettings} session={session} />
         )}
 
         {(route === 'client_new' || route === 'client_edit') && (

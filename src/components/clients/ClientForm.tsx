@@ -13,9 +13,8 @@ interface Props {
 }
 
 const INDUSTRIES = ['SOFOM', 'SOFIPO', 'Arrendadora', 'Factoraje', 'Crédito Simple', 'Otro'];
-const CREDIT_TYPES = ['Simple', 'Revolvente', 'Flex'];
+const CREDIT_TYPES = ['Simple', 'Revolvente', 'Flex', 'Factoraje', 'Arrendamiento', 'Crédito Puente', 'Otro'];
 const CURRENCIES = ['MXN', 'USD', 'EUR'] as const;
-const SCORES = ['A', 'B', 'C', 'D', 'E'];
 const FIELD_TYPES = [
   { value: 'text', label: 'Texto' },
   { value: 'number', label: 'Número' },
@@ -31,7 +30,7 @@ const ClientForm: React.FC<Props> = ({ session, initialData, onSave, onCancel })
   const [totalCreditValue, setTotalCreditValue] = useState(initialData?.totalCreditValue?.toString() || '');
   const [contractName, setContractName] = useState(initialData?.contractName || '');
   const [analystName, setAnalystName] = useState(initialData?.analystName || '');
-  const [score, setScore] = useState(initialData?.score || 'A');
+  const [score, setScore] = useState(initialData?.score || '');
   const [frequency, setFrequency] = useState<'mensual' | 'trimestral'>(initialData?.frequency || 'mensual');
   const [customFields, setCustomFields] = useState<CustomField[]>([]);
   const [saving, setSaving] = useState(false);
@@ -73,6 +72,12 @@ const ClientForm: React.FC<Props> = ({ session, initialData, onSave, onCancel })
     if (!name.trim()) newErrors.name = 'El nombre es requerido';
     if (!taxId.trim()) newErrors.taxId = 'El RFC es requerido';
     if (creditType.length === 0) newErrors.creditType = 'Selecciona al menos un tipo de crédito';
+    if (score.trim()) {
+      const numericScore = Number(score);
+      if (!Number.isFinite(numericScore) || numericScore < 0 || numericScore > 100) {
+        newErrors.score = 'La calificación debe estar entre 0 y 100';
+      }
+    }
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
@@ -91,7 +96,7 @@ const ClientForm: React.FC<Props> = ({ session, initialData, onSave, onCancel })
         totalCreditValue: parseFloat(totalCreditValue) || 0,
         contractName: contractName.trim(),
         analystName: analystName.trim(),
-        score,
+        score: score.trim(),
         frequency,
         createdBy: session.userId,
         paymentHistory: initialData?.paymentHistory || [],
@@ -116,7 +121,14 @@ const ClientForm: React.FC<Props> = ({ session, initialData, onSave, onCancel })
       }
 
       // Update custom fields with correct clientId
-      const fieldsWithClientId = customFields.map(f => ({ ...f, clientId: savedClient.id }));
+      const fieldsWithClientId = customFields
+        .filter(f => f.label.trim() && !f.label.startsWith('__setting:'))
+        .map(f => ({
+          ...f,
+          id: f.id.length === 36 ? f.id : '',
+          clientId: savedClient.id,
+          label: f.label.trim(),
+        }));
       await db.setCustomFields(savedClient.id, fieldsWithClientId);
 
       onSave(savedClient, fieldsWithClientId);
@@ -256,22 +268,17 @@ const ClientForm: React.FC<Props> = ({ session, initialData, onSave, onCancel })
             {/* Score */}
             <div>
               <label className={labelClass}>Calificación</label>
-              <div className="flex gap-2">
-                {SCORES.map(s => (
-                  <button
-                    key={s}
-                    type="button"
-                    onClick={() => setScore(s)}
-                    className={`flex-1 py-3 rounded-xl text-sm font-black border transition-all ${
-                      score === s
-                        ? 'bg-indigo-600 text-white border-indigo-600 shadow-md'
-                        : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-300'
-                    }`}
-                  >
-                    {s}
-                  </button>
-                ))}
-              </div>
+              <input
+                type="number"
+                value={score}
+                onChange={e => setScore(e.target.value)}
+                min="0"
+                max="100"
+                step="1"
+                placeholder="0-100"
+                className={inputClass('score')}
+              />
+              {errors.score && <p className="text-rose-500 text-xs mt-1">{errors.score}</p>}
             </div>
 
             {/* Frequency */}

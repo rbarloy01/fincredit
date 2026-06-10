@@ -60,6 +60,68 @@ function postJsonAnthropicStyle(url: string, apiKey: string, payload: unknown): 
   });
 }
 
+function restJson(url: string, serviceKey: string, method: string, payload?: unknown): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const bodyStr = payload === undefined ? '' : JSON.stringify(payload);
+    const request = https.request({
+      hostname: target.hostname,
+      path: target.pathname + target.search,
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: serviceKey,
+        Authorization: `Bearer ${serviceKey}`,
+        Prefer: 'resolution=merge-duplicates,return=representation',
+        ...(bodyStr ? { 'Content-Length': Buffer.byteLength(bodyStr) } : {}),
+      },
+    }, response => {
+      let body = '';
+      response.on('data', chunk => { body += chunk.toString(); });
+      response.on('end', () => resolve({ status: response.statusCode || 500, body }));
+    });
+    request.on('error', reject);
+    if (bodyStr) request.write(bodyStr);
+    request.end();
+  });
+}
+
+function parseJson(body: string, fallback: any) {
+  try { return JSON.parse(body || JSON.stringify(fallback)); } catch { return fallback; }
+}
+
+async function findOrganization(supabaseUrl: string, serviceKey: string, slug: string): Promise<string | null> {
+  const foundRes = await restJson(`${supabaseUrl}/rest/v1/organizations?select=id&slug=eq.${encodeURIComponent(slug)}&limit=1`, serviceKey, 'GET');
+  if (foundRes.status >= 300) throw new Error(parseJson(foundRes.body, {}).message || 'Error al buscar organización');
+  return parseJson(foundRes.body, [])?.[0]?.id || null;
+}
+
+async function ensureOrganization(supabaseUrl: string, serviceKey: string, organizationName = 'Syscap', slug = 'syscap'): Promise<string> {
+  const safeSlug = slug.toLowerCase();
+  let orgId = await findOrganization(supabaseUrl, serviceKey, safeSlug);
+  if (!orgId) {
+    const createdRes = await restJson(`${supabaseUrl}/rest/v1/organizations`, serviceKey, 'POST', { name: organizationName, slug: safeSlug });
+    if (createdRes.status >= 300 && !/duplicate|unique|organizations_slug/i.test(createdRes.body || '')) {
+      throw new Error(parseJson(createdRes.body, {}).message || 'Error al crear organización');
+    }
+    orgId = parseJson(createdRes.body, [])?.[0]?.id || await findOrganization(supabaseUrl, serviceKey, safeSlug);
+  }
+  if (!orgId) throw new Error('No se pudo crear organización');
+  return orgId;
+}
+
+async function ensureProfile(supabaseUrl: string, serviceKey: string, body: any, orgId: string): Promise<void> {
+  if (!body.userId) return;
+  const profileRes = await restJson(`${supabaseUrl}/rest/v1/profiles?on_conflict=id`, serviceKey, 'POST', {
+    id: body.userId,
+    name: String(body.userName || body.name || body.userEmail || 'Usuario'),
+    email: String(body.userEmail || body.email || '').toLowerCase(),
+    role: body.role === 'manager' ? 'manager' : 'analyst',
+    org_id: orgId,
+  });
+  if (profileRes.status >= 300) throw new Error(parseJson(profileRes.body, {}).message || 'Error al preparar perfil');
+}
+
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
     return {
@@ -120,6 +182,21 @@ export default defineConfig(({ mode }) => {
             } catch (error: any) { res.statusCode = 500; res.end(JSON.stringify({ error: error?.message || 'Gemini proxy error' })); }
           });
 
+          server.middlewares.use('/api/admin/org/ensure', async (req, res) => {
+            if (req.method !== 'POST') { res.statusCode = 405; res.end('Method not allowed'); return; }
+            try {
+              const body = JSON.parse(await readBody(req));
+              const supabaseUrl = env.SUPABASE_URL || env.VITE_SUPABASE_URL;
+              const serviceKey = env.SUPABASE_SERVICE_KEY;
+              if (!supabaseUrl || !serviceKey) { res.statusCode = 500; res.end(JSON.stringify({ error: 'Supabase admin env missing' })); return; }
+              const orgId = await ensureOrganization(supabaseUrl, serviceKey, body.organizationName, body.slug);
+              await ensureProfile(supabaseUrl, serviceKey, body, orgId);
+              res.statusCode = 200;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ orgId }));
+            } catch (error: any) { res.statusCode = 500; res.end(JSON.stringify({ error: error?.message || 'Error interno' })); }
+          });
+
           server.middlewares.use('/api/admin/users/create', async (req, res) => {
             if (req.method !== 'POST') { res.statusCode = 405; res.end('Method not allowed'); return; }
             try {
@@ -135,11 +212,12 @@ export default defineConfig(({ mode }) => {
               );
               if (authRes.status !== 200) { res.statusCode = 400; res.end(JSON.stringify({ error: JSON.parse(authRes.body).msg || 'Error al crear usuario' })); return; }
               const user = JSON.parse(authRes.body);
+              const orgId = await ensureOrganization(supabaseUrl, serviceKey);
               // 2. Insert profile
               await postJson(
                 `${supabaseUrl}/rest/v1/profiles`,
                 serviceKey,
-                { id: user.id, name: body.name, email: body.email.toLowerCase(), role: body.role },
+                { id: user.id, name: body.name, email: body.email.toLowerCase(), role: body.role, org_id: orgId },
                 { apikey: serviceKey, 'Content-Type': 'application/json', Prefer: 'return=minimal' }
               );
               res.statusCode = 200;

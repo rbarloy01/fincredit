@@ -59,6 +59,14 @@ export function classifyAccount(statementType: string, name: string, sectionPath
   const path = normalizeName(sectionPath || '');
   if (path.includes('estadoresultado')) return 'Estado de Resultados';
   if (path.includes('flujoefectivo')) return 'Flujo de Efectivo';
+  if (path.includes('manual') || path.includes('auditoria')) {
+    if (path.includes('activo')) return 'ACTIVO';
+    if (path.includes('pasivo')) return 'PASIVO';
+    if (path.includes('capital') || path.includes('patrimonio')) return 'CAPITAL';
+    if (path.includes('estadoresultado')) return 'Estado de Resultados';
+    if (path.includes('flujoefectivo')) return 'Flujo de Efectivo';
+    if (path.includes('otros')) return 'Otros';
+  }
   const n = normalizeName(name);
   if (statementType === 'estado_resultados') return 'Estado de Resultados';
   if (statementType === 'flujo_efectivo') return 'Flujo de Efectivo';

@@ -14,6 +14,12 @@ export interface AISettings {
 const SETTINGS_KEY = 'finmonitor_ai_settings';
 const GEMINI_MODEL = 'gemini-flash-latest';
 
+export interface AIMedia {
+  base64: string;
+  mimeType: string;
+  fileName?: string;
+}
+
 export function loadAISettings(): AISettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -72,14 +78,34 @@ export interface StructuredLoanTapeAnalysis {
   congruencyChecks: Array<{ item: string; contractRequirement?: string; actualValue: string; status: string; }>;
 }
 
+export interface AccountConsolidationSuggestion {
+  mappings: Array<{
+    accountName: string;
+    statementType?: StatementType | 'any';
+    metric: string;
+    confidence: number;
+    reason: string;
+  }>;
+  covenantTemplates: Array<{
+    name: string;
+    formula: string;
+    description: string;
+    operator?: 'gt'|'lt'|'gte'|'lte'|'none';
+    threshold?: string;
+  }>;
+}
+
 // ─── Core request dispatcher ──────────────────────────────────────────────────
 
-async function callAI(settings: AISettings, systemPrompt: string, userPrompt: string, media?: { base64: string; mimeType: string }): Promise<string> {
+async function callAI(settings: AISettings, systemPrompt: string, userPrompt: string, media?: AIMedia | AIMedia[]): Promise<string> {
   const { provider, apiKey } = settings;
+  const mediaItems = media ? (Array.isArray(media) ? media : [media]).filter(item => item.base64 && item.mimeType) : [];
 
   if (provider === 'gemini') {
     const parts: any[] = [{ text: `${systemPrompt}\n\n${userPrompt}` }];
-    if (media) parts.push({ inlineData: { data: media.base64, mimeType: media.mimeType } });
+    for (const item of mediaItems) {
+      parts.push({ inlineData: { data: item.base64, mimeType: item.mimeType } });
+    }
     const payload = {
       contents: [{ parts }],
       generationConfig: { temperature: 0.0, maxOutputTokens: 65536, responseMimeType: 'application/json' },
@@ -96,12 +122,14 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
 
   if (provider === 'claude') {
     let userContent: any;
-    if (media) {
+    if (mediaItems.length > 0) {
       const parts: any[] = [];
-      if (media.mimeType === 'application/pdf') {
-        parts.push({ type: 'document', source: { type: 'base64', media_type: media.mimeType, data: media.base64 } });
-      } else {
-        parts.push({ type: 'image', source: { type: 'base64', media_type: media.mimeType, data: media.base64 } });
+      for (const item of mediaItems) {
+        if (item.mimeType === 'application/pdf') {
+          parts.push({ type: 'document', source: { type: 'base64', media_type: item.mimeType, data: item.base64 } });
+        } else {
+          parts.push({ type: 'image', source: { type: 'base64', media_type: item.mimeType, data: item.base64 } });
+        }
       }
       parts.push({ type: 'text', text: userPrompt });
       userContent = parts;
@@ -125,16 +153,20 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
   }
 
   if (provider === 'openai') {
-    const userContent: any = media
-      ? [
-          { type: 'image_url', image_url: { url: `data:${media.mimeType};base64,${media.base64}` } },
-          { type: 'text', text: userPrompt },
-        ]
-      : userPrompt;
+    const userContent: any[] = [{ type: 'input_text', text: userPrompt }];
+    for (const item of mediaItems) {
+      const dataUrl = `data:${item.mimeType};base64,${item.base64}`;
+      if (item.mimeType === 'application/pdf') {
+        userContent.push({ type: 'input_file', filename: item.fileName || 'document.pdf', file_data: dataUrl });
+      } else {
+        userContent.push({ type: 'input_image', image_url: dataUrl });
+      }
+    }
     const payload = {
       model: 'gpt-4o',
-      max_tokens: 8192,
-      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userContent }],
+      max_output_tokens: 8192,
+      instructions: systemPrompt,
+      input: [{ role: 'user', content: userContent }],
     };
     const res = await fetch('/api/openai/responses', {
       method: 'POST',
@@ -143,7 +175,10 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error?.message || data.error || 'OpenAI error');
-    return data.choices?.[0]?.message?.content || '';
+    return data.output_text
+      || data.output?.flatMap((item: any) => item.content || []).map((part: any) => part.text || '').join('')
+      || data.choices?.[0]?.message?.content
+      || '';
   }
 
   throw new Error(`Proveedor desconocido: ${provider}`);
@@ -167,7 +202,7 @@ function extractJSON(text: string): any {
 
 export async function extractFinancials(
   settings: AISettings,
-  content: string | { base64: string; mimeType: string },
+  content: string | AIMedia,
   expectedClientName?: string
 ): Promise<ExtractionResult> {
   const system = financialsPrompt;
@@ -220,16 +255,20 @@ Devuelve únicamente JSON minificado con la estructura indicada.`;
 export async function extractCovenants(
   settings: AISettings,
   contractText: string,
-  media?: { base64: string; mimeType: string }
+  media?: AIMedia | AIMedia[]
 ): Promise<ContractExtractionResult> {
   const system = `Eres un abogado y analista de crédito experto en contratos de financiamiento IFNB mexicanos.
 Extraes covenants financieros y condiciones de hacer/no hacer de contratos de crédito.
 Devuelves únicamente JSON válido.`;
 
   const hasText = contractText.trim().length > 0;
-  const docRef = media
-    ? `el documento adjunto${hasText ? ' y el texto proporcionado' : ''}`
+  const mediaItems = media ? (Array.isArray(media) ? media : [media]).filter(item => item.base64 && item.mimeType) : [];
+  const docRef = mediaItems.length > 0
+    ? `los documentos adjuntos${hasText ? ' y el texto proporcionado' : ''}`
     : 'el siguiente contrato';
+  const attachmentList = mediaItems.length > 0
+    ? `\nArchivos adjuntos: ${mediaItems.map(item => item.fileName || item.mimeType).join(', ')}`
+    : '';
 
   const prompt = `Extrae de ${docRef}:
 1. condicionesHacer: obligaciones positivas (cosas que el acreditado DEBE hacer)
@@ -250,6 +289,7 @@ Devuelve JSON:
     }
   ]
 }
+${attachmentList}
 ${hasText ? `\nTexto del contrato:\n${contractText.slice(0, 12000)}` : ''}`;
 
   const text = await callAI(settings, system, prompt, media);
@@ -308,6 +348,44 @@ Redacta 3-4 párrafos breves y directos en español. Sin bullets. Tono profesion
 Menciona: cumplimiento de pagos, estado de covenants, observaciones relevantes, perspectiva.`;
 
   return callAI(settings, system, prompt);
+}
+
+export async function suggestAccountConsolidation(
+  settings: AISettings,
+  accounts: Array<{ name: string; statementType?: string; clientName?: string }>,
+  existingCovenants: Array<{ name: string; formula?: string; description?: string }> = []
+): Promise<AccountConsolidationSuggestion> {
+  const system = `Eres analista contable NIF y crédito IFNB.
+Tu tarea es mapear nombres de cuentas extraídas a campos consolidados y proponer plantillas de covenants.
+No inventes cifras. No devuelvas cuentas que no estén en el input. Devuelve JSON válido.`;
+
+  const prompt = `Campos permitidos para metric:
+revenue, ebitda, interestExpense, netIncome, currentAssets, currentLiabilities, totalDebt, totalAssets, equity, cash, operatingCashFlow.
+
+Reglas:
+- Si no estás razonablemente seguro, omite esa cuenta.
+- confidence debe ser 0 a 1.
+- covenantTemplates son plantillas globales sin activar; formula debe usar formato ratio:campo/campo cuando aplique.
+- No pongas umbral si no viene de covenants existentes.
+
+Cuentas:
+${JSON.stringify(accounts.slice(0, 400))}
+
+Covenants existentes:
+${JSON.stringify(existingCovenants.slice(0, 120))}
+
+Devuelve:
+{
+  "mappings":[{"accountName":"...","statementType":"balance_general|estado_resultados|flujo_efectivo|otro|any","metric":"...","confidence":0.85,"reason":"..."}],
+  "covenantTemplates":[{"name":"...","formula":"ratio:totalDebt/ebitda","description":"...","operator":"none","threshold":""}]
+}`;
+
+  const text = await callAI(settings, system, prompt);
+  const parsed = extractJSON(text);
+  return {
+    mappings: Array.isArray(parsed.mappings) ? parsed.mappings : [],
+    covenantTemplates: Array.isArray(parsed.covenantTemplates) ? parsed.covenantTemplates : [],
+  };
 }
 
 // ─── Test connection ──────────────────────────────────────────────────────────

@@ -633,7 +633,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
           </label>
           <label>
             <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Calificación</span>
-            <input value={client.score || ''} onChange={e => onClientUpdate({ score: e.target.value })} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-400" />
+            <input type="number" min="0" max="100" step="1" value={client.score || ''} onChange={e => onClientUpdate({ score: e.target.value })} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-400" />
           </label>
         </div>
         <div className="mt-6 border-t border-slate-100 pt-5">

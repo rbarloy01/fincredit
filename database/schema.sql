@@ -1,17 +1,28 @@
 -- FinMonitor v2 — Supabase Schema
 -- Run this in the Supabase SQL Editor or via Management API
 
+-- ── Organizations ───────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS organizations (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name       TEXT NOT NULL,
+  slug       TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- ── Profiles (extends Supabase Auth) ─────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS profiles (
   id         UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   name       TEXT NOT NULL,
+  email      TEXT,
   role       TEXT NOT NULL DEFAULT 'analyst' CHECK (role IN ('manager', 'analyst')),
+  org_id     UUID REFERENCES organizations(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- ── Clients ───────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS clients (
   id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id                UUID REFERENCES organizations(id),
   name                  TEXT NOT NULL,
   tax_id                TEXT,
   industry              TEXT,
@@ -57,6 +68,16 @@ CREATE TABLE IF NOT EXISTS client_settings (
   value      JSONB NOT NULL DEFAULT '{}',
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE(client_id, key)
+);
+
+-- ── Org Settings / Shared SaaS Preferences ──────────────────────────────────
+CREATE TABLE IF NOT EXISTS org_settings (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id     UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  key        TEXT NOT NULL,
+  value      JSONB NOT NULL DEFAULT '{}',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(org_id, key)
 );
 
 -- ── Transactions ──────────────────────────────────────────────────────────────
@@ -194,9 +215,11 @@ CREATE TABLE IF NOT EXISTS audit_events (
 
 -- ── Row Level Security ────────────────────────────────────────────────────────
 ALTER TABLE profiles              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE organizations         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE clients               ENABLE ROW LEVEL SECURITY;
 ALTER TABLE custom_fields         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE client_settings       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE org_settings          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE transactions          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE contract_files        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE covenants             ENABLE ROW LEVEL SECURITY;
@@ -210,9 +233,11 @@ ALTER TABLE audit_events          ENABLE ROW LEVEL SECURITY;
 
 -- Authenticated users have full access (tighten per-role later if needed)
 CREATE POLICY "auth_all" ON profiles             FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "auth_all" ON organizations        FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "auth_all" ON clients              FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "auth_all" ON custom_fields        FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "auth_all" ON client_settings      FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "auth_all" ON org_settings         FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "auth_all" ON transactions         FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "auth_all" ON contract_files       FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "auth_all" ON covenants            FOR ALL TO authenticated USING (true) WITH CHECK (true);

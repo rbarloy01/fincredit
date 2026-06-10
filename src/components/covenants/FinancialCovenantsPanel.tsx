@@ -4,6 +4,7 @@ import { Session } from '../../services/auth';
 import { Plus, ChevronDown, ChevronRight, MessageCircle, Send, TrendingUp, CheckCircle, AlertTriangle, XCircle, X, Trash2, Download, FileText, Star } from 'lucide-react';
 import { DefinedConcept, exportCovenantsFinancieros } from '../../lib/export';
 import { accountOptions, evaluateCovenantAuto, formulaLabel, standardRatioFormula, standardRatios, suggestedCovenants } from '../../lib/financialMetrics';
+import { GlobalCovenantTemplate, loadOrgConsolidationRules, loadOrgGlobalCovenantTemplates } from '../../lib/accountConsolidation';
 
 const nanoid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
@@ -80,6 +81,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', s
   const [limitDrafts, setLimitDrafts] = useState<Record<string, { operator: Covenant_DB['operator']; threshold: string }>>({});
   const [chatDrafts, setChatDrafts] = useState<Record<string, { prompt: string; result: string }>>({});
   const [concepts, setConcepts] = useState<DefinedConcept[]>([]);
+  const [globalTemplates, setGlobalTemplates] = useState<GlobalCovenantTemplate[]>([]);
   const [contractCovenants, setContractCovenants] = useState<string[]>([]);
   const [hiddenStandard, setHiddenStandard] = useState<string[]>([]);
   const notesEndRef = useRef<HTMLDivElement>(null);
@@ -95,6 +97,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', s
   };
 
   const loadData = async () => {
+    await loadOrgConsolidationRules(session.userId);
     const hidden = await db.getClientSetting<string[]>(clientId, hiddenStandardKey(clientId), []);
     setHiddenStandard(hidden);
     let all = await db.getCovenants(clientId);
@@ -140,6 +143,13 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', s
   useEffect(() => {
     db.getClientSetting<string[]>(clientId, contractCovenantsKey(clientId), []).then(setContractCovenants);
   }, [clientId]);
+  useEffect(() => {
+    let cancelled = false;
+    loadOrgGlobalCovenantTemplates(session.userId).then(templates => {
+      if (!cancelled) setGlobalTemplates(templates);
+    });
+    return () => { cancelled = true; };
+  }, [session.userId, clientId, statements.length]);
 
   useEffect(() => {
     if (expanded && notesEndRef.current) notesEndRef.current.scrollIntoView({ behavior: 'smooth' });
@@ -239,6 +249,9 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', s
   const warningCount = covenantRows.filter(r => r.status === 'alerta').length;
   const calculatedCount = covenantRows.filter(r => r.value !== null).length;
   const suggestions = suggestedCovenants(statements).filter(s => !displayCovenants.some(c => clean(c.name) === clean(s.name)));
+  const globalSuggestions = globalTemplates
+    .filter(t => t.active)
+    .filter(t => !displayCovenants.some(c => clean(c.name) === clean(t.name) || (t.formula && c.formula === t.formula)));
   const mappedOptions = [
     { key: 'revenue', label: 'Mapped: Ingresos' },
     { key: 'ebitda', label: 'Mapped: EBITDA' },
@@ -340,6 +353,20 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', s
       threshold: '',
       operator: 'none',
       description: suggestion.description,
+      isCustom: true,
+    });
+    await loadData();
+  };
+
+  const addGlobalTemplate = async (template: GlobalCovenantTemplate) => {
+    await db.createCovenant({
+      clientId,
+      name: template.name,
+      type: 'financial',
+      formula: template.formula,
+      threshold: template.threshold || '',
+      operator: template.operator || 'none',
+      description: template.description || 'Plantilla global de covenant.',
       isCustom: true,
     });
     await loadData();
@@ -589,6 +616,27 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', s
                 <button type="submit" disabled={saving} className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-black disabled:opacity-60">{saving ? 'Guardando...' : 'Guardar'}</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {globalSuggestions.length > 0 && (
+        <div className="bg-white border border-emerald-100 rounded-2xl p-5">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest">Biblioteca global</h3>
+              <p className="text-xs text-slate-400 mt-1">Plantillas activadas desde Consolidación. Tú decides si las creas para este cliente.</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {globalSuggestions.map(t => (
+              <div key={t.id} className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <p className="text-sm font-black text-slate-900">{t.name}</p>
+                <p className="text-xs font-mono text-slate-500 mt-1">{formulaLabel(t.formula, labelMap)}</p>
+                <p className="text-[10px] text-slate-400 mt-1">{t.source} · visto {t.seenCount}</p>
+                <button onClick={() => addGlobalTemplate(t)} className="mt-3 w-full bg-emerald-600 text-white rounded-lg px-3 py-2 text-xs font-black hover:bg-emerald-500">Crear en cliente</button>
+              </div>
+            ))}
           </div>
         </div>
       )}

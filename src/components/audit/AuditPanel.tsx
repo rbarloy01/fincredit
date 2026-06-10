@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { db, FinancialStatement_DB } from '../../db/index';
 import { classifyAccount } from '../financials/FinancialPanel';
+import { X } from 'lucide-react';
 
 type StatementType = 'balance_general' | 'estado_resultados' | 'flujo_efectivo' | 'otro';
 type Segment = 'ACTIVO' | 'PASIVO' | 'CAPITAL' | 'Estado de Resultados' | 'Flujo de Efectivo' | 'Otros';
@@ -18,10 +19,12 @@ const segmentToType = (segment: Segment): StatementType => {
 };
 
 const pathFor = (segment: Segment) => {
-  if (segment === 'ACTIVO') return 'Balance General > ACTIVO';
-  if (segment === 'PASIVO') return 'Balance General > PASIVO';
-  if (segment === 'CAPITAL') return 'Balance General > CAPITAL';
-  return segment;
+  if (segment === 'ACTIVO') return 'Manual Auditoría > ACTIVO';
+  if (segment === 'PASIVO') return 'Manual Auditoría > PASIVO';
+  if (segment === 'CAPITAL') return 'Manual Auditoría > CAPITAL';
+  if (segment === 'Estado de Resultados') return 'Manual Auditoría > Estado de Resultados';
+  if (segment === 'Flujo de Efectivo') return 'Manual Auditoría > Flujo de Efectivo';
+  return 'Manual Auditoría > Otros';
 };
 
 const AuditPanel: React.FC<Props> = ({ statements, onStatementsChange }) => {
@@ -36,6 +39,17 @@ const AuditPanel: React.FC<Props> = ({ statements, onStatementsChange }) => {
     setSaving(`${stmt.id}::${idx}`);
     const rawLineItems = stmt.rawLineItems.map((item, i) => i === idx
       ? { ...item, statementType: segmentToType(segment), sectionPath: pathFor(segment) }
+      : item);
+    await db.updateStatement(stmt.id, { rawLineItems });
+    const next = statements.map(s => s.id === stmt.id ? { ...s, rawLineItems } : s);
+    onStatementsChange(next);
+    setSaving(null);
+  };
+
+  const clearPath = async (stmt: FinancialStatement_DB, idx: number) => {
+    setSaving(`${stmt.id}::${idx}`);
+    const rawLineItems = stmt.rawLineItems.map((item, i) => i === idx
+      ? { ...item, sectionPath: null }
       : item);
     await db.updateStatement(stmt.id, { rawLineItems });
     const next = statements.map(s => s.id === stmt.id ? { ...s, rawLineItems } : s);
@@ -58,6 +72,7 @@ const AuditPanel: React.FC<Props> = ({ statements, onStatementsChange }) => {
                 <th className="text-left px-4 py-3 font-black uppercase tracking-wider">Cuenta</th>
                 <th className="text-left px-4 py-3 font-black uppercase tracking-wider">Ruta detectada</th>
                 <th className="text-left px-4 py-3 font-black uppercase tracking-wider">Clasificación</th>
+                <th className="px-4 py-3" />
               </tr>
             </thead>
             <tbody>
@@ -65,7 +80,11 @@ const AuditPanel: React.FC<Props> = ({ statements, onStatementsChange }) => {
                 <tr key={row.key} className="border-t border-slate-100">
                   <td className="px-4 py-2 font-bold text-slate-500 whitespace-nowrap">{row.stmt.period}</td>
                   <td className="px-4 py-2 font-semibold text-slate-900">{row.item.name}</td>
-                  <td className="px-4 py-2 text-slate-500">{row.item.sectionPath || 'Sin ruta visual'}</td>
+                  <td className="px-4 py-2 text-slate-500">
+                    <span className={row.item.sectionPath?.includes('Manual Auditoría') ? 'font-bold text-indigo-600' : ''}>
+                      {row.item.sectionPath || 'Sin ruta visual'}
+                    </span>
+                  </td>
                   <td className="px-4 py-2">
                     <select
                       disabled={saving === row.key}
@@ -80,6 +99,17 @@ const AuditPanel: React.FC<Props> = ({ statements, onStatementsChange }) => {
                       <option value="Flujo de Efectivo">Flujo de Efectivo</option>
                       <option value="Otros">Otros</option>
                     </select>
+                  </td>
+                  <td className="px-4 py-2 text-right">
+                    <button
+                      onClick={() => clearPath(row.stmt, row.idx)}
+                      disabled={saving === row.key || !row.item.sectionPath}
+                      className="inline-flex items-center gap-1 text-[11px] font-black text-slate-400 hover:text-rose-600 disabled:opacity-30"
+                      title="Quitar ruta detectada"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                      Quitar ruta
+                    </button>
                   </td>
                 </tr>
               ))}

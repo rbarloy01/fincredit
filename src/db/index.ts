@@ -13,6 +13,7 @@ export interface User {
 
 export interface Client {
   id: string;
+  orgId?: string;
   name: string;
   taxId: string;
   industry: string;
@@ -134,7 +135,7 @@ export interface LoanTape_DB {
 
 function toClient(r: any): Client {
   return {
-    id: r.id, name: r.name, taxId: r.tax_id || '', industry: r.industry || '',
+    id: r.id, orgId: r.org_id || '', name: r.name, taxId: r.tax_id || '', industry: r.industry || '',
     score: r.score || '', currency: r.currency || 'MXN',
     totalCreditValue: r.total_credit_value || 0, creditType: r.credit_type || [],
     contractName: r.contract_name || '', analystName: r.analyst_name || '',
@@ -151,6 +152,7 @@ function toClient(r: any): Client {
 
 function fromClient(c: Omit<Client, 'id' | 'createdAt'>): any {
   return {
+    ...(c.orgId ? { org_id: c.orgId } : {}),
     name: c.name, tax_id: c.taxId, industry: c.industry, score: c.score,
     currency: c.currency, total_credit_value: c.totalCreditValue, credit_type: c.creditType,
     contract_name: c.contractName, analyst_name: c.analystName, created_by: c.createdBy || null,
@@ -223,6 +225,56 @@ function err(label: string, e: any): never {
   throw new Error(`${label}: ${e?.message || e}`);
 }
 
+async function currentAuthUser() {
+  const { data } = await supabase.auth.getUser();
+  return data.user;
+}
+
+async function resolveOrgId(userId?: string): Promise<string | null> {
+  if (!userId) return null;
+  const { data: profile, error: profileError } = await supabase.from('profiles').select('org_id').eq('id', userId).maybeSingle();
+  if (profileError && !/column .*org_id|org_id.*column|schema cache/i.test(profileError.message || '')) {
+    err('resolveOrgId', profileError);
+  }
+  if (profile?.org_id) return profile.org_id;
+
+  try {
+    const authUser = await currentAuthUser();
+    const response = await fetch('/api/admin/org/ensure', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId,
+        userEmail: authUser?.id === userId ? authUser.email || '' : '',
+        userName: authUser?.id === userId ? authUser.user_metadata?.full_name || authUser.user_metadata?.name || authUser.email || 'Usuario' : 'Usuario',
+        role: 'analyst',
+        organizationName: 'Syscap',
+        slug: 'syscap',
+      }),
+    });
+    const json = await response.json().catch(() => ({}));
+    if (response.ok && json.orgId) return json.orgId;
+  } catch {
+    // Continue with client-side fallback for older local setups.
+  }
+
+  const { data: org } = await supabase.from('organizations').select('id').limit(1).maybeSingle();
+  if (org?.id) {
+    await supabase.from('profiles').update({ org_id: org.id }).eq('id', userId);
+    return org.id;
+  }
+  return null;
+}
+
+function legacyLocalValue<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) as T : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 // ── DB object ────────────────────────────────────────────────────────────────
 export const db = {
   // ── Users ──────────────────────────────────────────────────────────────────
@@ -269,7 +321,19 @@ export const db = {
 
   // ── Clients ────────────────────────────────────────────────────────────────
   async createClient(data: Omit<Client, 'id' | 'createdAt'>): Promise<Client> {
-    const { data: row, error } = await supabase.from('clients').insert(fromClient(data)).select().single();
+    const payload = fromClient(data);
+    const orgId = await resolveOrgId(data.createdBy);
+    if (!orgId) throw new Error('No se pudo preparar la organización del usuario. Intenta cerrar sesión e iniciar con Google nuevamente.');
+    payload.org_id = orgId;
+    let { data: row, error } = await supabase.from('clients').insert(payload).select().single();
+    if (error && /org_id|organización|organization/i.test(error.message || '')) {
+      const ensuredOrgId = await resolveOrgId(data.createdBy);
+      if (ensuredOrgId) {
+        const retry = await supabase.from('clients').insert({ ...payload, org_id: ensuredOrgId }).select().single();
+        row = retry.data;
+        error = retry.error;
+      }
+    }
     if (error) err('createClient', error);
     return toClient(row);
   },
@@ -371,11 +435,56 @@ export const db = {
     }
   },
 
+  async getOrgSetting<T>(userId: string, key: string, fallback: T): Promise<T> {
+    const orgId = await resolveOrgId(userId);
+    const localFallback = () => legacyLocalValue(key, fallback);
+    if (!orgId) return localFallback();
+    const { data, error } = await supabase
+      .from('org_settings')
+      .select('value')
+      .eq('org_id', orgId)
+      .eq('key', key)
+      .maybeSingle();
+    if (error) {
+      const value = localFallback();
+      if (value !== fallback) void this.setOrgSetting(userId, key, value);
+      return value;
+    }
+    if (data?.value === undefined || data?.value === null) {
+      const value = localFallback();
+      if (value !== fallback) void this.setOrgSetting(userId, key, value);
+      return value;
+    }
+    return data.value as T;
+  },
+
+  async setOrgSetting<T>(userId: string, key: string, value: T): Promise<void> {
+    const orgId = await resolveOrgId(userId);
+    if (!orgId) {
+      localStorage.setItem(key, JSON.stringify(value));
+      return;
+    }
+    const { error } = await supabase
+      .from('org_settings')
+      .upsert({ org_id: orgId, key, value, updated_at: new Date().toISOString() }, { onConflict: 'org_id,key' });
+    if (error) {
+      console.warn(`setOrgSetting fallback local (${key}):`, error.message);
+      localStorage.setItem(key, JSON.stringify(value));
+    }
+  },
+
   // ── Custom Fields ──────────────────────────────────────────────────────────
   async setCustomFields(clientId: string, fields: CustomField[]): Promise<void> {
     await supabase.from('custom_fields').delete().eq('client_id', clientId).not('label', 'like', '__setting:%');
-    if (fields.length > 0) {
-      const rows = fields.map(f => ({ id: f.id, client_id: clientId, label: f.label, value: f.value, field_type: f.fieldType }));
+    const cleanFields = fields.filter(f => f.label.trim() && !f.label.startsWith('__setting:'));
+    if (cleanFields.length > 0) {
+      const rows = cleanFields.map(f => ({
+        ...(f.id && f.id.length === 36 ? { id: f.id } : {}),
+        client_id: clientId,
+        label: f.label,
+        value: f.value,
+        field_type: f.fieldType,
+      }));
       const { error } = await supabase.from('custom_fields').insert(rows);
       if (error) err('setCustomFields', error);
     }
@@ -384,7 +493,9 @@ export const db = {
   async getCustomFields(clientId: string): Promise<CustomField[]> {
     const { data, error } = await supabase.from('custom_fields').select('*').eq('client_id', clientId);
     if (error) err('getCustomFields', error);
-    return (data || []).map(r => ({ id: r.id, clientId: r.client_id, label: r.label, value: r.value || '', fieldType: r.field_type as any }));
+    return (data || [])
+      .filter(r => !String(r.label || '').startsWith('__setting:'))
+      .map(r => ({ id: r.id, clientId: r.client_id, label: r.label, value: r.value || '', fieldType: r.field_type as any }));
   },
 
   // ── Transactions ───────────────────────────────────────────────────────────
