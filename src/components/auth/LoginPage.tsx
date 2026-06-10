@@ -14,6 +14,7 @@ const LoginPage: React.FC<Props> = ({ onLogin }) => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [isFirstTime, setIsFirstTime] = useState(false);
+  const googleAuthEnabled = auth.isGoogleAuthEnabled();
 
   useEffect(() => {
     db.getUsers().then(users => {
@@ -90,21 +91,25 @@ const LoginPage: React.FC<Props> = ({ onLogin }) => {
 
           {/* Form */}
           <form onSubmit={handleSubmit} className="space-y-5">
-            <button
-              type="button"
-              onClick={handleGoogle}
-              disabled={loading}
-              className="w-full bg-white hover:bg-slate-100 disabled:opacity-60 text-slate-900 font-black py-3.5 rounded-xl transition-all duration-200 text-sm flex items-center justify-center gap-3 shadow-lg"
-            >
-              <span className="w-5 h-5 rounded-full bg-white border border-slate-200 flex items-center justify-center font-black text-sm text-blue-600">G</span>
-              Continuar con Google
-            </button>
+            {googleAuthEnabled && (
+              <>
+                <button
+                  type="button"
+                  onClick={handleGoogle}
+                  disabled={loading}
+                  className="w-full bg-white hover:bg-slate-100 disabled:opacity-60 text-slate-900 font-black py-3.5 rounded-xl transition-all duration-200 text-sm flex items-center justify-center gap-3 shadow-lg"
+                >
+                  <span className="w-5 h-5 rounded-full bg-white border border-slate-200 flex items-center justify-center font-black text-sm text-blue-600">G</span>
+                  Continuar con Google
+                </button>
 
-            <div className="flex items-center gap-3">
-              <div className="h-px bg-slate-800 flex-1" />
-              <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">o con password</span>
-              <div className="h-px bg-slate-800 flex-1" />
-            </div>
+                <div className="flex items-center gap-3">
+                  <div className="h-px bg-slate-800 flex-1" />
+                  <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">o con password</span>
+                  <div className="h-px bg-slate-800 flex-1" />
+                </div>
+              </>
+            )}
 
             {/* Email */}
             <div>

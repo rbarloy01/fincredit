@@ -72,6 +72,10 @@ function toSession(user: SupabaseUser, profile: any): Session {
 }
 
 export const auth = {
+  isGoogleAuthEnabled(): boolean {
+    return String(import.meta.env.VITE_ENABLE_GOOGLE_AUTH || '').toLowerCase() === 'true';
+  },
+
   async createFirstUser(): Promise<void> {
     // Users are managed in Supabase Auth — restore session if Supabase has one
     const { data: { session } } = await supabase.auth.getSession();
@@ -91,11 +95,19 @@ export const auth = {
   },
 
   async loginWithGoogle(): Promise<void> {
+    if (!auth.isGoogleAuthEnabled()) {
+      throw new Error('El acceso con Google no está habilitado. Ingresa con correo y contraseña.');
+    }
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: { redirectTo: window.location.origin },
     });
-    if (error) throw new Error(error.message || 'No se pudo iniciar sesión con Google');
+    if (error) {
+      if (/unsupported provider|provider is not enabled/i.test(error.message || '')) {
+        throw new Error('Google no está habilitado en Supabase Auth. Activa el proveedor Google o usa correo y contraseña.');
+      }
+      throw new Error(error.message || 'No se pudo iniciar sesión con Google');
+    }
   },
 
   logout(): void {
