@@ -1,7 +1,8 @@
 // FinMonitor DB — Supabase backend
 import { supabase } from '../lib/supabase';
 
-export type Role = 'manager' | 'analyst';
+export type Role = 'manager' | 'analyst' | 'pending';
+export type ActiveRole = Exclude<Role, 'pending'>;
 
 export interface User {
   id: string;
@@ -247,7 +248,7 @@ async function resolveOrgId(userId?: string): Promise<string | null> {
         userId,
         userEmail: authUser?.id === userId ? authUser.email || '' : '',
         userName: authUser?.id === userId ? authUser.user_metadata?.full_name || authUser.user_metadata?.name || authUser.email || 'Usuario' : 'Usuario',
-        role: 'analyst',
+        role: 'pending',
         organizationName: 'Syscap',
         slug: 'syscap',
       }),
@@ -290,10 +291,14 @@ export const db = {
     return { id: data.id, name: data.name, email: data.email || '', role: data.role, createdAt: data.created_at };
   },
 
-  async createUser(data: { name: string; email: string; password: string; role: Role }): Promise<User> {
+  async createUser(data: { name: string; email: string; password: string; role: ActiveRole }): Promise<User> {
+    const { data: authData } = await supabase.auth.getSession();
     const res = await fetch('/api/admin/users/create', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authData.session?.access_token ? { Authorization: `Bearer ${authData.session.access_token}` } : {}),
+      },
       body: JSON.stringify(data),
     });
     const json = await res.json();
@@ -311,9 +316,13 @@ export const db = {
   },
 
   async deleteUser(id: string): Promise<void> {
+    const { data: authData } = await supabase.auth.getSession();
     const res = await fetch('/api/admin/users/delete', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authData.session?.access_token ? { Authorization: `Bearer ${authData.session.access_token}` } : {}),
+      },
       body: JSON.stringify({ userId: id }),
     });
     if (!res.ok) { const j = await res.json(); throw new Error(j.error || 'Error al eliminar usuario'); }

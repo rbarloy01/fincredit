@@ -1,4 +1,4 @@
-import { readJson, sendJson } from '../../_helpers';
+import { readJson, sendJson } from '../../_helpers.js';
 
 async function restJson(url: string, serviceKey: string, method: string, body?: unknown) {
   const response = await fetch(url, {
@@ -40,12 +40,20 @@ async function ensureProfile(supabaseUrl: string, serviceKey: string, body: any,
   if (!body.userId) return;
   const name = String(body.userName || body.name || body.userEmail || 'Usuario');
   const email = String(body.userEmail || body.email || '').toLowerCase();
-  const role = body.role === 'manager' ? 'manager' : 'analyst';
-  await restJson(`${supabaseUrl}/rest/v1/profiles?on_conflict=id`, serviceKey, 'POST', {
+  const existing = await restJson(`${supabaseUrl}/rest/v1/profiles?select=id,role&id=eq.${encodeURIComponent(body.userId)}&limit=1`, serviceKey, 'GET');
+  if (existing?.[0]?.id) {
+    await restJson(`${supabaseUrl}/rest/v1/profiles?id=eq.${encodeURIComponent(body.userId)}`, serviceKey, 'PATCH', {
+      name,
+      email,
+      org_id: orgId,
+    });
+    return;
+  }
+  await restJson(`${supabaseUrl}/rest/v1/profiles`, serviceKey, 'POST', {
     id: body.userId,
     name,
     email,
-    role,
+    role: 'pending',
     org_id: orgId,
   });
 }

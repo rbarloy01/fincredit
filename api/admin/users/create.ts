@@ -1,4 +1,4 @@
-import { forwardJson, readJson, sendJson } from '../../_helpers';
+import { forwardJson, readJson, requireManager, sendJson } from '../../_helpers.js';
 
 async function restJson(url: string, serviceKey: string, method: string, body?: unknown) {
   const response = await fetch(url, {
@@ -35,6 +35,8 @@ export default async function handler(req: any, res: any) {
     const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
     const serviceKey = process.env.SUPABASE_SERVICE_KEY;
     if (!supabaseUrl || !serviceKey) return sendJson(res, 500, { error: 'Supabase admin env missing' });
+    const access = await requireManager(req, supabaseUrl, serviceKey);
+    if (!access.ok) return sendJson(res, access.status, { error: access.error });
 
     const authRes = await forwardJson(`${supabaseUrl}/auth/v1/admin/users`, {
       email: body.email,
@@ -50,11 +52,11 @@ export default async function handler(req: any, res: any) {
       id: user.id,
       name: body.name,
       email: String(body.email || '').toLowerCase(),
-      role: body.role,
+      role: body.role === 'manager' ? 'manager' : 'analyst',
       org_id: orgId,
     }, { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, Prefer: 'return=minimal' });
 
-    sendJson(res, 200, { id: user.id, name: body.name, email: body.email, role: body.role, createdAt: user.created_at });
+    sendJson(res, 200, { id: user.id, name: body.name, email: body.email, role: body.role === 'manager' ? 'manager' : 'analyst', createdAt: user.created_at });
   } catch (error: any) {
     sendJson(res, 500, { error: error?.message || 'Error interno' });
   }

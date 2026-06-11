@@ -36,13 +36,29 @@ export interface GlobalCovenantTemplate {
   updatedAt: string;
 }
 
+export interface ParsedAccountCovenantMemory {
+  id: string;
+  accountName: string;
+  statementType: FinancialStatement_DB['rawLineItems'][number]['statementType'] | 'otro';
+  covenantName: string;
+  covenantFormula: string;
+  reason: string;
+  confidence: number;
+  source: 'manual' | 'ai' | 'heuristic';
+  seenCount: number;
+  updatedAt: string;
+}
+
 export const CONSOLIDATION_RULES_KEY = 'finmonitor_account_consolidation_rules';
 export const GLOBAL_COVENANT_TEMPLATES_KEY = 'finmonitor_global_covenant_templates';
+export const PARSED_ACCOUNT_COVENANT_MEMORY_KEY = 'finmonitor_parsed_account_covenant_memory';
 
 let cachedCustomRules: AccountConsolidationRule[] = [];
 let cachedTemplates: GlobalCovenantTemplate[] = [];
+let cachedAccountCovenantMemory: ParsedAccountCovenantMemory[] = [];
 let rulesCacheHydrated = false;
 let templatesCacheHydrated = false;
+let accountCovenantMemoryHydrated = false;
 
 export const METRIC_LABELS: Record<ConsolidationMetric, string> = {
   revenue: 'Ingresos',
@@ -130,6 +146,30 @@ export async function saveGlobalCovenantTemplates(userId: string, templates: Glo
   await db.setOrgSetting(userId, GLOBAL_COVENANT_TEMPLATES_KEY, templates);
 }
 
+export function loadParsedAccountCovenantMemory(): ParsedAccountCovenantMemory[] {
+  if (!accountCovenantMemoryHydrated) {
+    cachedAccountCovenantMemory = readJson<ParsedAccountCovenantMemory[]>(PARSED_ACCOUNT_COVENANT_MEMORY_KEY, []);
+    accountCovenantMemoryHydrated = true;
+  }
+  return cachedAccountCovenantMemory;
+}
+
+export async function loadOrgParsedAccountCovenantMemory(userId: string): Promise<ParsedAccountCovenantMemory[]> {
+  cachedAccountCovenantMemory = await db.getOrgSetting<ParsedAccountCovenantMemory[]>(
+    userId,
+    PARSED_ACCOUNT_COVENANT_MEMORY_KEY,
+    readJson<ParsedAccountCovenantMemory[]>(PARSED_ACCOUNT_COVENANT_MEMORY_KEY, [])
+  );
+  accountCovenantMemoryHydrated = true;
+  return cachedAccountCovenantMemory;
+}
+
+export async function saveParsedAccountCovenantMemory(userId: string, memory: ParsedAccountCovenantMemory[]) {
+  cachedAccountCovenantMemory = memory;
+  accountCovenantMemoryHydrated = true;
+  await db.setOrgSetting(userId, PARSED_ACCOUNT_COVENANT_MEMORY_KEY, memory);
+}
+
 export function metricAliases(metric: ConsolidationMetric): string[] {
   return loadConsolidationRules().filter(r => r.metric === metric).flatMap(r => r.aliases);
 }
@@ -193,4 +233,62 @@ export function templatesFromExistingCovenants(covenants: Covenant_DB[]): Global
       updatedAt: new Date().toISOString(),
     };
   });
+}
+
+function covenantSearchText(covenant: Pick<Covenant_DB, 'name' | 'formula' | 'description'>): string {
+  return cleanText(`${covenant.name} ${covenant.formula || ''} ${covenant.description || ''}`);
+}
+
+function accountMetricHints(accountName: string, statementType?: string | null): string[] {
+  const metric = inferMetricForAccount(accountName, statementType);
+  if (!metric) return [];
+  return [metric, METRIC_LABELS[metric], ...metricAliases(metric)].map(cleanText);
+}
+
+export function inferParsedAccountCovenantMemory(
+  statements: FinancialStatement_DB[],
+  covenants: Covenant_DB[],
+  existing: ParsedAccountCovenantMemory[] = []
+): ParsedAccountCovenantMemory[] {
+  const byKey = new Map<string, ParsedAccountCovenantMemory>();
+  existing.forEach(item => {
+    byKey.set(`${cleanText(item.accountName)}:${item.statementType}:${cleanText(item.covenantName)}:${cleanText(item.covenantFormula)}`, item);
+  });
+
+  const accounts = new Map<string, { name: string; statementType: ParsedAccountCovenantMemory['statementType'] }>();
+  statements.forEach(stmt => {
+    stmt.rawLineItems.forEach(item => {
+      const statementType = item.statementType || 'otro';
+      accounts.set(`${statementType}:${cleanText(item.name)}`, { name: item.name, statementType });
+    });
+  });
+
+  accounts.forEach(account => {
+    const accountText = cleanText(account.name);
+    const hints = accountMetricHints(account.name, account.statementType);
+    covenants.filter(c => c.type === 'financial').forEach(covenant => {
+      const covenantText = covenantSearchText(covenant);
+      const directHit = accountText.length >= 4 && covenantText.includes(accountText);
+      const metricHit = hints.some(hint => hint.length >= 4 && covenantText.includes(hint));
+      if (!directHit && !metricHit) return;
+
+      const id = `mem-${cleanText(account.name)}-${cleanText(covenant.name)}-${Date.now()}`;
+      const key = `${cleanText(account.name)}:${account.statementType}:${cleanText(covenant.name)}:${cleanText(covenant.formula || covenant.name)}`;
+      const prev = byKey.get(key);
+      byKey.set(key, {
+        id: prev?.id || id,
+        accountName: account.name,
+        statementType: account.statementType,
+        covenantName: covenant.name,
+        covenantFormula: covenant.formula || covenant.name,
+        reason: directHit ? 'La cuenta aparece en el texto/fórmula del covenant.' : 'La cuenta mapea a una métrica usada por el covenant.',
+        confidence: prev?.confidence ?? (directHit ? 0.82 : 0.7),
+        source: prev?.source || 'heuristic',
+        seenCount: Math.max(prev?.seenCount || 0, 1),
+        updatedAt: new Date().toISOString(),
+      });
+    });
+  });
+
+  return Array.from(byKey.values()).sort((a, b) => b.confidence - a.confidence || b.seenCount - a.seenCount || a.accountName.localeCompare(b.accountName));
 }

@@ -13,6 +13,18 @@ export interface RatioResult {
 
 const norm = (v: string) => v.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
 
+export const metricLabels: Record<string, string> = {
+  revenue: 'Ingresos',
+  ebitda: 'EBITDA',
+  interestExpense: 'Gasto financiero',
+  netIncome: 'Utilidad neta',
+  currentAssets: 'Activo corriente',
+  currentLiabilities: 'Pasivo corriente',
+  totalDebt: 'Deuda total',
+  totalAssets: 'Total activo',
+  equity: 'Capital contable',
+};
+
 interface LocalConcept {
   id: string;
   name: string;
@@ -227,11 +239,16 @@ function evaluateExpressionTokens(tokens: string[], stmt: FinancialStatement_DB)
 }
 
 export function formulaLabel(formula: string, labels: Record<string, string> = {}): string {
-  if (!formula.startsWith('expr:')) return formula;
+  const readableRef = (key: string) => labels[key] || metricLabels[key] || key;
+  if (formula.startsWith('ratio:')) {
+    const [num, den] = formula.slice('ratio:'.length).split('/');
+    return num && den ? `${readableRef(num)} / ${readableRef(den)}` : formula;
+  }
+  if (!formula.startsWith('expr:')) return metricLabels[formula] || formula;
   try {
     const tokens = JSON.parse(formula.slice('expr:'.length)) as string[];
     return tokens.map(t => {
-      if (t.startsWith('ref:')) return labels[t.slice(4)] || t.slice(4);
+      if (t.startsWith('ref:')) return readableRef(t.slice(4));
       if (t.startsWith('num:')) return t.slice(4);
       return t;
     }).join(' ');

@@ -7,7 +7,7 @@ import jsPDF from 'jspdf';
 import {
   Client, Transaction, Covenant_DB, FinancialStatement_DB, LoanTape_DB,
 } from '../db/index';
-import { evaluateFormula, formulaLabel, getMetric, rawAccountKey } from './financialMetrics';
+import { evaluateFormula, formulaLabel, getMetric, metricLabels, rawAccountKey } from './financialMetrics';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -23,6 +23,19 @@ export interface DefinedConcept {
   id: string;
   name: string;
   tokens: string[];
+}
+
+function formulaLabelsFromStatements(statements: FinancialStatement_DB[], concepts: DefinedConcept[] = []): Record<string, string> {
+  const labels: Record<string, string> = { ...metricLabels };
+  statements.forEach(stmt => {
+    stmt.rawLineItems.forEach(item => {
+      labels[`account:${rawAccountKey(item)}`] = item.name;
+    });
+  });
+  concepts.forEach(concept => {
+    labels[`concept:${concept.id}`] = concept.name;
+  });
+  return labels;
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
@@ -274,8 +287,8 @@ export function buildFichaContractual(
     ...transactions.map(t => [t.name, t.creditType, t.originalAmount, t.currency, fmtDate(t.signedAt), fmtDate(t.maturityAt)]),
     [],
     ['C. COVENANTS FINANCIEROS'],
-    ['Covenant', 'Fórmula', 'Operador', 'Umbral'],
-    ...financial.map(c => [c.name, c.formula, c.operator, c.threshold]),
+    ['Covenant', 'Fórmula legible', 'Operador', 'Umbral'],
+    ...financial.map(c => [c.name, formulaLabel(c.formula || c.name, metricLabels), c.operator, c.threshold]),
     [],
     ['D. CALENDARIO DE DOCUMENTOS'],
     ['Documento', 'Periodicidad'],
@@ -618,7 +631,7 @@ export function buildDefinedConcepts(statements: FinancialStatement_DB[], concep
 export function buildCovenantDataSheet(statements: FinancialStatement_DB[], concepts: DefinedConcept[] = []): SheetDef {
   const periods = normalizedPeriods(statements);
   const rows: SheetDef['rows'] = [
-    ['KEY', 'Tipo', 'Nombre', ...periods.map(p => p.label)],
+    ['Referencia interna (no editar)', 'Tipo', 'Nombre visible', ...periods.map(p => p.label)],
   ];
   const metrics = [
     ['revenue', 'Ingresos'],
@@ -776,6 +789,7 @@ export function buildMonitoreo(
 ): SheetDef {
   const financial = covenants.filter(c => c.type === 'financial');
   const periods = normalizedPeriods(statements);
+  const labels = formulaLabelsFromStatements(statements, concepts);
 
   if (financial.length === 0 || periods.length === 0) {
     return { name: 'Monitoreo', rows: [['Sin covenants financieros definidos']] };
@@ -784,15 +798,16 @@ export function buildMonitoreo(
   const rows: SheetDef['rows'] = [
     ['MONITOREO DE COVENANTS — ' + new Date().getFullYear()],
     [],
-    ['COVENANT', 'FÓRMULA', 'OPERADOR', 'UMBRAL', ...periods.map(p => p.label)],
+    ['COVENANT', 'FÓRMULA LEGIBLE', 'OPERADOR', 'UMBRAL', ...periods.map(p => p.label)],
     [],
   ];
 
   for (const cov of financial) {
     const valueRow = rows.length + 1;
-    const values = periods.map((p, i) => formulaToExcel(cov.formulaByPeriod?.[p.stmt.period] || cov.formula || cov.name, `${colName(5 + i)}$3`));
-    rows.push([cov.name, cov.formula, cov.operator, cov.threshold ? parseFloat(cov.threshold) : null, ...values]);
-    rows.push(['', 'Fórmula Excel visible en cada celda', '', 'UMBRAL', ...periods.map(() => cov.threshold ? parseFloat(cov.threshold) : null)]);
+    const formula = cov.formula || cov.name;
+    const values = periods.map((p, i) => formulaToExcel(cov.formulaByPeriod?.[p.stmt.period] || formula, `${colName(5 + i)}$3`));
+    rows.push([cov.name, formulaLabel(formula, labels), cov.operator, cov.threshold ? parseFloat(cov.threshold) : null, ...values]);
+    rows.push(['', 'Cálculo automático con referencias internas; no editar las celdas de valor', '', 'UMBRAL', ...periods.map(() => cov.threshold ? parseFloat(cov.threshold) : null)]);
     if (cov.operator !== 'none' && cov.threshold) {
       rows.push([
         '',

@@ -1,4 +1,4 @@
-import { forwardJson, readJson, sendJson } from './_helpers';
+import { forwardJson, readJson, sendJson } from './_helpers.js';
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' });

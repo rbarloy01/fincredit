@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS profiles (
   id         UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   name       TEXT NOT NULL,
   email      TEXT,
-  role       TEXT NOT NULL DEFAULT 'analyst' CHECK (role IN ('manager', 'analyst')),
+  role       TEXT NOT NULL DEFAULT 'pending' CHECK (role IN ('manager', 'analyst', 'pending')),
   org_id     UUID REFERENCES organizations(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -231,20 +231,53 @@ ALTER TABLE document_requirements ENABLE ROW LEVEL SECURITY;
 ALTER TABLE monitoring_alerts     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_events          ENABLE ROW LEVEL SECURITY;
 
--- Authenticated users have full access (tighten per-role later if needed)
-CREATE POLICY "auth_all" ON profiles             FOR ALL TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "auth_all" ON organizations        FOR ALL TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "auth_all" ON clients              FOR ALL TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "auth_all" ON custom_fields        FOR ALL TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "auth_all" ON client_settings      FOR ALL TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "auth_all" ON org_settings         FOR ALL TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "auth_all" ON transactions         FOR ALL TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "auth_all" ON contract_files       FOR ALL TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "auth_all" ON covenants            FOR ALL TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "auth_all" ON covenant_annotations FOR ALL TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "auth_all" ON financial_statements FOR ALL TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "auth_all" ON loan_tapes           FOR ALL TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "auth_all" ON monitoring_periods   FOR ALL TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "auth_all" ON document_requirements FOR ALL TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "auth_all" ON monitoring_alerts    FOR ALL TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "auth_all" ON audit_events         FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE OR REPLACE FUNCTION public.current_user_role()
+RETURNS TEXT
+LANGUAGE SQL
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT role FROM profiles WHERE id = auth.uid()
+$$;
+
+CREATE OR REPLACE FUNCTION public.is_approved_user()
+RETURNS BOOLEAN
+LANGUAGE SQL
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT COALESCE(public.current_user_role() IN ('manager', 'analyst'), false)
+$$;
+
+CREATE OR REPLACE FUNCTION public.is_manager()
+RETURNS BOOLEAN
+LANGUAGE SQL
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT COALESCE(public.current_user_role() = 'manager', false)
+$$;
+
+CREATE POLICY "profile_read_self_or_manager" ON profiles
+  FOR SELECT TO authenticated
+  USING (id = auth.uid() OR public.is_manager());
+CREATE POLICY "profile_update_manager" ON profiles
+  FOR UPDATE TO authenticated
+  USING (public.is_manager())
+  WITH CHECK (true);
+
+CREATE POLICY "approved_all" ON organizations         FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
+CREATE POLICY "approved_all" ON clients               FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
+CREATE POLICY "approved_all" ON custom_fields         FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
+CREATE POLICY "approved_all" ON client_settings       FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
+CREATE POLICY "approved_all" ON org_settings          FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
+CREATE POLICY "approved_all" ON transactions          FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
+CREATE POLICY "approved_all" ON contract_files        FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
+CREATE POLICY "approved_all" ON covenants             FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
+CREATE POLICY "approved_all" ON covenant_annotations  FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
+CREATE POLICY "approved_all" ON financial_statements  FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
+CREATE POLICY "approved_all" ON loan_tapes            FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
+CREATE POLICY "approved_all" ON monitoring_periods    FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
+CREATE POLICY "approved_all" ON document_requirements FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
+CREATE POLICY "approved_all" ON monitoring_alerts     FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
+CREATE POLICY "approved_all" ON audit_events          FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());

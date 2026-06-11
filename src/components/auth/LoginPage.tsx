@@ -1,6 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { auth, Session } from '../../services/auth';
-import { db } from '../../db/index';
 import { Lock, Mail, Eye, EyeOff, ShieldCheck } from 'lucide-react';
 
 interface Props {
@@ -13,14 +12,7 @@ const LoginPage: React.FC<Props> = ({ onLogin }) => {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [isFirstTime, setIsFirstTime] = useState(false);
   const googleAuthEnabled = auth.isGoogleAuthEnabled();
-
-  useEffect(() => {
-    db.getUsers().then(users => {
-      setIsFirstTime(users.length === 0);
-    });
-  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -66,21 +58,6 @@ const LoginPage: React.FC<Props> = ({ onLogin }) => {
             <h1 className="text-3xl font-black text-white tracking-tight">FinMonitor</h1>
             <p className="text-slate-400 text-sm mt-1 text-center">Sistema de Monitoreo de Crédito IFNB</p>
           </div>
-
-          {/* First-time notice */}
-          {isFirstTime && (
-            <div className="bg-indigo-950/60 border border-indigo-700/50 rounded-2xl p-4 mb-6">
-              <p className="text-indigo-300 text-xs font-bold uppercase tracking-widest mb-2">Primera configuración</p>
-              <p className="text-indigo-200 text-sm">
-                Acceso inicial con credenciales predeterminadas:
-              </p>
-              <div className="mt-2 space-y-1">
-                <p className="text-indigo-100 text-sm font-mono">admin@finmonitor.mx</p>
-                <p className="text-indigo-100 text-sm font-mono">Admin1234!</p>
-              </div>
-              <p className="text-indigo-400 text-xs mt-2">Cambia tu contraseña en Configuración después de ingresar.</p>
-            </div>
-          )}
 
           {/* Error */}
           {error && (

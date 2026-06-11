@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { db, User } from '../../db/index';
+import { db, User, Role } from '../../db/index';
 import { Session, auth } from '../../services/auth';
 import { AIProvider, AISettings, loadAISettings, saveAISettings, testConnection } from '../../services/ai';
 import { Key, Users, Save, Plus, Trash2, Eye, EyeOff, Check, X, Info, Zap } from 'lucide-react';
@@ -78,6 +78,15 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
     if (!confirm('¿Eliminar este usuario?')) return;
     await db.deleteUser(userId);
     setUsers(prev => prev.filter(u => u.id !== userId));
+  };
+
+  const handleUpdateRole = async (userId: string, role: Role) => {
+    if (userId === session.userId && role !== 'manager') {
+      alert('No puedes quitarte tu propio acceso de manager');
+      return;
+    }
+    await db.updateUser(userId, { role });
+    setUsers(prev => prev.map(user => user.id === userId ? { ...user, role } : user));
   };
 
   const inp = 'bg-slate-50 border border-slate-200 text-slate-900 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 transition-all w-full';
@@ -199,9 +208,22 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
                     <p className="font-bold text-slate-900 text-sm truncate">{user.name}</p>
                     <p className="text-xs text-slate-500 truncate">{user.email}</p>
                   </div>
-                  <span className={`text-xs font-black px-2.5 py-1 rounded-full border ${user.role === 'manager' ? 'bg-indigo-100 text-indigo-800 border-indigo-200' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
-                    {user.role === 'manager' ? 'Manager' : 'Analista'}
-                  </span>
+                  <select
+                    value={user.role}
+                    onChange={e => handleUpdateRole(user.id, e.target.value as Role)}
+                    disabled={user.id === session.userId}
+                    className={`text-xs font-black px-2.5 py-1 rounded-full border outline-none ${
+                      user.role === 'manager'
+                        ? 'bg-indigo-100 text-indigo-800 border-indigo-200'
+                        : user.role === 'pending'
+                          ? 'bg-amber-100 text-amber-800 border-amber-200'
+                          : 'bg-slate-100 text-slate-600 border-slate-200'
+                    } disabled:opacity-70`}
+                  >
+                    <option value="pending">Pendiente</option>
+                    <option value="analyst">Analista</option>
+                    <option value="manager">Manager</option>
+                  </select>
                   {user.id === session.userId ? (
                     <span className="text-xs text-slate-400">(tú)</span>
                   ) : (

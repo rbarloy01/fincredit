@@ -87,6 +87,32 @@ const App: React.FC = () => {
     return <LoginPage onLogin={handleLogin} />;
   }
 
+  if (session.role === 'pending') {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center px-4">
+        <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-10 text-center shadow-2xl">
+          <div className="w-16 h-16 bg-amber-500 rounded-2xl flex items-center justify-center mx-auto mb-5">
+            <ShieldCheck className="w-8 h-8 text-white" />
+          </div>
+          <h1 className="text-2xl font-black text-white tracking-tight">Acceso pendiente</h1>
+          <p className="text-slate-400 text-sm mt-3 leading-6">
+            Tu cuenta de Google ya fue registrada, pero un manager debe aprobar tu acceso antes de ver la información del sistema.
+          </p>
+          <div className="mt-6 rounded-2xl bg-slate-800 border border-slate-700 px-4 py-3">
+            <p className="text-xs text-slate-500 font-bold uppercase tracking-widest">Cuenta</p>
+            <p className="text-sm text-slate-200 font-bold mt-1 break-all">{session.userEmail}</p>
+          </div>
+          <button
+            onClick={handleLogout}
+            className="mt-6 w-full bg-white hover:bg-slate-100 text-slate-900 font-black py-3 rounded-xl text-sm"
+          >
+            Cerrar sesión
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   const navItems = [
     { id: 'clients' as Route, label: 'Clientes', icon: Building2 },
     { id: 'benchmarking' as Route, label: 'Benchmarking', icon: BarChart3 },

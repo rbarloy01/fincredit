@@ -112,14 +112,46 @@ async function ensureOrganization(supabaseUrl: string, serviceKey: string, organ
 
 async function ensureProfile(supabaseUrl: string, serviceKey: string, body: any, orgId: string): Promise<void> {
   if (!body.userId) return;
-  const profileRes = await restJson(`${supabaseUrl}/rest/v1/profiles?on_conflict=id`, serviceKey, 'POST', {
+  const foundRes = await restJson(`${supabaseUrl}/rest/v1/profiles?select=id,role&id=eq.${encodeURIComponent(body.userId)}&limit=1`, serviceKey, 'GET');
+  if (foundRes.status >= 300) throw new Error(parseJson(foundRes.body, {}).message || 'Error al buscar perfil');
+  if (parseJson(foundRes.body, [])?.[0]?.id) {
+    const updateRes = await restJson(`${supabaseUrl}/rest/v1/profiles?id=eq.${encodeURIComponent(body.userId)}`, serviceKey, 'PATCH', {
+      name: String(body.userName || body.name || body.userEmail || 'Usuario'),
+      email: String(body.userEmail || body.email || '').toLowerCase(),
+      org_id: orgId,
+    });
+    if (updateRes.status >= 300) throw new Error(parseJson(updateRes.body, {}).message || 'Error al actualizar perfil');
+    return;
+  }
+  const profileRes = await restJson(`${supabaseUrl}/rest/v1/profiles`, serviceKey, 'POST', {
     id: body.userId,
     name: String(body.userName || body.name || body.userEmail || 'Usuario'),
     email: String(body.userEmail || body.email || '').toLowerCase(),
-    role: body.role === 'manager' ? 'manager' : 'analyst',
+    role: 'pending',
     org_id: orgId,
   });
   if (profileRes.status >= 300) throw new Error(parseJson(profileRes.body, {}).message || 'Error al preparar perfil');
+}
+
+async function requireManager(req: any, supabaseUrl: string, serviceKey: string): Promise<{ ok: boolean; status: number; error?: string }> {
+  const raw = req.headers?.authorization || req.headers?.Authorization || '';
+  const token = String(raw).replace(/^Bearer\s+/i, '').trim();
+  if (!token) return { ok: false, status: 401, error: 'No autenticado' };
+
+  const userRes = await fetch(`${supabaseUrl}/auth/v1/user`, {
+    headers: { apikey: serviceKey, Authorization: `Bearer ${token}` },
+  });
+  const user = parseJson(await userRes.text(), null);
+  if (userRes.status >= 300 || !user?.id) return { ok: false, status: 401, error: 'Sesión inválida' };
+
+  const profileRes = await fetch(`${supabaseUrl}/rest/v1/profiles?select=role&id=eq.${encodeURIComponent(user.id)}&limit=1`, {
+    headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+  });
+  const profile = parseJson(await profileRes.text(), []);
+  if (profileRes.status >= 300) return { ok: false, status: 500, error: 'No se pudo verificar permisos' };
+  if (profile?.[0]?.role !== 'manager') return { ok: false, status: 403, error: 'Solo managers pueden administrar usuarios' };
+
+  return { ok: true, status: 200 };
 }
 
 export default defineConfig(({ mode }) => {
@@ -203,6 +235,8 @@ export default defineConfig(({ mode }) => {
               const body = JSON.parse(await readBody(req));
               const supabaseUrl = env.SUPABASE_URL;
               const serviceKey = env.SUPABASE_SERVICE_KEY;
+              const access = await requireManager(req, supabaseUrl, serviceKey);
+              if (!access.ok) { res.statusCode = access.status; res.end(JSON.stringify({ error: access.error })); return; }
               // 1. Create auth user
               const authRes = await postJson(
                 `${supabaseUrl}/auth/v1/admin/users`,
@@ -217,12 +251,12 @@ export default defineConfig(({ mode }) => {
               await postJson(
                 `${supabaseUrl}/rest/v1/profiles`,
                 serviceKey,
-                { id: user.id, name: body.name, email: body.email.toLowerCase(), role: body.role, org_id: orgId },
+                { id: user.id, name: body.name, email: body.email.toLowerCase(), role: body.role === 'manager' ? 'manager' : 'analyst', org_id: orgId },
                 { apikey: serviceKey, 'Content-Type': 'application/json', Prefer: 'return=minimal' }
               );
               res.statusCode = 200;
               res.setHeader('Content-Type', 'application/json');
-              res.end(JSON.stringify({ id: user.id, name: body.name, email: body.email, role: body.role, createdAt: user.created_at }));
+              res.end(JSON.stringify({ id: user.id, name: body.name, email: body.email, role: body.role === 'manager' ? 'manager' : 'analyst', createdAt: user.created_at }));
             } catch (error: any) { res.statusCode = 500; res.end(JSON.stringify({ error: error?.message || 'Error interno' })); }
           });
 
@@ -232,6 +266,8 @@ export default defineConfig(({ mode }) => {
               const body = JSON.parse(await readBody(req));
               const supabaseUrl = env.SUPABASE_URL;
               const serviceKey = env.SUPABASE_SERVICE_KEY;
+              const access = await requireManager(req, supabaseUrl, serviceKey);
+              if (!access.ok) { res.statusCode = access.status; res.end(JSON.stringify({ error: access.error })); return; }
               const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
                 const target = new URL(`${supabaseUrl}/auth/v1/admin/users/${body.userId}`);
                 const request = https.request({

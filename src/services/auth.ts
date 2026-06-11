@@ -1,7 +1,7 @@
 import { supabase } from '../lib/supabase';
 import type { User as SupabaseUser } from '@supabase/supabase-js';
 
-export type Role = 'manager' | 'analyst';
+export type Role = 'manager' | 'analyst' | 'pending';
 
 const SESSION_KEY = 'finmonitor_session';
 
@@ -25,7 +25,7 @@ async function ensureOrg(user: SupabaseUser): Promise<string | null> {
         userId: user.id,
         userEmail: user.email || '',
         userName: profileName(user),
-        role: 'analyst',
+        role: 'pending',
         organizationName: 'Syscap',
         slug: 'syscap',
       }),
@@ -45,11 +45,14 @@ async function ensureProfile(user: SupabaseUser): Promise<any> {
   }
 
   const orgId = await ensureOrg(user);
+  const { data: ensured } = await supabase.from('profiles').select('*').eq('id', user.id).maybeSingle();
+  if (ensured) return { ...ensured, org_id: ensured.org_id || orgId || undefined };
+
   const row: any = {
     id: user.id,
     name: profileName(user),
     email: user.email || '',
-    role: 'analyst',
+    role: 'pending',
     ...(orgId ? { org_id: orgId } : {}),
   };
   let { data, error } = await supabase.from('profiles').insert(row).select().single();
@@ -67,7 +70,7 @@ function toSession(user: SupabaseUser, profile: any): Session {
     userId: user.id,
     userName: profile?.name || user.user_metadata?.full_name || user.email || '',
     userEmail: user.email || profile?.email || '',
-    role: (profile?.role as Role) || 'analyst',
+    role: (profile?.role as Role) || 'pending',
   };
 }
 

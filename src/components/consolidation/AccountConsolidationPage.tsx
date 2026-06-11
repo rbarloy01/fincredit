@@ -6,11 +6,16 @@ import {
   ConsolidationMetric,
   GlobalCovenantTemplate,
   METRIC_LABELS,
+  ParsedAccountCovenantMemory,
   cleanText,
   inferMetricForAccount,
+  inferParsedAccountCovenantMemory,
   loadConsolidationRules,
   loadGlobalCovenantTemplates,
+  loadOrgParsedAccountCovenantMemory,
   loadOrgConsolidationRules,
+  loadParsedAccountCovenantMemory,
+  saveParsedAccountCovenantMemory,
   saveConsolidationRules,
   saveGlobalCovenantTemplates,
   templatesFromExistingCovenants,
@@ -33,8 +38,10 @@ const AccountConsolidationPage: React.FC<Props> = ({ aiSettings, session }) => {
   const [covenants, setCovenants] = useState<Covenant_DB[]>([]);
   const [rules, setRules] = useState<AccountConsolidationRule[]>(loadConsolidationRules);
   const [templates, setTemplates] = useState<GlobalCovenantTemplate[]>(() => loadGlobalCovenantTemplates());
+  const [accountCovenantMemory, setAccountCovenantMemory] = useState<ParsedAccountCovenantMemory[]>(() => loadParsedAccountCovenantMemory());
   const [draftAliases, setDraftAliases] = useState('');
   const [draftMetric, setDraftMetric] = useState<ConsolidationMetric>('totalDebt');
+  const [draftCovenantByAccount, setDraftCovenantByAccount] = useState<Record<string, string>>({});
   const [running, setRunning] = useState(false);
 
   const load = async () => {
@@ -48,12 +55,22 @@ const AccountConsolidationPage: React.FC<Props> = ({ aiSettings, session }) => {
       setClients(loadedClients);
       setStatements(bundles.flatMap(b => b.stmts));
       setCovenants(bundles.flatMap(b => b.covs));
-      const [sharedRules, mergedTemplates] = await Promise.all([
+      const [sharedRules, mergedTemplates, storedMemory] = await Promise.all([
         loadOrgConsolidationRules(session.userId),
         upsertCovenantTemplates(session.userId, templatesFromExistingCovenants(bundles.flatMap(b => b.covs))),
+        loadOrgParsedAccountCovenantMemory(session.userId),
       ]);
       setRules(sharedRules);
       setTemplates(mergedTemplates);
+      const inferredMemory = inferParsedAccountCovenantMemory(
+        bundles.flatMap(b => b.stmts),
+        bundles.flatMap(b => b.covs),
+        storedMemory
+      );
+      setAccountCovenantMemory(inferredMemory);
+      if (inferredMemory.length !== storedMemory.length) {
+        await saveParsedAccountCovenantMemory(session.userId, inferredMemory);
+      }
     } finally {
       setRunning(false);
     }
@@ -167,6 +184,51 @@ const AccountConsolidationPage: React.FC<Props> = ({ aiSettings, session }) => {
     await saveGlobalCovenantTemplates(session.userId, next);
   };
 
+  const covenantOptions = useMemo(() => {
+    const byKey = new Map<string, { key: string; name: string; formula: string; description: string }>();
+    covenants.filter(c => c.type === 'financial').forEach(c => {
+      const key = `cov:${c.id}`;
+      byKey.set(key, { key, name: c.name, formula: c.formula || c.name, description: c.description || '' });
+    });
+    templates.forEach(t => {
+      const key = `tpl:${cleanText(t.name + t.formula)}`;
+      if (!byKey.has(key)) byKey.set(key, { key, name: t.name, formula: t.formula || t.name, description: t.description || '' });
+    });
+    return Array.from(byKey.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [covenants, templates]);
+
+  const persistAccountCovenantMemory = async (next: ParsedAccountCovenantMemory[]) => {
+    setAccountCovenantMemory(next);
+    await saveParsedAccountCovenantMemory(session.userId, next);
+  };
+
+  const addAccountCovenantMemory = async (account: { name: string; statementType: string; key: string }) => {
+    const selected = covenantOptions.find(c => c.key === draftCovenantByAccount[account.key]);
+    if (!selected) return;
+    const nextItem: ParsedAccountCovenantMemory = {
+      id: `manual-${cleanText(account.name)}-${cleanText(selected.name)}-${Date.now()}`,
+      accountName: account.name,
+      statementType: account.statementType as ParsedAccountCovenantMemory['statementType'],
+      covenantName: selected.name,
+      covenantFormula: selected.formula,
+      reason: selected.description || 'Asociación manual desde Consolidación de Cuentas.',
+      confidence: 1,
+      source: 'manual',
+      seenCount: 1,
+      updatedAt: new Date().toISOString(),
+    };
+    const cleanKey = `${cleanText(nextItem.accountName)}:${nextItem.statementType}:${cleanText(nextItem.covenantName)}:${cleanText(nextItem.covenantFormula)}`;
+    const withoutDuplicate = accountCovenantMemory.filter(item =>
+      `${cleanText(item.accountName)}:${item.statementType}:${cleanText(item.covenantName)}:${cleanText(item.covenantFormula)}` !== cleanKey
+    );
+    await persistAccountCovenantMemory([nextItem, ...withoutDuplicate]);
+    setDraftCovenantByAccount(prev => ({ ...prev, [account.key]: '' }));
+  };
+
+  const memoryForAccount = (accountName: string, statementType: string) => accountCovenantMemory
+    .filter(item => cleanText(item.accountName) === cleanText(accountName) && item.statementType === statementType)
+    .slice(0, 3);
+
   return (
     <div className="flex-1 bg-slate-50 min-h-screen p-8 space-y-6">
       <WorkingOverlay show={running} title="Consolidando cuentas" messages={['Leyendo cuentas extraídas...', 'Comparando nombres similares...', 'Armando plantillas globales...', 'Almost there...']} />
@@ -186,11 +248,12 @@ const AccountConsolidationPage: React.FC<Props> = ({ aiSettings, session }) => {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
         <div className="bg-white border border-slate-200 rounded-2xl p-4"><p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Clientes</p><p className="text-2xl font-black text-slate-900">{clients.length}</p></div>
         <div className="bg-white border border-slate-200 rounded-2xl p-4"><p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Cuentas únicas</p><p className="text-2xl font-black text-slate-900">{accounts.length}</p></div>
         <div className="bg-white border border-slate-200 rounded-2xl p-4"><p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Mapeos activos</p><p className="text-2xl font-black text-slate-900">{rules.filter(r => r.source !== 'system').length}</p></div>
         <div className="bg-white border border-slate-200 rounded-2xl p-4"><p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Plantillas</p><p className="text-2xl font-black text-slate-900">{templates.length}</p></div>
+        <div className="bg-white border border-slate-200 rounded-2xl p-4"><p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Memoria covenants</p><p className="text-2xl font-black text-slate-900">{accountCovenantMemory.length}</p></div>
       </div>
 
       <div className="bg-white border border-slate-200 rounded-2xl p-5">
@@ -216,21 +279,43 @@ const AccountConsolidationPage: React.FC<Props> = ({ aiSettings, session }) => {
                   <th className="text-left px-4 py-2 font-black text-slate-500 uppercase">Cuenta</th>
                   <th className="text-left px-4 py-2 font-black text-slate-500 uppercase">Estado</th>
                   <th className="text-left px-4 py-2 font-black text-slate-500 uppercase">Consolidar como</th>
+                  <th className="text-left px-4 py-2 font-black text-slate-500 uppercase">Puede alimentar covenant</th>
                 </tr>
               </thead>
               <tbody>
-                {accounts.map(account => (
-                  <tr key={account.key} className="border-t border-slate-100">
-                    <td className="px-4 py-2 font-bold text-slate-800">{account.name}<p className="text-[10px] text-slate-400">{account.clientName}</p></td>
-                    <td className="px-4 py-2 text-slate-500">{account.statementType}</td>
-                    <td className="px-4 py-2">
-                      <select value={account.currentMetric} onChange={e => setAccountMetric(account.name, account.statementType, e.target.value as ConsolidationMetric | '')} className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 font-bold">
-                        <option value="">Sin mapear</option>
-                        {metrics.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
-                      </select>
-                    </td>
-                  </tr>
-                ))}
+                {accounts.map(account => {
+                  const remembered = memoryForAccount(account.name, account.statementType);
+                  return (
+                    <tr key={account.key} className="border-t border-slate-100">
+                      <td className="px-4 py-2 font-bold text-slate-800">{account.name}<p className="text-[10px] text-slate-400">{account.clientName}</p></td>
+                      <td className="px-4 py-2 text-slate-500">{account.statementType}</td>
+                      <td className="px-4 py-2">
+                        <select value={account.currentMetric} onChange={e => setAccountMetric(account.name, account.statementType, e.target.value as ConsolidationMetric | '')} className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 font-bold">
+                          <option value="">Sin mapear</option>
+                          {metrics.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+                        </select>
+                      </td>
+                      <td className="px-4 py-2 min-w-[280px]">
+                        <div className="flex gap-2">
+                          <select value={draftCovenantByAccount[account.key] || ''} onChange={e => setDraftCovenantByAccount(prev => ({ ...prev, [account.key]: e.target.value }))} className="min-w-0 flex-1 bg-white border border-slate-200 rounded-lg px-2 py-1.5 font-bold">
+                            <option value="">Asociar covenant...</option>
+                            {covenantOptions.map(option => <option key={option.key} value={option.key}>{option.name}</option>)}
+                          </select>
+                          <button onClick={() => addAccountCovenantMemory(account)} disabled={!draftCovenantByAccount[account.key]} className="bg-slate-900 disabled:bg-slate-200 text-white rounded-lg px-2 py-1.5 text-[10px] font-black">Guardar</button>
+                        </div>
+                        {remembered.length > 0 && (
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {remembered.map(item => (
+                              <span key={item.id} className="rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100 px-2 py-0.5 text-[10px] font-black">
+                                {item.covenantName}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -253,6 +338,25 @@ const AccountConsolidationPage: React.FC<Props> = ({ aiSettings, session }) => {
                 </div>
               ))}
               {rules.filter(r => r.source !== 'system').length === 0 && <p className="text-sm text-slate-400 text-center py-6">Sin mapeos manuales todavía.</p>}
+            </div>
+          </div>
+
+          <div className="bg-white border border-slate-200 rounded-2xl p-5">
+            <h2 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-4">Memoria cuenta-covenant</h2>
+            <div className="space-y-2 max-h-96 overflow-auto">
+              {accountCovenantMemory.map(item => (
+                <div key={item.id} className="rounded-xl border border-slate-200 p-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <p className="text-xs font-black text-slate-800">{item.accountName}</p>
+                      <p className="text-xs text-slate-500 mt-1">-&gt; {item.covenantName}</p>
+                      <p className="text-[10px] text-slate-400 mt-1">{item.statementType} · {item.source} · {Math.round(item.confidence * 100)}%</p>
+                    </div>
+                    <button onClick={() => persistAccountCovenantMemory(accountCovenantMemory.filter(m => m.id !== item.id))} className="text-slate-300 hover:text-rose-500"><Trash2 className="w-4 h-4" /></button>
+                  </div>
+                </div>
+              ))}
+              {accountCovenantMemory.length === 0 && <p className="text-sm text-slate-400 text-center py-6">Aún no hay memoria guardada.</p>}
             </div>
           </div>
 

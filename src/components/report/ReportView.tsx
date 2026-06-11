@@ -5,7 +5,7 @@ import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import { Download, ChevronDown, ChevronRight, MessageSquare, FileSpreadsheet, Upload, Trash2, ImageDown, ArrowUp, ArrowDown, Save, LayoutGrid } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { evaluateCovenantAuto } from '../../lib/financialMetrics';
+import { evaluateCovenantAuto, formulaLabel, metricLabels, rawAccountKey } from '../../lib/financialMetrics';
 
 interface Props {
   client: Client;
@@ -413,6 +413,12 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
 
   const exportExcel = () => {
     const wb = XLSX.utils.book_new();
+    const formulaLabels: Record<string, string> = { ...metricLabels };
+    sortedStatements.forEach(statement => {
+      statement.rawLineItems.forEach(item => {
+        formulaLabels[`account:${rawAccountKey(item)}`] = item.name;
+      });
+    });
 
     const resumen = [
       ['Cliente', client.name],
@@ -439,7 +445,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
           }
         });
       });
-      const rows = [['Seccion', 'Cuenta', ...periods]];
+      const rows = [['Estado financiero', 'Cuenta contable', ...periods]];
       const labels: Record<string, string> = {
         balance_general: 'Balance General',
         estado_resultados: 'Estado de Resultados',
@@ -450,14 +456,14 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
         const [statementType, name] = key.split('||');
         rows.push([labels[statementType] || statementType, name, ...sortedStatements.map(statement => statement.rawLineItems.find(item => `${item.statementType || 'otro'}||${item.name}` === key)?.value ?? '')]);
       });
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), 'Data Raw');
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), 'Datos Fuente');
     }
 
     if (financialCovenants.length > 0) {
-      const rows = [['Covenant', 'Formula', 'Umbral', 'Valor actual', 'Estado']];
+      const rows = [['Covenant', 'Fórmula legible', 'Umbral', 'Valor actual', 'Estado']];
       financialCovenants.forEach(cov => {
         const { value, status } = evaluateCovenant(cov, sortedStatements);
-        rows.push([cov.name, cov.formula, cov.threshold, value ?? '', status]);
+        rows.push([cov.name, formulaLabel(cov.formula || cov.name, formulaLabels), cov.threshold, value ?? '', status]);
       });
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), 'Covenants');
     }
