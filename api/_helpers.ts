@@ -10,13 +10,20 @@ export function sendJson(res: any, status: number, data: unknown) {
 }
 
 export async function forwardJson(url: string, payload: unknown, headers: Record<string, string>) {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...headers },
-    body: JSON.stringify(payload),
-  });
-  const text = await response.text();
-  return { status: response.status, text };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 58000);
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    return { status: response.status, text };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function requireManager(req: any, supabaseUrl: string, serviceKey: string) {
@@ -31,7 +38,7 @@ export async function requireManager(req: any, supabaseUrl: string, serviceKey: 
   const user = userText ? JSON.parse(userText) : null;
   if (userResponse.status >= 300 || !user?.id) return { ok: false, status: 401, error: 'Sesión inválida' };
 
-  const profileResponse = await fetch(`${supabaseUrl}/rest/v1/profiles?select=role&id=eq.${encodeURIComponent(user.id)}&limit=1`, {
+  const profileResponse = await fetch(`${supabaseUrl}/rest/v1/profiles?select=role,org_id&id=eq.${encodeURIComponent(user.id)}&limit=1`, {
     headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
   });
   const profileText = await profileResponse.text();
@@ -39,5 +46,5 @@ export async function requireManager(req: any, supabaseUrl: string, serviceKey: 
   if (profileResponse.status >= 300) return { ok: false, status: 500, error: 'No se pudo verificar permisos' };
   if (profile?.[0]?.role !== 'manager') return { ok: false, status: 403, error: 'Solo managers pueden administrar usuarios' };
 
-  return { ok: true, status: 200, error: null, user };
+  return { ok: true, status: 200, error: null, user, profile: profile[0] };
 }

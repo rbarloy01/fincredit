@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { db, Covenant_DB, CovenantAnnotation, FinancialStatement_DB } from '../../db/index';
 import { Session } from '../../services/auth';
-import { Plus, ChevronDown, ChevronRight, MessageCircle, Send, TrendingUp, CheckCircle, AlertTriangle, XCircle, X, Trash2, Download, FileText, Star } from 'lucide-react';
-import { DefinedConcept, exportCovenantsFinancieros } from '../../lib/export';
-import { accountOptions, evaluateCovenantAuto, formulaLabel, standardRatioFormula, standardRatios, suggestedCovenants } from '../../lib/financialMetrics';
+import { Plus, ChevronDown, ChevronRight, MessageCircle, Send, TrendingUp, CheckCircle, AlertTriangle, XCircle, X, Trash2, Download, FileText, Star, Clipboard, BarChart3 } from 'lucide-react';
+import type { DefinedConcept } from '../../lib/export';
+import { accountOptions, buildCovenantInsightPrompt, covenantPerformanceHistory, evaluateCovenantAuto, evaluateCovenantForStatement, formulaLabel, latestCovenantPerformance, standardRatioFormula, standardRatios, suggestedCovenants } from '../../lib/financialMetrics';
 import { GlobalCovenantTemplate, loadOrgConsolidationRules, loadOrgGlobalCovenantTemplates } from '../../lib/accountConsolidation';
+import { normalizeFinancialNumberString, parseNullableFinancialNumber } from '../../lib/numberParsing';
 
 const nanoid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
@@ -57,6 +58,37 @@ const LOCAL_NOTES_KEY = 'finmonitor_pending_covenant_notes';
 const hiddenStandardKey = (clientId: string) => `finmonitor_hidden_standard_covs_${clientId}`;
 const contractCovenantsKey = (clientId: string) => `finmonitor_contract_covs_${clientId}`;
 
+const operatorLabel = (operator: Covenant_DB['operator']) => (
+  operator === 'gte' ? '>=' :
+  operator === 'gt' ? '>' :
+  operator === 'lte' ? '<=' :
+  operator === 'lt' ? '<' :
+  'N/A'
+);
+
+const isPercentCovenant = (cov: Covenant_DB) => {
+  const text = `${cov.name} ${cov.formula} ${cov.description || ''}`.toLowerCase();
+  return text.includes('%') || text.includes('capital') || text.includes('roa') || text.includes('roe') || text.includes('margen') || text.includes('margin');
+};
+
+const formatCovenantValue = (value: number | null, cov: Covenant_DB) => {
+  if (value === null || !Number.isFinite(value)) return 'N/A';
+  if (isPercentCovenant(cov) && Math.abs(value) <= 3) return `${(value * 100).toFixed(1)}%`;
+  return value.toLocaleString('es-MX', { maximumFractionDigits: 2 });
+};
+
+const requirementLabel = (cov: Covenant_DB) => {
+  if (cov.operator === 'none' || !cov.threshold) return 'Sin umbral';
+  const threshold = parseNullableFinancialNumber(cov.threshold);
+  return `${operatorLabel(cov.operator)} ${threshold === null ? cov.threshold : formatCovenantValue(threshold, cov)}`;
+};
+
+const periodStatusClass = (status: 'cumple' | 'alerta' | 'incumple') => {
+  if (status === 'incumple') return 'bg-rose-600 text-white border-rose-700';
+  if (status === 'alerta') return 'bg-amber-400 text-amber-950 border-amber-500';
+  return 'bg-emerald-600 text-white border-emerald-700';
+};
+
 function loadLocalNotes(): Record<string, CovenantAnnotation[]> {
   try { return JSON.parse(localStorage.getItem(LOCAL_NOTES_KEY) || '{}'); } catch { return {}; }
 }
@@ -80,6 +112,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', s
   const [formulaDrafts, setFormulaDrafts] = useState<Record<string, string[]>>({});
   const [limitDrafts, setLimitDrafts] = useState<Record<string, { operator: Covenant_DB['operator']; threshold: string }>>({});
   const [chatDrafts, setChatDrafts] = useState<Record<string, { prompt: string; result: string }>>({});
+  const [promptCopied, setPromptCopied] = useState(false);
   const [concepts, setConcepts] = useState<DefinedConcept[]>([]);
   const [globalTemplates, setGlobalTemplates] = useState<GlobalCovenantTemplate[]>([]);
   const [contractCovenants, setContractCovenants] = useState<string[]>([]);
@@ -90,7 +123,8 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', s
   const handleExport = async (format: 'excel' | 'pdf') => {
     setExporting(format);
     try {
-      await exportCovenantsFinancieros(covenants, statements, clientName, format, format === 'pdf' ? panelRef.current ?? undefined : undefined);
+      const { exportCovenantsFinancieros } = await import('../../lib/export');
+      await exportCovenantsFinancieros(covenants, statements, clientName, format, format === 'pdf' ? panelRef.current ?? undefined : undefined, contractCovenants);
     } finally {
       setExporting(null);
     }
@@ -248,6 +282,11 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', s
   const breachedCount = covenantRows.filter(r => r.status === 'incumple').length;
   const warningCount = covenantRows.filter(r => r.status === 'alerta').length;
   const calculatedCount = covenantRows.filter(r => r.value !== null).length;
+  const latestPerformance = latestCovenantPerformance(displayCovenants, statements);
+  const latestInsightPrompt = buildCovenantInsightPrompt(clientName, latestPerformance);
+  const deteriorationCount = latestPerformance.filter(r => r.movement === 'deterioration').length;
+  const bettermentCount = latestPerformance.filter(r => r.movement === 'betterment').length;
+  const noDataPerformanceCount = latestPerformance.filter(r => r.movement === 'insufficient').length;
   const suggestions = suggestedCovenants(statements).filter(s => !displayCovenants.some(c => clean(c.name) === clean(s.name)));
   const globalSuggestions = globalTemplates
     .filter(t => t.active)
@@ -301,8 +340,8 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', s
       const phrase = clean(buffer.join(' '));
       buffer = [];
       if (!phrase) return;
-      const asNumber = Number(phrase.replace(',', '.'));
-      if (Number.isFinite(asNumber)) { tokens.push(`num:${asNumber}`); return; }
+      const asNumber = parseNullableFinancialNumber(phrase);
+      if (asNumber !== null) { tokens.push(`num:${asNumber}`); return; }
       const hit = aliases.find(a => {
         const label = clean(a.label);
         return label.includes(phrase) || phrase.includes(label) || phrase.split(' ').every(w => label.includes(w));
@@ -400,7 +439,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', s
   const saveLimit = async (cov: Covenant_DB & { virtual?: boolean }) => {
     const draft = limitDrafts[cov.id] || { operator: cov.operator, threshold: cov.threshold };
     const real = await materialize(cov);
-    await db.updateCovenant(real.id, { operator: draft.operator, threshold: draft.threshold });
+    await db.updateCovenant(real.id, { operator: draft.operator, threshold: normalizeFinancialNumberString(draft.threshold) });
     await loadData();
   };
 
@@ -440,6 +479,17 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', s
       if (real.id !== cov.id) await loadData();
     } catch (err: any) { alert(err.message); }
     finally { setSendingNote(null); }
+  };
+
+  const copyInsightPrompt = async () => {
+    try {
+      await navigator.clipboard.writeText(latestInsightPrompt);
+      setPromptCopied(true);
+      window.setTimeout(() => setPromptCopied(false), 1800);
+    } catch {
+      setPromptCopied(false);
+      alert('No se pudo copiar el prompt. Copia el texto manualmente desde la caja.');
+    }
   };
 
   return (
@@ -491,16 +541,59 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', s
 
       {covenantRows.length > 0 && statements.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
-          <div className="px-5 py-3 border-b border-slate-100">
-            <h3 className="text-xs font-black text-slate-700 uppercase tracking-widest">Desempeño por periodo</h3>
+          <div className="px-5 py-4 border-b border-slate-100 flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-xs font-black text-slate-700 uppercase tracking-widest flex items-center gap-2">
+                <BarChart3 className="w-4 h-4 text-indigo-500" />
+                Reporte de desempeño periodo a periodo
+              </h3>
+              <p className="text-xs text-slate-500 mt-1">
+                Último corte: {latestPeriod || 'N/D'} · {deteriorationCount} deterioro{deteriorationCount !== 1 ? 's' : ''} · {bettermentCount} mejora{bettermentCount !== 1 ? 's' : ''} · {noDataPerformanceCount} sin datos
+              </p>
+            </div>
+            <button
+              onClick={copyInsightPrompt}
+              className="flex items-center gap-1.5 bg-slate-900 text-white font-bold px-3 py-2 rounded-xl text-xs hover:bg-slate-800 transition-all"
+            >
+              <Clipboard className="w-3.5 h-3.5" />
+              {promptCopied ? 'Copiado' : 'Copiar prompt AI'}
+            </button>
           </div>
+          {latestPerformance.length > 0 && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 p-5 border-b border-slate-100 bg-slate-50/60">
+              {latestPerformance.slice(0, 3).map(row => (
+                <div key={row.covenantId} className={`rounded-xl border p-4 ${
+                  row.movement === 'deterioration' ? 'bg-rose-50 border-rose-100' :
+                  row.movement === 'betterment' ? 'bg-emerald-50 border-emerald-100' :
+                  'bg-white border-slate-200'
+                }`}>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">{row.movementLabel}</p>
+                  <p className="text-sm font-black text-slate-900 mt-1 truncate">{row.covenantName}</p>
+                  <p className="text-xs text-slate-600 mt-2">
+                    Actual <span className="font-mono font-black">{formatCovenantValue(row.value, displayCovenants.find(c => c.id === row.covenantId) || ({ name: row.covenantName, formula: row.formula, description: '', threshold: row.threshold, operator: row.operator } as Covenant_DB))}</span>
+                    {row.delta !== null && (
+                      <span className={
+                        row.movement === 'deterioration' ? ' text-rose-700 font-black' :
+                        row.movement === 'betterment' ? ' text-emerald-700 font-black' :
+                        ' text-slate-500 font-black'
+                      }>
+                        {' '}({row.delta > 0 ? '+' : ''}{row.delta.toLocaleString('es-MX', { maximumFractionDigits: 2 })})
+                      </span>
+                    )}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
                 <tr className="bg-slate-50">
                   <th className="text-left px-4 py-2 font-black text-slate-600 uppercase tracking-wider">Covenant</th>
+                  <th className="text-left px-4 py-2 font-black text-slate-600 uppercase tracking-wider">Requisito</th>
+                  <th className="text-left px-4 py-2 font-black text-slate-600 uppercase tracking-wider">Cambio último</th>
                   {statements.slice(-6).map(s => (
-                    <th key={s.id} className="text-right px-4 py-2 font-black text-slate-600 uppercase tracking-wider whitespace-nowrap">{s.period}</th>
+                    <th key={s.id} className="text-center px-4 py-2 font-black text-slate-600 uppercase tracking-wider whitespace-nowrap">{s.period}</th>
                   ))}
                 </tr>
               </thead>
@@ -520,14 +613,54 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', s
                         {isContractCovenant(cov) && <span className="text-[9px] font-black text-amber-700 bg-amber-50 border border-amber-100 rounded-full px-2 py-0.5">CONTRATO</span>}
                       </div>
                     </td>
+                    <td className="px-4 py-2 font-mono font-black text-slate-700 whitespace-nowrap">
+                      {requirementLabel(cov)}
+                    </td>
+                    <td className="px-4 py-2">
+                      {(() => {
+                        const last = covenantPerformanceHistory(cov, statements).at(-1);
+                        if (!last) return <span className="text-slate-400">N/A</span>;
+                        return (
+                          <div>
+                            <span className={`font-black ${
+                              last.movement === 'deterioration' ? 'text-rose-700' :
+                              last.movement === 'betterment' ? 'text-emerald-700' :
+                              'text-slate-500'
+                            }`}>{last.movementLabel}</span>
+                            <span className="block font-mono text-slate-500">
+                              {last.delta === null ? 'sin comparativo' : `${last.delta > 0 ? '+' : ''}${last.delta.toLocaleString('es-MX', { maximumFractionDigits: 2 })}`}
+                              {last.deltaPct !== null ? ` (${(last.deltaPct * 100).toFixed(1)}%)` : ''}
+                            </span>
+                          </div>
+                        );
+                      })()}
+                    </td>
                     {statements.slice(-6).map(stmt => {
-                      const result = evaluateCovenantAuto(cov, [stmt]).value;
-                      return <td key={stmt.id} className="px-4 py-2 text-right font-mono text-slate-700">{result === null ? 'N/A' : result.toLocaleString('es-MX', { maximumFractionDigits: 2 })}</td>;
+                      const result = evaluateCovenantForStatement(cov, stmt);
+                      return (
+                        <td key={stmt.id} className="px-4 py-2 text-center">
+                          <div className={`inline-flex min-w-20 flex-col items-center rounded-lg border px-2.5 py-1.5 ${
+                            result.value === null ? 'bg-slate-50 text-slate-400 border-slate-200' : periodStatusClass(result.status)
+                          }`}>
+                            <span className="font-mono font-black">{formatCovenantValue(result.value, cov)}</span>
+                            <span className="text-[9px] font-black uppercase opacity-80">{result.value === null ? 'N/D' : result.status}</span>
+                          </div>
+                        </td>
+                      );
                     })}
                   </tr>
                 ))}
               </tbody>
             </table>
+          </div>
+          <div className="p-5 border-t border-slate-100 bg-white">
+            <label className="text-xs font-black text-slate-600 uppercase tracking-widest block mb-2">Prompt AI para insights</label>
+            <textarea
+              readOnly
+              value={latestInsightPrompt}
+              rows={6}
+              className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono text-slate-700 focus:outline-none"
+            />
           </div>
         </div>
       )}
@@ -584,7 +717,10 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', s
                       <button key={op} type="button" onClick={() => setForm(p => ({ ...p, expressionTokens: [...p.expressionTokens, op] }))} className="w-10 h-9 rounded-lg bg-white border border-slate-200 font-black text-slate-700">{op}</button>
                     ))}
                     <input value={form.numberValue} onChange={e => setForm(p => ({ ...p, numberValue: e.target.value }))} placeholder="número" className="w-28 bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-mono" />
-                    <button type="button" onClick={() => form.numberValue && setForm(p => ({ ...p, expressionTokens: [...p.expressionTokens, `num:${p.numberValue}`], numberValue: '' }))} className="bg-white border border-slate-200 text-slate-700 px-3 py-2 rounded-lg text-xs font-black">Agregar #</button>
+                    <button type="button" onClick={() => {
+                      const value = normalizeFinancialNumberString(form.numberValue);
+                      if (value) setForm(p => ({ ...p, expressionTokens: [...p.expressionTokens, `num:${value}`], numberValue: '' }));
+                    }} className="bg-white border border-slate-200 text-slate-700 px-3 py-2 rounded-lg text-xs font-black">Agregar #</button>
                     <button type="button" onClick={() => setForm(p => ({ ...p, expressionTokens: p.expressionTokens.slice(0, -1) }))} className="bg-white border border-slate-200 text-slate-700 px-3 py-2 rounded-lg text-xs font-black">Borrar último</button>
                     <button type="button" onClick={() => setForm(p => ({ ...p, expressionTokens: [] }))} className="bg-rose-50 text-rose-700 px-3 py-2 rounded-lg text-xs font-black">Limpiar</button>
                   </div>
@@ -690,8 +826,8 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', s
                   </div>
                   <div className="flex items-center gap-3 mt-1 text-xs text-slate-500">
                     {cov.formula && <span className="font-mono bg-slate-100 px-2 py-0.5 rounded">{formulaLabel(cov.formula, labelMap)}</span>}
-                    {cov.threshold && cov.operator !== 'none' && <span>{cov.operator} {cov.threshold}</span>}
-                    {value !== null && <span className="font-bold text-slate-800">Actual: {value.toFixed(2)}</span>}
+                    {cov.threshold && cov.operator !== 'none' && <span>{requirementLabel(cov)}</span>}
+                    {value !== null && <span className="font-bold text-slate-800">Actual: {formatCovenantValue(value, cov)}</span>}
                     <span className={`font-black ${mode === 'auto' ? 'text-indigo-600' : 'text-amber-600'}`}>{mode === 'auto' ? 'AUTO' : 'MANUAL'}</span>
                     {statements.length === 0 && <span className="text-amber-500 font-semibold">Sin estados financieros cargados</span>}
                   </div>

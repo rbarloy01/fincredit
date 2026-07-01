@@ -1,33 +1,5 @@
 import { forwardJson, readJson, requireManager, sendJson } from '../../_helpers.js';
 
-async function restJson(url: string, serviceKey: string, method: string, body?: unknown) {
-  const response = await fetch(url, {
-    method,
-    headers: {
-      apikey: serviceKey,
-      Authorization: `Bearer ${serviceKey}`,
-      'Content-Type': 'application/json',
-      Prefer: 'return=representation',
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const text = await response.text();
-  const json = text ? JSON.parse(text) : null;
-  if (response.status >= 300) throw new Error(json?.message || json?.error || text || 'Supabase error');
-  return json;
-}
-
-async function ensureOrganization(supabaseUrl: string, serviceKey: string, userId: string) {
-  const found = await restJson(`${supabaseUrl}/rest/v1/organizations?select=id&slug=eq.syscap&limit=1`, serviceKey, 'GET');
-  let orgId = found?.[0]?.id;
-  if (!orgId) {
-    const created = await restJson(`${supabaseUrl}/rest/v1/organizations`, serviceKey, 'POST', { name: 'Syscap', slug: 'syscap' });
-    orgId = created?.[0]?.id;
-  }
-  if (orgId) await restJson(`${supabaseUrl}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`, serviceKey, 'PATCH', { org_id: orgId });
-  return orgId;
-}
-
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' });
   try {
@@ -37,6 +9,8 @@ export default async function handler(req: any, res: any) {
     if (!supabaseUrl || !serviceKey) return sendJson(res, 500, { error: 'Supabase admin env missing' });
     const access = await requireManager(req, supabaseUrl, serviceKey);
     if (!access.ok) return sendJson(res, access.status, { error: access.error });
+    const orgId = access.profile?.org_id;
+    if (!orgId) return sendJson(res, 400, { error: 'El manager actual no tiene organización asignada.' });
 
     const authRes = await forwardJson(`${supabaseUrl}/auth/v1/admin/users`, {
       email: body.email,
@@ -46,7 +20,6 @@ export default async function handler(req: any, res: any) {
 
     if (authRes.status >= 300) return sendJson(res, 400, { error: JSON.parse(authRes.text || '{}').msg || 'Error al crear usuario' });
     const user = JSON.parse(authRes.text);
-    const orgId = await ensureOrganization(supabaseUrl, serviceKey, user.id);
 
     await forwardJson(`${supabaseUrl}/rest/v1/profiles`, {
       id: user.id,

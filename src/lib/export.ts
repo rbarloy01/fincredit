@@ -4,10 +4,24 @@
 import ExcelJS from 'exceljs';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
-import {
+import type {
   Client, Transaction, Covenant_DB, FinancialStatement_DB, LoanTape_DB,
 } from '../db/index';
-import { evaluateFormula, formulaLabel, getMetric, metricLabels, rawAccountKey } from './financialMetrics';
+import {
+  buildCovenantAnalystInsight,
+  evaluateFormula,
+  formulaLabel,
+  getMetric,
+  metricLabels,
+  prioritizedLatestCovenantPerformance,
+  rawAccountKey,
+} from './financialMetrics';
+import { buildLoanTapeExportContexts, type LoanTapeExportContext } from './loanTapeAnalytics';
+import {
+  normalizeLoanTapeAnalystState,
+  type LoanTapeWorkspaceBlock,
+} from './loanTapeWorkspace';
+import { parseFinancialNumber, parseNullableFinancialNumber } from './numberParsing';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -16,6 +30,7 @@ export interface SheetDef {
   rows: (string | number | null | undefined)[][];
   colWidths?: number[];
   outlineColumns?: number[];
+  wrapColumns?: number[];
 }
 
 export type VerticalBaseConfig = Record<string, string>;
@@ -211,7 +226,12 @@ export async function exportToExcel(sheets: SheetDef[], filename: string): Promi
         if (typeof c === 'string' && c.startsWith('=')) return { formula: c.slice(1) } as any;
         return c ?? '';
       }));
-      exRow.height = h;
+      const wrappedLineCount = Math.max(1, ...(sheet.wrapColumns || []).map(col => {
+        const value = String(raw[col - 1] ?? '');
+        const width = sheet.colWidths?.[col - 1] ?? 14;
+        return Math.ceil(value.length / Math.max(8, width * 1.25));
+      }));
+      exRow.height = kind === 'data' ? Math.min(72, Math.max(h, wrappedLineCount * 14)) : h;
 
       exRow.eachCell({ includeEmpty: true }, (cell, col) => {
         if (col > nCols) return;
@@ -221,6 +241,7 @@ export async function exportToExcel(sheets: SheetDef[], filename: string): Promi
         cell.alignment = {
           vertical: 'middle',
           horizontal: (kind === 'title' || kind === 'subheading' || !isNum) ? 'left' : 'right',
+          wrapText: sheet.wrapColumns?.includes(col) || false,
         };
         if (isNum && kind === 'data') {
           const lbl = (headerLabels[col - 1] ?? '').toUpperCase();
@@ -276,7 +297,7 @@ export function buildFichaContractual(
     ['RFC', client.taxId || ''],
     ['Industria', client.industry || ''],
     ['Moneda', client.currency || 'MXN'],
-    ['Línea Total', client.totalCreditValue],
+    ['Línea Total', parseFinancialNumber(client.totalCreditValue)],
     ['Tipo de Crédito', (client.creditType || []).join(', ')],
     ['Nombre del Contrato', client.contractName || ''],
     ['Analista', client.analystName || ''],
@@ -284,11 +305,11 @@ export function buildFichaContractual(
     [],
     ['B. TRANSACCIONES'],
     ['Nombre', 'Tipo', 'Monto', 'Moneda', 'Fecha Firma', 'Vencimiento'],
-    ...transactions.map(t => [t.name, t.creditType, t.originalAmount, t.currency, fmtDate(t.signedAt), fmtDate(t.maturityAt)]),
+    ...transactions.map(t => [t.name, t.creditType, parseFinancialNumber(t.originalAmount), t.currency, fmtDate(t.signedAt), fmtDate(t.maturityAt)]),
     [],
     ['C. COVENANTS FINANCIEROS'],
     ['Covenant', 'Fórmula legible', 'Operador', 'Umbral'],
-    ...financial.map(c => [c.name, formulaLabel(c.formula || c.name, metricLabels), c.operator, c.threshold]),
+    ...financial.map(c => [c.name, formulaLabel(c.formula || c.name, metricLabels), c.operator, parseNullableFinancialNumber(c.threshold)]),
     [],
     ['D. CALENDARIO DE DOCUMENTOS'],
     ['Documento', 'Periodicidad'],
@@ -407,20 +428,24 @@ function exportSegment(item: FinancialStatement_DB['rawLineItems'][number]) {
   const type = item.statementType || 'otro';
   const path = nkey(item.sectionPath || '');
   const name = nkey(item.name || '');
+  const isCapitalName = /(capitalsocial|capitalcontable|patrimonio|resultadoacumulado|utilidadretenida|resultadodelejercicio)/.test(name);
+  const isPasivoName = /(pasivo|proveedor|acreedor|deuda|obligacion|prestamo|impuesto|seguro|social|imss|isr|iva|ptu|provision|cuentaporpagar|cxp)/.test(name);
   if (type === 'estado_resultados' || path.includes('estadoresultado')) return 'Estado de Resultados';
   if (type === 'flujo_efectivo' || path.includes('flujoefectivo')) return 'Flujo de Efectivo';
   if (path.includes('manual') || path.includes('auditoria')) {
     if (path.includes('activo')) return 'ACTIVO';
-    if (path.includes('pasivo')) return 'PASIVO';
-    if (path.includes('capital') || path.includes('patrimonio')) return 'CAPITAL';
+    if (path.includes('pasivo') && !isCapitalName) return 'PASIVO';
+    if (path.includes('capital') || path.includes('patrimonio')) return isPasivoName && !isCapitalName ? 'PASIVO' : 'CAPITAL';
     if (path.includes('estadoresultado')) return 'Estado de Resultados';
     if (path.includes('flujoefectivo')) return 'Flujo de Efectivo';
     if (path.includes('otros')) return 'Otros';
   }
-  if (/(capital|patrimonio|resultadoacumulado|utilidadretenida|capitalcontable|resultadodelejercicio)/.test(name)) return 'CAPITAL';
-  if (/(pasivo|proveedor|acreedor|deuda|obligacion|prestamo|impuesto|seguro|social|imss|isr|iva|ptu|provision|cuentaporpagar|cxp)/.test(name)) return 'PASIVO';
+  // Liability wording takes precedence over a generic "capital" mention, as in
+  // "Pasivo y capital". Only explicit equity account names belong in CAPITAL.
+  if (isPasivoName && !isCapitalName) return 'PASIVO';
+  if (isCapitalName || name.includes('capital')) return 'CAPITAL';
   if (/(activo|caja|banco|efectivo|cliente|cuentaporcobrar|inventario|propiedad|equipo|intangible)/.test(name)) return 'ACTIVO';
-  if (path.includes('pasivo') && !path.includes('capital') && !path.includes('patrimonio')) return 'PASIVO';
+  if (path.includes('pasivo')) return 'PASIVO';
   if (path.includes('capital') || path.includes('patrimonio')) return 'CAPITAL';
   if (path.includes('activo')) return 'ACTIVO';
   if (type === 'balance_general') return 'Balance General sin clasificar';
@@ -518,18 +543,22 @@ function buildSegmentedAnalysisSheet(
   footerRows: SheetDef['rows'] = [],
 ): SheetDef {
   const periods = normalizedPeriods(statements);
-  const keys = new Map<string, { name: string; segment: string }>();
+  const keys = new Map<string, { name: string; segment: string; sourceOrder: number }>();
+  let sourceOrder = 0;
   periods.forEach(p => p.stmt.rawLineItems.forEach(item => {
     const segment = exportSegment(item);
     if (!segments.includes(segment)) return;
     const key = `${item.statementType || 'otro'}||${item.name}`;
-    if (!keys.has(key)) keys.set(key, { name: item.name, segment });
+    if (!keys.has(key)) keys.set(key, { name: item.name, segment, sourceOrder: sourceOrder++ });
   }));
   const rows: SheetDef['rows'] = [statementHeaders(periods)];
   segments.forEach(segment => {
     const items = Array.from(keys.entries())
       .filter(([, meta]) => meta.segment === segment)
-      .sort((a, b) => accountSortRank(a[1].name, segment) - accountSortRank(b[1].name, segment) || a[1].name.localeCompare(b[1].name, 'es'));
+      .sort((a, b) => segment === 'Estado de Resultados'
+        ? a[1].sourceOrder - b[1].sourceOrder
+        : accountSortRank(a[1].name, segment) - accountSortRank(b[1].name, segment)
+          || a[1].sourceOrder - b[1].sourceOrder);
     if (!items.length) return;
     rows.push([segment]);
     items.forEach(([key, meta]) => addAnalysisRow(rows, meta.name, segment, key, periods, bases, concepts));
@@ -806,9 +835,10 @@ export function buildMonitoreo(
     const valueRow = rows.length + 1;
     const formula = cov.formula || cov.name;
     const values = periods.map((p, i) => formulaToExcel(cov.formulaByPeriod?.[p.stmt.period] || formula, `${colName(5 + i)}$3`));
-    rows.push([cov.name, formulaLabel(formula, labels), cov.operator, cov.threshold ? parseFloat(cov.threshold) : null, ...values]);
-    rows.push(['', 'Cálculo automático con referencias internas; no editar las celdas de valor', '', 'UMBRAL', ...periods.map(() => cov.threshold ? parseFloat(cov.threshold) : null)]);
-    if (cov.operator !== 'none' && cov.threshold) {
+    const threshold = parseNullableFinancialNumber(cov.threshold);
+    rows.push([cov.name, formulaLabel(formula, labels), cov.operator, threshold, ...values]);
+    rows.push(['', 'Cálculo automático con referencias internas; no editar las celdas de valor', '', 'UMBRAL', ...periods.map(() => threshold)]);
+    if (cov.operator !== 'none' && threshold !== null) {
       rows.push([
         '',
         'Cumplimiento',
@@ -821,7 +851,7 @@ export function buildMonitoreo(
             cov.operator === 'gte' ? '>=' :
             cov.operator === 'lt' ? '<' :
             '<=';
-          return `=IFERROR(IF(${cell}${op}${Number(cov.threshold)},"CUMPLE","INCUMPLE"),"")`;
+          return `=IFERROR(IF(${cell}${op}${threshold},"CUMPLE","INCUMPLE"),"")`;
         }),
       ]);
     }
@@ -832,6 +862,47 @@ export function buildMonitoreo(
     name: 'Monitoreo',
     rows,
     colWidths: [30, 46, 10, 10, ...Array(periods.length).fill(14)],
+  };
+}
+
+export function buildCovenantTrendAnalysis(
+  covenants: Covenant_DB[],
+  statements: FinancialStatement_DB[],
+  clientName: string,
+  contractCovenantKeys: string[] = [],
+): SheetDef {
+  const performance = prioritizedLatestCovenantPerformance(
+    covenants.filter(c => c.type === 'financial'),
+    statements,
+    contractCovenantKeys,
+  );
+  const insight = buildCovenantAnalystInsight(performance);
+  const rows: SheetDef['rows'] = [
+    [`ANÁLISIS DE TENDENCIA DE COVENANTS — ${clientName.toUpperCase()}`],
+    [],
+    ['INSIGHT PARA EL ANALISTA'],
+    [insight.headline],
+    ...insight.bullets.map(bullet => [`• ${bullet}`]),
+    [],
+    ['PRIORIDAD', 'CONTRATO', 'COVENANT', 'ÚLTIMO PERIODO', 'VALOR ACTUAL', 'VALOR ANTERIOR', 'CAMBIO', 'CAMBIO %', 'TENDENCIA', 'ESTADO', 'LÍMITE'],
+    ...performance.map((row, index) => [
+      index + 1,
+      row.isContractCovenant ? 'SÍ' : 'NO',
+      row.covenantName,
+      row.period,
+      row.value,
+      row.previousValue,
+      row.delta,
+      row.deltaPct,
+      row.movementLabel,
+      row.status.toUpperCase(),
+      row.operator === 'none' ? 'N/A' : `${row.operator} ${row.threshold}`,
+    ]),
+  ];
+  return {
+    name: 'Análisis Covenant',
+    rows,
+    colWidths: [10, 11, 32, 16, 15, 15, 14, 12, 15, 14, 16],
   };
 }
 
@@ -986,7 +1057,7 @@ export function buildTransacciones(transactions: Transaction[]): SheetDef {
     [],
     ['Nombre', 'Tipo de Crédito', 'Monto', 'Moneda', 'Fecha', 'Firma', 'Vencimiento', 'Descripción'],
     ...transactions.map(t => [
-      t.name, t.creditType, t.originalAmount, t.currency,
+      t.name, t.creditType, parseFinancialNumber(t.originalAmount), t.currency,
       fmtDate(t.date), fmtDate(t.signedAt), fmtDate(t.maturityAt), t.description,
     ]),
   ];
@@ -998,21 +1069,34 @@ export function buildTransacciones(transactions: Transaction[]): SheetDef {
 }
 
 // 8. LOAN TAPE
-export function buildLoanTape(tapes: LoanTape_DB[]): SheetDef {
+export function buildLoanTape(tapes: LoanTape_DB[], contexts = buildLoanTapeExportContexts(tapes)): SheetDef {
+  const contextById = new Map(contexts.map(context => [context.tape.id, context]));
   const rows: SheetDef['rows'] = [
     ['LOAN TAPES'],
     [],
-    ['Nombre', 'Tipo', 'Fecha Carga', 'Archivo'],
-    ...tapes.map(t => [t.name, t.tapeType, fmtDate(t.uploadDate), t.fileName || '']),
+    ['Nombre', 'Tipo', 'Fecha Carga', 'Archivo', 'Preparación', 'Analizable', 'Campos críticos', 'Siguiente acción'],
+    ...tapes.map(t => {
+      const profile = contextById.get(t.id)?.profile;
+      return [
+        t.name,
+        t.tapeType,
+        fmtDate(t.uploadDate),
+        t.fileName || '',
+        profile?.readinessScore ?? null,
+        profile?.canAnalyze ? 'Sí' : 'No',
+        profile?.missingFields.filter(field => field.severity !== 'low').map(field => field.field).join(', ') || 'Ninguno',
+        profile?.nextActions[0] || 'Sin acciones críticas',
+      ];
+    }),
   ];
 
-  // If the last tape has extractedData, try to append it
-  const last = tapes[tapes.length - 1];
-  if (last?.extractedData) {
-    const data = last.extractedData;
+  // Loan tapes are loaded newest-first; append legacy array data from the latest.
+  const latest = tapes[0];
+  if (latest?.extractedData) {
+    const data = latest.extractedData;
     if (Array.isArray(data) && data.length > 0) {
       rows.push([]);
-      rows.push(['DATOS EXTRAÍDOS — ' + last.name]);
+      rows.push(['DATOS EXTRAÍDOS — ' + latest.name]);
       const keys = Object.keys(data[0]);
       rows.push(keys);
       for (const row of data) rows.push(keys.map(k => row[k] ?? null));
@@ -1022,7 +1106,8 @@ export function buildLoanTape(tapes: LoanTape_DB[]): SheetDef {
   return {
     name: 'Loan Tape',
     rows,
-    colWidths: [30, 16, 14, 40],
+    colWidths: [30, 16, 14, 32, 14, 12, 34, 60],
+    wrapColumns: [7, 8],
   };
 }
 
@@ -1038,17 +1123,77 @@ function rowsFromObjects(title: string, rowsIn?: any[], preferredKeys?: string[]
   return rows;
 }
 
+function portableValue(value: any): string | number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number' || typeof value === 'string') return value;
+  if (typeof value === 'boolean') return value ? 'Sí' : 'No';
+  return JSON.stringify(value);
+}
+
+function workspaceBlockColumns(block: LoanTapeWorkspaceBlock) {
+  if (block.columns?.length) return block.columns;
+  return Object.keys(block.data[0] || {}).map(key => ({ key, label: key }));
+}
+
+function buildLoanTapeAnalystSheet(tapes: LoanTape_DB[]): SheetDef {
+  const rows: SheetDef['rows'] = [['ANÁLISIS GUARDADO DEL LOAN TAPE'], []];
+
+  tapes.forEach((tape, tapeIndex) => {
+    const state = normalizeLoanTapeAnalystState(tape.analystState);
+    if (tapeIndex > 0) rows.push([]);
+    rows.push([`${tape.name.toUpperCase()} — WORKSPACE`]);
+    rows.push(['Archivo', tape.fileName || tape.name, 'Actualizado', state.updatedAt ? fmtDate(state.updatedAt) : 'N/D']);
+
+    if (state.qa.question || state.qa.answer || state.qa.draft) {
+      rows.push([]);
+      rows.push(['Q&A GUARDADO']);
+      rows.push(['Campo', 'Contenido']);
+      if (state.qa.question) rows.push(['Pregunta', state.qa.question]);
+      if (state.qa.answer) rows.push(['Respuesta', state.qa.answer]);
+      if (state.qa.draft && state.qa.draft !== state.qa.question) rows.push(['Borrador', state.qa.draft]);
+    }
+
+    if (!state.workspaceBlocks.length) {
+      rows.push([]);
+      rows.push(['Sin bloques de análisis guardados']);
+      return;
+    }
+
+    state.workspaceBlocks.forEach((block, blockIndex) => {
+      const columns = workspaceBlockColumns(block);
+      rows.push([]);
+      rows.push([`BLOQUE ${blockIndex + 1} — ${block.title}`]);
+      rows.push(['Tipo', block.type, 'Creado', fmtDate(block.createdAt)]);
+      rows.push(['Prompt', block.prompt]);
+      rows.push(['Descripción', block.description]);
+      rows.push([]);
+      rows.push(columns.map(column => column.label));
+      block.data.forEach(item => rows.push(columns.map(column => portableValue(item[column.key]))));
+    });
+  });
+
+  return {
+    name: 'Analisis Guardado',
+    rows,
+    colWidths: [30, 30, 22, 22, 18, 18, 18, 18, 18, 18, 18, 18],
+    wrapColumns: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+  };
+}
+
 export function buildLoanTapeSheets(tapes: LoanTape_DB[]): SheetDef[] {
-  const summary = buildLoanTape(tapes);
-  const allStandardized = tapes.flatMap(t => Array.isArray(t.extractedData?._standardized) ? t.extractedData._standardized.map((r: any) => ({ archivo: t.fileName || t.name, ...r })) : []);
-  const mapping = tapes.flatMap(t => Array.isArray(t.extractedData?._mappingReport) ? t.extractedData._mappingReport.map((r: any) => ({ archivo: t.fileName || t.name, ...r })) : []);
-  const latestAnalyzed = tapes.find(t => t.extractedData?._analysis) || tapes[0];
-  const analysis = latestAnalyzed?.extractedData?._analysis || {};
+  const contexts = buildLoanTapeExportContexts(tapes);
+  const summary = buildLoanTape(tapes, contexts);
+  const allStandardized = contexts.flatMap(context => context.standardizedRows.map(row => ({ archivo: context.tape.fileName || context.tape.name, ...row })));
+  const mapping = contexts.flatMap(context => context.mappingReport.map(row => ({ archivo: context.tape.fileName || context.tape.name, ...row })));
+  const primaryContext = contexts[0];
+  const analysis = primaryContext?.analysis || {} as any;
   const concentrations = analysis.concentrations || {};
   const anomalies = analysis.anomalies || {};
 
   return [
     summary,
+    buildLoanTapeReadinessSheet(contexts),
+    buildLoanTapeAnalystSheet(tapes),
     {
       name: 'Datos Estandarizados',
       rows: rowsFromObjects('DATOS ESTANDARIZADOS', allStandardized, ['archivo', 'loan_id', 'client', 'amount', 'outstanding_balance', 'interest_rate', 'loan_status', 'start_date', 'end_date', 'loan_type', 'days_overdue', 'currency', 'industry', 'state', 'file_date']),
@@ -1097,6 +1242,240 @@ export function buildLoanTapeSheets(tapes: LoanTape_DB[]): SheetDef[] {
       colWidths: [22, 18, 14, 24, 18, 14],
     },
   ];
+}
+
+function buildLoanTapeReadinessSheet(contexts: LoanTapeExportContext[]): SheetDef {
+  const rows: SheetDef['rows'] = [['PREPARACIÓN Y CONTEXTO ANALÍTICO DEL LOAN TAPE'], []];
+
+  contexts.forEach((context, contextIndex) => {
+    const { tape, profile, analysis } = context;
+    if (contextIndex > 0) rows.push([]);
+    rows.push([`${tape.name.toUpperCase()} — DIAGNÓSTICO`]);
+    rows.push(['Indicador', 'Valor', 'Contexto']);
+    rows.push(
+      ['Score de preparación', profile.readinessScore, 'Escala 0-100 calculada por completitud y validaciones'],
+      ['Se puede analizar', profile.canAnalyze ? 'Sí' : 'No', profile.canAnalyze ? 'Hay campos suficientes para análisis local' : 'Faltan campos base para conclusiones confiables'],
+      ['Registros', profile.totalRows, `Último corte: ${profile.latestFileDate || 'No identificado'} · ${profile.latestRows} registros en el corte`],
+      ['Campos mapeados', profile.mappedFields.length, profile.mappedFields.join(', ') || 'Ninguno'],
+      ['Alertas de validación', profile.validationCount, `${profile.duplicateCount} duplicado(s) detectado(s)`],
+      ['Riesgo local', analysis.riskScore, `Estado: ${analysis.overallStatus || 'N/D'} · Tendencia: ${analysis.trendDirection || 'N/D'}`],
+    );
+    rows.push([]);
+    rows.push(['CAMPOS CRÍTICOS FALTANTES']);
+    rows.push(['Campo', 'Mapeado', 'Filas vacías', '% vacío', 'Severidad', 'Impacto']);
+    const missing = profile.missingFields.filter(field => field.severity !== 'low');
+    if (missing.length) {
+      missing.forEach(field => rows.push([
+        field.field,
+        field.mapped ? 'Sí' : 'No',
+        field.missingRows,
+        field.missingPct,
+        field.severity,
+        field.impact,
+      ]));
+    } else {
+      rows.push(['Ninguno', 'Sí', 0, 0, 'low', 'No hay campos críticos faltantes relevantes.']);
+    }
+    rows.push([]);
+    rows.push(['SIGUIENTES ACCIONES']);
+    rows.push(['Prioridad', 'Acción', 'Fuente']);
+    (profile.nextActions.length ? profile.nextActions : ['Sin acciones críticas pendientes.']).forEach((action, index) => {
+      rows.push([index + 1, action, 'Perfil local determinístico']);
+    });
+    rows.push([]);
+    rows.push(['CONTEXTO DE ANÁLISIS LOCAL']);
+    rows.push(['Resumen', analysis.executiveSummary || 'Sin resumen local', '']);
+    rows.push(['Métrica', 'Valor actual', 'Valor anterior', 'Cambio', 'Tendencia', 'Estado']);
+    (analysis.metrics || []).forEach(metric => rows.push([
+      metric.name,
+      metric.latestValue,
+      metric.previousValue || '',
+      metric.change || '',
+      metric.trend || '',
+      metric.status || '',
+    ]));
+    rows.push([]);
+    rows.push(['HALLAZGOS LOCALES RELEVANTES']);
+    rows.push(['Severidad', 'Categoría', 'Hallazgo', 'Detalle', 'Recomendación']);
+    const findings = (analysis.findings || []).slice(0, 12);
+    if (findings.length) {
+      findings.forEach(finding => rows.push([
+        finding.severity,
+        finding.category,
+        finding.title,
+        finding.detail,
+        finding.recommendation,
+      ]));
+    } else {
+      rows.push(['low', 'Análisis local', 'Sin hallazgos adicionales', '', '']);
+    }
+  });
+
+  return {
+    name: 'Preparacion',
+    rows,
+    colWidths: [28, 24, 24, 18, 22, 64],
+    wrapColumns: [1, 2, 3, 4, 5, 6],
+  };
+}
+
+function loanTapePdfPage(title: string, subtitle: string): HTMLDivElement {
+  const page = document.createElement('div');
+  page.className = 'export-page';
+  Object.assign(page.style, {
+    width: '794px',
+    minHeight: '1123px',
+    padding: '54px',
+    boxSizing: 'border-box',
+    background: '#ffffff',
+    color: '#1e293b',
+    fontFamily: 'Arial, Helvetica, sans-serif',
+  });
+  const heading = document.createElement('h1');
+  heading.textContent = title;
+  Object.assign(heading.style, { margin: '0', fontSize: '28px', color: '#0f172a' });
+  const subheading = document.createElement('p');
+  subheading.textContent = subtitle;
+  Object.assign(subheading.style, { margin: '8px 0 28px', fontSize: '12px', color: '#64748b' });
+  page.append(heading, subheading);
+  return page;
+}
+
+function appendPdfSection(page: HTMLElement, title: string, rows: Array<[string, string]>, accent = '#312e81') {
+  const section = document.createElement('section');
+  section.style.marginBottom = '24px';
+  const heading = document.createElement('h2');
+  heading.textContent = title;
+  Object.assign(heading.style, {
+    margin: '0 0 10px',
+    padding: '9px 12px',
+    fontSize: '12px',
+    textTransform: 'uppercase',
+    letterSpacing: '0.08em',
+    color: '#ffffff',
+    background: accent,
+  });
+  section.appendChild(heading);
+  rows.forEach(([label, value], index) => {
+    const row = document.createElement('div');
+    Object.assign(row.style, {
+      display: 'grid',
+      gridTemplateColumns: '190px 1fr',
+      gap: '14px',
+      padding: '9px 10px',
+      fontSize: '11px',
+      lineHeight: '1.35',
+      background: index % 2 ? '#f8fafc' : '#ffffff',
+      borderBottom: '1px solid #e2e8f0',
+    });
+    const labelEl = document.createElement('strong');
+    labelEl.textContent = label;
+    const valueEl = document.createElement('span');
+    valueEl.textContent = value;
+    row.append(labelEl, valueEl);
+    section.appendChild(row);
+  });
+  page.appendChild(section);
+}
+
+function workspaceBlockPdfRows(block: LoanTapeWorkspaceBlock) {
+  const columns = workspaceBlockColumns(block);
+  return block.data.map((item, index) => {
+    const values = columns.map(column => `${column.label}: ${portableValue(item[column.key]) ?? '—'}`);
+    return [`${index + 1}`, values.join(' · ')] as [string, string];
+  });
+}
+
+function buildLoanTapePdfPages(tapes: LoanTape_DB[], clientName: string): HTMLDivElement[] {
+  const contexts = buildLoanTapeExportContexts(tapes);
+  return contexts.flatMap(context => {
+    const { tape, profile, analysis } = context;
+    const subtitle = `${clientName || 'Cliente'} · ${tape.fileName || tape.name} · Exportado ${new Date().toLocaleDateString('es-MX')}`;
+    const overview = loanTapePdfPage(`Loan Tape — ${tape.name}`, subtitle);
+    appendPdfSection(overview, 'Preparación para análisis', [
+      ['Score de preparación', `${profile.readinessScore}/100`],
+      ['Se puede analizar', profile.canAnalyze ? 'Sí' : 'No'],
+      ['Registros', String(profile.totalRows)],
+      ['Último corte', profile.latestFileDate || 'No identificado'],
+      ['Campos mapeados', profile.mappedFields.join(', ') || 'Ninguno'],
+      ['Validaciones', `${profile.validationCount} alerta(s), ${profile.duplicateCount} duplicado(s)`],
+    ]);
+    appendPdfSection(overview, 'Campos críticos faltantes',
+      (profile.missingFields.filter(field => field.severity !== 'low').slice(0, 9).map(field => [
+        `${field.field} · ${field.severity}`,
+        `${field.mapped ? `${(field.missingPct * 100).toFixed(1)}% vacío` : 'No mapeado'}. ${field.impact}`,
+      ]) as Array<[string, string]>).concat(
+        profile.missingFields.every(field => field.severity === 'low')
+          ? [['Estado', 'No hay campos críticos faltantes relevantes.']]
+          : [],
+      ),
+      '#be123c',
+    );
+    appendPdfSection(overview, 'Siguientes acciones',
+      (profile.nextActions.length ? profile.nextActions : ['Sin acciones críticas pendientes.'])
+        .map((action, index) => [`${index + 1}`, action]),
+      '#b45309',
+    );
+
+    const local = loanTapePdfPage(`Contexto analítico local — ${tape.name}`, subtitle);
+    appendPdfSection(local, 'Lectura ejecutiva', [
+      ['Estado / riesgo', `${analysis.overallStatus || 'N/D'} · ${analysis.riskScore ?? 'N/D'}/100`],
+      ['Tendencia', analysis.trendDirection || 'N/D'],
+      ['Resumen', analysis.executiveSummary || 'Sin resumen local'],
+    ]);
+    appendPdfSection(local, 'Métricas locales',
+      (analysis.metrics || []).slice(0, 8).map(metric => [
+        metric.name,
+        `${metric.latestValue}${metric.previousValue ? ` · anterior ${metric.previousValue}` : ''}${metric.change ? ` · cambio ${metric.change}` : ''}`,
+      ]),
+    );
+    appendPdfSection(local, 'Hallazgos y recomendaciones',
+      (analysis.findings || []).slice(0, 10).map(finding => [
+        `${finding.severity} · ${finding.category}`,
+        `${finding.title}. ${finding.detail}${finding.recommendation ? ` Recomendación: ${finding.recommendation}` : ''}`,
+      ]),
+      '#0f766e',
+    );
+
+    const analystState = normalizeLoanTapeAnalystState(tape.analystState);
+    const analystPages: HTMLDivElement[] = [];
+    if (analystState.qa.question || analystState.qa.answer || analystState.qa.draft) {
+      const qaPage = loanTapePdfPage(`Q&A guardado — ${tape.name}`, subtitle);
+      appendPdfSection(qaPage, 'Consulta del analista', [
+        ...(analystState.qa.question ? [['Pregunta', analystState.qa.question] as [string, string]] : []),
+        ...(analystState.qa.answer ? [['Respuesta', analystState.qa.answer] as [string, string]] : []),
+        ...(analystState.qa.draft && analystState.qa.draft !== analystState.qa.question
+          ? [['Borrador', analystState.qa.draft] as [string, string]]
+          : []),
+      ], '#4338ca');
+      analystPages.push(qaPage);
+    }
+
+    analystState.workspaceBlocks.forEach((block, blockIndex) => {
+      const dataRows = workspaceBlockPdfRows(block);
+      const chunks = dataRows.length
+        ? Array.from({ length: Math.ceil(dataRows.length / 12) }, (_, index) => dataRows.slice(index * 12, (index + 1) * 12))
+        : [[]];
+      chunks.forEach((chunk, chunkIndex) => {
+        const page = loanTapePdfPage(
+          `${block.title}${chunks.length > 1 ? ` — ${chunkIndex + 1}/${chunks.length}` : ''}`,
+          subtitle,
+        );
+        appendPdfSection(page, `Bloque ${blockIndex + 1} · ${block.type}`, [
+          ['Prompt', block.prompt],
+          ['Descripción', block.description],
+          ['Creado', fmtDate(block.createdAt)],
+        ], '#4338ca');
+        appendPdfSection(page, 'Datos guardados',
+          chunk.length ? chunk : [['Estado', 'El bloque no contiene filas.']],
+          '#0f766e',
+        );
+        analystPages.push(page);
+      });
+    });
+
+    return [overview, local, ...analystPages];
+  });
 }
 
 // 9. BLANK TEMPLATE SHELLS (GR, CF, Fondeo, Cartera)
@@ -1167,23 +1546,40 @@ export async function exportEstadosFinancieros(
 }
 
 export async function exportLoanTape(
-  tapes: LoanTape_DB[], clientName: string, format: 'excel' | 'pdf', el?: HTMLElement,
+  tapes: LoanTape_DB[], clientName: string, format: 'excel' | 'pdf', _el?: HTMLElement,
 ): Promise<void> {
   if (format === 'excel') {
     await exportToExcel(buildLoanTapeSheets(tapes), `LoanTape_${clientName}`);
   } else {
-    if (el) await exportToPdf([el], `LoanTape_${clientName}`);
+    const pages = buildLoanTapePdfPages(tapes, clientName);
+    pages.forEach(page => {
+      page.style.position = 'fixed';
+      page.style.left = '0';
+      page.style.top = '0';
+      page.style.zIndex = '-1';
+      page.style.pointerEvents = 'none';
+      document.body.appendChild(page);
+    });
+    try {
+      await exportToPdf(pages, `LoanTape_${clientName}`);
+    } finally {
+      pages.forEach(page => page.remove());
+    }
   }
 }
 
 export async function exportCovenantsFinancieros(
-  covenants: Covenant_DB[], statements: FinancialStatement_DB[], clientName: string, format: 'excel' | 'pdf', el?: HTMLElement,
+  covenants: Covenant_DB[], statements: FinancialStatement_DB[], clientName: string, format: 'excel' | 'pdf', el?: HTMLElement, contractCovenantKeys: string[] = [],
 ): Promise<void> {
   if (format === 'excel') {
     let concepts: DefinedConcept[] = [];
     const clientId = statements[0]?.clientId || covenants[0]?.clientId || '';
     try { concepts = JSON.parse(localStorage.getItem(`finmonitor_defined_concepts_${clientId}`) || '[]'); } catch {}
-    await exportToExcel([buildCovenantDataSheet(statements, concepts), buildMonitoreo(covenants, statements, concepts)], `Monitoreo_${clientName}`);
+    await exportToExcel([
+      buildCovenantTrendAnalysis(covenants, statements, clientName, contractCovenantKeys),
+      buildCovenantDataSheet(statements, concepts),
+      buildMonitoreo(covenants, statements, concepts),
+    ], `Monitoreo_${clientName}`);
   } else {
     if (el) await exportToPdf([el], `Monitoreo_${clientName}`);
   }

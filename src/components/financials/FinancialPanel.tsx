@@ -4,10 +4,12 @@ import { Session } from '../../services/auth';
 import { AISettings, extractFinancials } from '../../services/ai';
 import { Upload, Trash2, Download, Plus, X, TrendingUp, Edit2, Check, FileText } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { DefinedConcept, exportEstadosFinancieros, VerticalBaseConfig } from '../../lib/export';
+import type { DefinedConcept, VerticalBaseConfig } from '../../lib/export';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { evaluateFormula, formulaLabel, standardRatios } from '../../lib/financialMetrics';
 import WorkingOverlay from '../common/WorkingOverlay';
+import { parseFinancialNumber } from '../../lib/numberParsing';
+import { classifyAccount, normalizeAccountName } from '../../lib/accountClassification';
 
 interface Props {
   clientId: string;
@@ -27,6 +29,7 @@ interface ReviewStatement {
   period: string;
   periodDate: string;
   fileName: string;
+  sourceDocumentId?: string;
   items: RawItem[];
 }
 
@@ -51,37 +54,7 @@ function fmtNum(n: number): string {
   return n.toLocaleString('es-MX', { maximumFractionDigits: 6 });
 }
 
-function normalizeName(value?: string): string {
-  return (value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
-}
-
-export function classifyAccount(statementType: string, name: string, sectionPath?: string | null): string {
-  const path = normalizeName(sectionPath || '');
-  if (path.includes('estadoresultado')) return 'Estado de Resultados';
-  if (path.includes('flujoefectivo')) return 'Flujo de Efectivo';
-  if (path.includes('manual') || path.includes('auditoria')) {
-    if (path.includes('activo')) return 'ACTIVO';
-    if (path.includes('pasivo')) return 'PASIVO';
-    if (path.includes('capital') || path.includes('patrimonio')) return 'CAPITAL';
-    if (path.includes('estadoresultado')) return 'Estado de Resultados';
-    if (path.includes('flujoefectivo')) return 'Flujo de Efectivo';
-    if (path.includes('otros')) return 'Otros';
-  }
-  const n = normalizeName(name);
-  if (statementType === 'estado_resultados') return 'Estado de Resultados';
-  if (statementType === 'flujo_efectivo') return 'Flujo de Efectivo';
-  if (statementType !== 'balance_general') return 'Otros';
-  if (/(capital|patrimonio|resultadoacumulado|utilidadretenida|capitalcontable|resultadodelejercicio)/.test(n)) return 'CAPITAL';
-  if (/(pasivo|proveedor|acreedor|deuda|obligacion|prestamo|impuesto|seguro|social|imss|isr|iva|ptu|provision|cuentaporpagar|cxp)/.test(n)) return 'PASIVO';
-  if (/(activo|caja|banco|efectivo|cliente|cuentaporcobrar|inventario|propiedad|equipo|intangible)/.test(n)) return 'ACTIVO';
-  if (path.includes('pasivo') && !path.includes('capital') && !path.includes('patrimonio')) return 'PASIVO';
-  if (path.includes('capital') || path.includes('patrimonio')) return 'CAPITAL';
-  if (path.includes('activo')) return 'ACTIVO';
-  if (/(capital|patrimonio|resultadoacumulado|utilidadretenida)/.test(n)) return 'CAPITAL';
-  if (/(pasivo|proveedor|acreedor|deuda|obligacion|prestamo)/.test(n)) return 'PASIVO';
-  if (/(activo|caja|banco|efectivo|cliente|cuentaporcobrar|inventario|propiedad|equipo|intangible)/.test(n)) return 'ACTIVO';
-  return 'Balance General sin clasificar';
-}
+const normalizeName = normalizeAccountName;
 
 const typeLabel: Record<StatementType, string> = {
   balance_general: 'Balance General',
@@ -225,6 +198,10 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   };
 
   const extractFile = async (file: File) => {
+    const sourceDocument = await db.uploadClientDocument(clientId, file, 'financial_statement', {
+      clientName,
+      uploadSurface: 'financials_panel',
+    });
     let result;
     if (file.type.startsWith('image/') || file.type === 'application/pdf') {
       const base64 = await toBase64(file);
@@ -257,9 +234,10 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
         period: statement.period,
         periodDate: statement.periodDate,
         fileName: file.name,
+        sourceDocumentId: sourceDocument.id,
         items: statement.rawLineItems.map(i => ({
           name: i.name,
-          value: i.value,
+          value: parseFinancialNumber(i.value),
           sectionPath: i.sectionPath || null,
           statementType: (i.statementType || 'otro') as StatementType,
         })),
@@ -268,7 +246,6 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   };
 
   const handleFilesSelect = async (files: FileList | File[]) => {
-    if (!aiSettings.apiKey) { alert('Configure la API Key en Configuración'); return; }
     const selected = Array.from(files);
     if (selected.length === 0) return;
     setUploading(true);
@@ -295,6 +272,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
       for (const statement of review.statements) {
         await db.createStatement({
           clientId,
+          sourceDocumentId: statement.sourceDocumentId,
           sourceCompanyName: review.companyName,
           documentType: review.documentType,
           period: statement.period,
@@ -325,7 +303,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
     const updated = stmt.rawLineItems.map((item, i) => {
       if (i !== itemIdx) return item;
       if (field === 'name') return { ...item, name: editValue };
-      return { ...item, value: parseFloat(editValue) || 0 };
+      return { ...item, value: parseFinancialNumber(editValue) };
     });
     await db.updateStatement(stmtId, { rawLineItems: updated });
     setEditingCell(null);
@@ -335,6 +313,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   const handleExport = async (format: 'excel' | 'pdf') => {
     setExporting(format);
     try {
+      const { exportEstadosFinancieros } = await import('../../lib/export');
       await exportEstadosFinancieros(
         statements,
         clientName,
@@ -1063,7 +1042,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
                                   if (!prev) return null;
                                   const statements = [...prev.statements];
                                   const items = [...statements[statementIndex].items];
-                                  items[itemIndex] = { ...items[itemIndex], value: parseFloat(e.target.value) || 0 };
+                                  items[itemIndex] = { ...items[itemIndex], value: parseFinancialNumber(e.target.value) };
                                   statements[statementIndex] = { ...statements[statementIndex], items };
                                   return { ...prev, statements };
                                 })}

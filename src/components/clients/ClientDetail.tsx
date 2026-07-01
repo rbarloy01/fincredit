@@ -1,19 +1,19 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { lazy, Suspense, useState, useEffect, useRef } from 'react';
 import { db, Client, Transaction, FinancialStatement_DB, Covenant_DB, LoanTape_DB, CustomField } from '../../db/index';
-import { exportResumen } from '../../lib/export';
 import { Session } from '../../services/auth';
 import { AISettings } from '../../services/ai';
 import { ChevronLeft, Building2, Download, FileText, Trash2 } from 'lucide-react';
 import TransactionPanel from '../transactions/TransactionPanel';
-import FinancialPanel from '../financials/FinancialPanel';
-import LoanTapePanel from '../loantape/LoanTapePanel';
 import FinancialCovenantsPanel from '../covenants/FinancialCovenantsPanel';
 import HacerNoHacerPanel from '../covenants/HacerNoHacerPanel';
-import ClientReportView from '../report/ReportView';
-import SaaSMonitorPanel from '../monitoring/SaaSMonitorPanel';
+import CreditUnderwritingPanel from '../monitoring/CreditUnderwritingPanel';
 import AuditPanel from '../audit/AuditPanel';
 import WorkingOverlay from '../common/WorkingOverlay';
 import CompanyOverviewPanel from './CompanyOverviewPanel';
+
+const FinancialPanel = lazy(() => import('../financials/FinancialPanel'));
+const LoanTapePanel = lazy(() => import('../loantape/LoanTapePanel'));
+const ClientReportView = lazy(() => import('../report/ReportView'));
 
 interface Props {
   clientId: string;
@@ -26,7 +26,7 @@ interface Props {
 type Tab = 'monitor' | 'resumen' | 'company_overview' | 'transacciones' | 'estados' | 'auditoria' | 'loantape' | 'cov_financiero' | 'hacer_no_hacer' | 'reporte';
 
 const TABS: { id: Tab; label: string }[] = [
-  { id: 'monitor', label: 'SaaS Monitor' },
+  { id: 'monitor', label: 'Underwriting' },
   { id: 'resumen', label: 'Resumen' },
   { id: 'company_overview', label: 'Company Overview' },
   { id: 'transacciones', label: 'Transacciones' },
@@ -55,6 +55,15 @@ const StatusCircle = ({ status }: { status?: string }) => {
   );
 };
 
+const TabFallback = () => (
+  <div className="flex items-center justify-center py-16">
+    <svg className="animate-spin h-7 w-7 text-indigo-500" viewBox="0 0 24 24" fill="none">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+    </svg>
+  </div>
+);
+
 const ResumenTab: React.FC<{ client: Client; transactions: Transaction[]; covenants: Covenant_DB[] }> = ({ client, transactions, covenants }) => {
   const history = client.paymentHistory?.slice(0, 6) || [];
   const aforo = client.aforoHistory?.slice(0, 6) || [];
@@ -64,6 +73,7 @@ const ResumenTab: React.FC<{ client: Client; transactions: Transaction[]; covena
   const handleExport = async (format: 'excel' | 'pdf') => {
     setExporting(format);
     try {
+      const { exportResumen } = await import('../../lib/export');
       await exportResumen(client, transactions, covenants, format, format === 'pdf' ? panelRef.current ?? undefined : undefined);
     } finally {
       setExporting(null);
@@ -342,89 +352,91 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
 
       {/* Tab content */}
       <div className="p-8">
-        {activeTab === 'monitor' && (
-          <SaaSMonitorPanel
-            client={client}
-            transactions={transactions}
-            statements={statements}
-            covenants={covenants}
-            loanTapes={loanTapes}
-          />
-        )}
-        {activeTab === 'resumen' && <ResumenTab client={client} transactions={transactions} covenants={covenants} />}
-        {activeTab === 'company_overview' && (
-          <CompanyOverviewPanel
-            client={client}
-            statements={statements}
-            covenants={covenants}
-            customFields={customFields}
-            aiSettings={aiSettings}
-          />
-        )}
-        {activeTab === 'transacciones' && (
-          <TransactionPanel
-            clientId={clientId}
-            clientName={client.name}
-            session={session}
-            aiSettings={aiSettings}
-            onCovenantsExtracted={() => loadData()}
-          />
-        )}
-        {activeTab === 'estados' && (
-          <FinancialPanel
-            clientId={clientId}
-            clientName={client.name}
-            session={session}
-            aiSettings={aiSettings}
-            covenants={covenants}
-            onStatementsChange={setStatements}
-            onCovenantsChange={setCovenants}
-          />
-        )}
-        {activeTab === 'loantape' && (
-          <LoanTapePanel
-            clientId={clientId}
-            clientName={client.name}
-            session={session}
-            aiSettings={aiSettings}
-            onTapesChange={setLoanTapes}
-          />
-        )}
-        {activeTab === 'auditoria' && (
-          <AuditPanel
-            statements={statements}
-            onStatementsChange={setStatements}
-          />
-        )}
-        {activeTab === 'cov_financiero' && (
-          <FinancialCovenantsPanel
-            clientId={clientId}
-            clientName={client.name}
-            session={session}
-            statements={statements}
-            onCovenantsChange={setCovenants}
-          />
-        )}
-        {activeTab === 'hacer_no_hacer' && (
-          <HacerNoHacerPanel
-            clientId={clientId}
-            clientName={client.name}
-            session={session}
-            onCovenantsChange={setCovenants}
-          />
-        )}
-        {activeTab === 'reporte' && (
-          <ClientReportView
-            client={client}
-            statements={statements}
-            covenants={covenants}
-            loanTapes={loanTapes}
-            customFields={customFields}
-            onCustomFieldsChange={setCustomFields}
-            onClientUpdate={handleClientUpdate}
-            onClose={() => setActiveTab('resumen')}
-          />
-        )}
+        <Suspense fallback={<TabFallback />}>
+          {activeTab === 'monitor' && (
+            <CreditUnderwritingPanel
+              client={client}
+              transactions={transactions}
+              statements={statements}
+              covenants={covenants}
+              loanTapes={loanTapes}
+            />
+          )}
+          {activeTab === 'resumen' && <ResumenTab client={client} transactions={transactions} covenants={covenants} />}
+          {activeTab === 'company_overview' && (
+            <CompanyOverviewPanel
+              client={client}
+              statements={statements}
+              covenants={covenants}
+              customFields={customFields}
+              aiSettings={aiSettings}
+            />
+          )}
+          {activeTab === 'transacciones' && (
+            <TransactionPanel
+              clientId={clientId}
+              clientName={client.name}
+              session={session}
+              aiSettings={aiSettings}
+              onCovenantsExtracted={() => loadData()}
+            />
+          )}
+          {activeTab === 'estados' && (
+            <FinancialPanel
+              clientId={clientId}
+              clientName={client.name}
+              session={session}
+              aiSettings={aiSettings}
+              covenants={covenants}
+              onStatementsChange={setStatements}
+              onCovenantsChange={setCovenants}
+            />
+          )}
+          {activeTab === 'loantape' && (
+            <LoanTapePanel
+              clientId={clientId}
+              clientName={client.name}
+              session={session}
+              aiSettings={aiSettings}
+              onTapesChange={setLoanTapes}
+            />
+          )}
+          {activeTab === 'auditoria' && (
+            <AuditPanel
+              statements={statements}
+              onStatementsChange={setStatements}
+            />
+          )}
+          {activeTab === 'cov_financiero' && (
+            <FinancialCovenantsPanel
+              clientId={clientId}
+              clientName={client.name}
+              session={session}
+              statements={statements}
+              onCovenantsChange={setCovenants}
+            />
+          )}
+          {activeTab === 'hacer_no_hacer' && (
+            <HacerNoHacerPanel
+              clientId={clientId}
+              clientName={client.name}
+              session={session}
+              onCovenantsChange={setCovenants}
+            />
+          )}
+          {activeTab === 'reporte' && (
+            <ClientReportView
+              client={client}
+              statements={statements}
+              covenants={covenants}
+              loanTapes={loanTapes}
+              customFields={customFields}
+              onCustomFieldsChange={setCustomFields}
+              onClientUpdate={handleClientUpdate}
+              onClose={() => setActiveTab('resumen')}
+            />
+          )}
+        </Suspense>
       </div>
     </div>
   );

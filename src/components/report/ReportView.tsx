@@ -1,11 +1,18 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { db, Client, FinancialStatement_DB, Covenant_DB, LoanTape_DB, CustomField } from '../../db/index';
 import { StructuredLoanTapeAnalysis } from '../../services/ai';
-import html2canvas from 'html2canvas';
-import jsPDF from 'jspdf';
 import { Download, ChevronDown, ChevronRight, MessageSquare, FileSpreadsheet, Upload, Trash2, ImageDown, ArrowUp, ArrowDown, Save, LayoutGrid } from 'lucide-react';
-import * as XLSX from 'xlsx';
-import { evaluateCovenantAuto, formulaLabel, metricLabels, rawAccountKey } from '../../lib/financialMetrics';
+import {
+  buildCovenantAnalystInsight,
+  evaluateCovenantForStatement,
+  evaluateCovenantAuto,
+  formulaLabel,
+  getMetric,
+  metricLabels,
+  prioritizedLatestCovenantPerformance,
+  rawAccountKey,
+} from '../../lib/financialMetrics';
+import { parseFinancialNumber, parseNullableFinancialNumber } from '../../lib/numberParsing';
 
 interface Props {
   client: Client;
@@ -143,6 +150,93 @@ function evaluateCovenant(cov: Covenant_DB, statements: FinancialStatement_DB[])
   return { value: result.value, status: result.status.toUpperCase() as CondStatus };
 }
 
+function refsFromFormula(formula: string): string[] {
+  if (!formula) return [];
+  if (formula.startsWith('ratio:')) {
+    return formula.slice('ratio:'.length).split('/').map(part => part.trim()).filter(Boolean);
+  }
+  if (formula.startsWith('expr:')) {
+    try {
+      return (JSON.parse(formula.slice('expr:'.length)) as string[])
+        .filter(token => token.startsWith('ref:'))
+        .map(token => token.slice(4));
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function metricEvidence(stmt: FinancialStatement_DB | null, ref: string): { label: string; value: number | null; source: string } {
+  const label = metricLabels[ref] || ref;
+  if (!stmt) return { label, value: null, source: 'Sin estado financiero' };
+  if (ref.startsWith('account:')) {
+    const key = ref.slice('account:'.length);
+    const item = stmt.rawLineItems.find(line => rawAccountKey(line) === key);
+    return {
+      label: item?.name || label,
+      value: item?.value ?? null,
+      source: item?.source || item?.sectionPath || stmt.fileName || stmt.documentType || 'Estado financiero',
+    };
+  }
+  const value = getMetric(stmt, ref);
+  const mapped = stmt.mappedData?.[ref];
+  return {
+    label,
+    value,
+    source: mapped !== undefined && mapped !== null ? 'Mapeo consolidado' : stmt.fileName || stmt.documentType || 'Estado financiero',
+  };
+}
+
+function buildReportReadiness(
+  covenants: Covenant_DB[],
+  statements: FinancialStatement_DB[],
+  contractCovenantKeys: string[],
+) {
+  const latestStmt = statements.at(-1) || null;
+  const previousStmt = statements.length > 1 ? statements.at(-2) || null : null;
+  const rows = covenants.map(cov => {
+    const latestFormula = latestStmt ? cov.formulaByPeriod?.[latestStmt.period] || cov.formula || '' : cov.formula || '';
+    const latestResult = latestStmt ? evaluateCovenantForStatement(cov, latestStmt) : null;
+    const previousResult = previousStmt ? evaluateCovenantForStatement(cov, previousStmt) : null;
+    const refs = refsFromFormula(latestFormula);
+    const refsEvidence = refs.map(ref => metricEvidence(latestStmt, ref));
+    const missingInputs = refsEvidence.filter(ref => ref.value === null).map(ref => ref.label);
+    const issues: string[] = [];
+    if (!latestStmt) issues.push('Sin estado financiero del periodo');
+    if (!previousStmt) issues.push('Sin periodo comparativo');
+    if (!latestFormula) issues.push('Sin fórmula explícita');
+    if (cov.operator === 'none') issues.push('Sin operador/umbral evaluable');
+    if (cov.operator !== 'none' && parseNullableFinancialNumber(cov.threshold) === null) issues.push('Umbral no numérico');
+    if (latestResult?.value === null) issues.push('Valor no calculable');
+    if (missingInputs.length > 0) issues.push(`Faltan inputs: ${missingInputs.slice(0, 3).join(', ')}`);
+    const isContract = contractCovenantKeys.some(key =>
+      key === cov.id || key === `formula:${cov.formula}` || key === `name:${cleanKey(cov.name)}`,
+    );
+    if (!isContract) issues.push('No marcado como covenant de contrato');
+    const evidence = latestStmt
+      ? `${latestStmt.period}${latestStmt.fileName ? ` · ${latestStmt.fileName}` : ''}`
+      : 'Sin evidencia';
+    return {
+      covenant: cov,
+      formula: latestFormula,
+      refsEvidence,
+      evidence,
+      latestValue: latestResult?.value ?? null,
+      previousValue: previousResult?.value ?? null,
+      status: latestResult?.status || 'cumple',
+      isContract,
+      issues,
+      ready: issues.length === 0,
+    };
+  });
+  const readyCount = rows.filter(row => row.ready).length;
+  const calculatedCount = rows.filter(row => row.latestValue !== null).length;
+  const missingDataCount = rows.filter(row => row.latestValue === null || row.issues.some(issue => issue.startsWith('Faltan inputs'))).length;
+  const score = covenants.length === 0 ? 0 : Math.round((readyCount / covenants.length) * 100);
+  return { rows, readyCount, calculatedCount, missingDataCount, score };
+}
+
 const TAPE_PLACEHOLDER = `Describe el estado de la cartera. Considera incluir:
 
 • Estado general: calidad crediticia y nivel de riesgo respecto al período anterior
@@ -161,6 +255,11 @@ interface ReportBlockConfig {
   order: number;
 }
 
+interface ReportTemplate {
+  name: string;
+  blocks: ReportBlockConfig[];
+}
+
 const DEFAULT_BLOCKS: ReportBlockConfig[] = [
   { id: 'payment', label: 'Historial de Pagos', visible: true, order: 10 },
   { id: 'aforo', label: 'Aforo', visible: true, order: 20 },
@@ -172,6 +271,37 @@ const DEFAULT_BLOCKS: ReportBlockConfig[] = [
 
 const layoutKey = (clientId: string) => `finmonitor_report_layout_${clientId}`;
 const templatesKey = (clientId: string) => `finmonitor_report_templates_${clientId}`;
+const contractFooterKey = (clientId: string) => `finmonitor_report_show_contract_${clientId}`;
+
+const normalizeReportBlocks = (saved: unknown): ReportBlockConfig[] => {
+  const byId = new Map(
+    Array.isArray(saved)
+      ? saved
+          .filter((block): block is Partial<ReportBlockConfig> & { id: ReportBlockId } =>
+            !!block && typeof block === 'object' && DEFAULT_BLOCKS.some(defaultBlock => defaultBlock.id === (block as any).id))
+          .map(block => [block.id, block])
+      : [],
+  );
+  return DEFAULT_BLOCKS.map(defaultBlock => {
+    const savedBlock = byId.get(defaultBlock.id);
+    return {
+      ...defaultBlock,
+      visible: typeof savedBlock?.visible === 'boolean' ? savedBlock.visible : defaultBlock.visible,
+      order: typeof savedBlock?.order === 'number' ? savedBlock.order : defaultBlock.order,
+    };
+  });
+};
+
+const normalizeReportTemplates = (saved: unknown): ReportTemplate[] => {
+  if (!Array.isArray(saved)) return [];
+  return saved
+    .filter((template): template is { name: string; blocks: unknown } =>
+      !!template && typeof template === 'object' && typeof (template as any).name === 'string')
+    .map(template => ({
+      name: template.name.trim() || 'Plantilla',
+      blocks: normalizeReportBlocks(template.blocks),
+    }));
+};
 
 const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loanTapes, customFields = [], onCustomFieldsChange, onClientUpdate, onClose }) => {
   const page1Ref = useRef<HTMLDivElement>(null);
@@ -183,18 +313,11 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
   const [showCovenants, setShowCovenants] = useState(true);
   const [showDocs, setShowDocs] = useState(true);
   const [showLoanTape, setShowLoanTape] = useState(true);
-  const [blocks, setBlocks] = useState<ReportBlockConfig[]>(() => {
-    try {
-      const saved = localStorage.getItem(layoutKey(client.id));
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return DEFAULT_BLOCKS;
-  });
+  const [blocks, setBlocks] = useState<ReportBlockConfig[]>(DEFAULT_BLOCKS);
   const [templateName, setTemplateName] = useState('Mi plantilla');
-  const [savedTemplates, setSavedTemplates] = useState<Array<{ name: string; blocks: ReportBlockConfig[] }>>(() => {
-    try { return JSON.parse(localStorage.getItem(templatesKey(client.id)) || '[]'); } catch { return []; }
-  });
-  const [showContractFooter, setShowContractFooter] = useState(() => localStorage.getItem(`finmonitor_report_show_contract_${client.id}`) !== 'false');
+  const [savedTemplates, setSavedTemplates] = useState<ReportTemplate[]>([]);
+  const [showContractFooter, setShowContractFooter] = useState(true);
+  const [reportSettingsLoaded, setReportSettingsLoaded] = useState(false);
   const commercialField = customFields.find(f => f.id === 'commercial_name' || f.label === 'Nombre comercial');
   const commercialName = commercialField?.value || client.name;
 
@@ -218,9 +341,15 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
   const reportPeriods = paymentHistory.map(p => p.month || '').filter(Boolean);
   const reportPeriod = latest?.period || client.lastPeriod || reportPeriods[0] || '—';
   const isContractCovenant = (cov: Covenant_DB) => contractCovenantKeys.some(key => key === cov.id || key === `formula:${cov.formula}` || key === `name:${cleanKey(cov.name)}`);
-  const financialCovenants = covenants
-    .filter(c => c.type === 'financial')
-    .sort((a, b) => Number(isContractCovenant(b)) - Number(isContractCovenant(a)));
+  const financialCovenantBase = covenants.filter(c => c.type === 'financial');
+  const covenantTrend = prioritizedLatestCovenantPerformance(financialCovenantBase, sortedStatements, contractCovenantKeys);
+  const covenantTrendById = new Map(covenantTrend.map((row, index) => [row.covenantId, { ...row, index }]));
+  const covenantInsight = buildCovenantAnalystInsight(covenantTrend);
+  const deteriorationCount = covenantTrend.filter(row => row.movement === 'deterioration').length;
+  const improvementCount = covenantTrend.filter(row => row.movement === 'betterment').length;
+  const covenantReadiness = buildReportReadiness(financialCovenantBase, sortedStatements, contractCovenantKeys);
+  const financialCovenants = [...financialCovenantBase]
+    .sort((a, b) => (covenantTrendById.get(a.id)?.index ?? 999) - (covenantTrendById.get(b.id)?.index ?? 999));
   const hacerCovenants = covenants.filter(c => c.type === 'hacer');
   const noHacerCovenants = covenants.filter(c => c.type === 'noHacer');
   const condCovenants = [...hacerCovenants, ...noHacerCovenants];
@@ -234,14 +363,32 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
     await db.setCustomFields(client.id, next);
   };
 
-  const updateShowContractFooter = (value: boolean) => {
+  const updateShowContractFooter = async (value: boolean) => {
     setShowContractFooter(value);
-    localStorage.setItem(`finmonitor_report_show_contract_${client.id}`, String(value));
+    await db.setClientSetting(client.id, contractFooterKey(client.id), value);
   };
 
   useEffect(() => {
-    localStorage.setItem(layoutKey(client.id), JSON.stringify(blocks));
-  }, [client.id, blocks]);
+    let cancelled = false;
+    setReportSettingsLoaded(false);
+    Promise.all([
+      db.getClientSetting<ReportBlockConfig[]>(client.id, layoutKey(client.id), DEFAULT_BLOCKS),
+      db.getClientSetting<ReportTemplate[]>(client.id, templatesKey(client.id), []),
+      db.getClientSetting<boolean>(client.id, contractFooterKey(client.id), true),
+    ]).then(([savedBlocks, templates, showFooter]) => {
+      if (cancelled) return;
+      setBlocks(normalizeReportBlocks(savedBlocks));
+      setSavedTemplates(normalizeReportTemplates(templates));
+      setShowContractFooter(showFooter !== false);
+      setReportSettingsLoaded(true);
+    });
+    return () => { cancelled = true; };
+  }, [client.id]);
+
+  useEffect(() => {
+    if (!reportSettingsLoaded) return;
+    void db.setClientSetting(client.id, layoutKey(client.id), blocks);
+  }, [client.id, blocks, reportSettingsLoaded]);
 
   const orderedBlocks = [...blocks].sort((a, b) => a.order - b.order);
   const block = (id: ReportBlockId) => blocks.find(b => b.id === id) || DEFAULT_BLOCKS.find(b => b.id === id)!;
@@ -265,7 +412,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
     const name = templateName.trim() || 'Plantilla';
     const next = [...savedTemplates.filter(t => t.name !== name), { name, blocks }];
     setSavedTemplates(next);
-    localStorage.setItem(templatesKey(client.id), JSON.stringify(next));
+    void db.setClientSetting(client.id, templatesKey(client.id), next);
   };
   const applyTemplate = (name: string) => {
     const template = savedTemplates.find(t => t.name === name);
@@ -344,6 +491,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
 
   const exportReportPNG = async () => {
     if (!page1Ref.current) return;
+    const { default: html2canvas } = await import('html2canvas');
     const canvas = await html2canvas(page1Ref.current, {
       scale: 2,
       useCORS: true,
@@ -375,7 +523,12 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
     });
   };
 
-  const renderPageToPDF = async (el: HTMLElement, pdf: jsPDF, addNewPage = false) => {
+  const renderPageToPDF = async (
+    el: HTMLElement,
+    pdf: { addPage: () => void; addImage: (...args: any[]) => void },
+    html2canvas: typeof import('html2canvas').default,
+    addNewPage = false,
+  ) => {
     const PAGE_W = 210, PAGE_H = 297;
     const canvas = await html2canvas(el, {
       scale: 2, useCORS: true, logging: false, backgroundColor: '#ffffff',
@@ -395,10 +548,14 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
     if (isExporting) return;
     setIsExporting(true);
     try {
-      const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait', compress: true });
-      if (page1Ref.current) await renderPageToPDF(page1Ref.current, pdf, false);
+      const [{ default: html2canvas }, { default: JsPDF }] = await Promise.all([
+        import('html2canvas'),
+        import('jspdf'),
+      ]);
+      const pdf = new JsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait', compress: true });
+      if (page1Ref.current) await renderPageToPDF(page1Ref.current, pdf, html2canvas, false);
       if (condRef.current && (hacerCovenants.length > 0 || noHacerCovenants.length > 0)) {
-        await renderPageToPDF(condRef.current, pdf, true);
+        await renderPageToPDF(condRef.current, pdf, html2canvas, true);
       }
       const now = new Date();
       const ds = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
@@ -411,7 +568,8 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
     }
   };
 
-  const exportExcel = () => {
+  const exportExcel = async () => {
+    const XLSX = await import('xlsx');
     const wb = XLSX.utils.book_new();
     const formulaLabels: Record<string, string> = { ...metricLabels };
     sortedStatements.forEach(statement => {
@@ -460,12 +618,63 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
     }
 
     if (financialCovenants.length > 0) {
-      const rows = [['Covenant', 'Fórmula legible', 'Umbral', 'Valor actual', 'Estado']];
+      const insightRows: (string | number)[][] = [
+        ['ANÁLISIS DE TENDENCIA DE COVENANTS'],
+        [],
+        ['Insight para el analista'],
+        [covenantInsight.headline],
+        ...covenantInsight.bullets.map(bullet => [`• ${bullet}`]),
+        [],
+        ['Prioridad', 'Contrato', 'Covenant', 'Último periodo', 'Valor actual', 'Valor anterior', 'Cambio', 'Cambio %', 'Tendencia', 'Estado', 'Límite'],
+        ...covenantTrend.map((row, index) => [
+          index + 1,
+          row.isContractCovenant ? 'SÍ' : 'NO',
+          row.covenantName,
+          row.period,
+          row.value ?? '',
+          row.previousValue ?? '',
+          row.delta ?? '',
+          row.deltaPct ?? '',
+          row.movementLabel,
+          row.status.toUpperCase(),
+          row.operator === 'none' ? 'N/A' : `${row.operator} ${row.threshold}`,
+        ]),
+      ];
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(insightRows), 'Análisis Covenant');
+
+      const rows: (string | number)[][] = [['Covenant', 'Fórmula legible', 'Umbral', 'Valor actual', 'Estado', 'Tendencia', 'Contrato']];
       financialCovenants.forEach(cov => {
-        const { value, status } = evaluateCovenant(cov, sortedStatements);
-        rows.push([cov.name, formulaLabel(cov.formula || cov.name, formulaLabels), cov.threshold, value ?? '', status]);
+        const trend = covenantTrendById.get(cov.id);
+        rows.push([
+          cov.name,
+          formulaLabel(cov.formula || cov.name, formulaLabels),
+          cov.threshold,
+          trend?.value ?? '',
+          trend?.status.toUpperCase() || '',
+          trend?.movementLabel || '',
+          trend?.isContractCovenant ? 'SÍ' : 'NO',
+        ]);
       });
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), 'Covenants');
+
+      const evidenceRows: (string | number)[][] = [
+        ['Score preparación', covenantReadiness.score],
+        ['Covenants listos', covenantReadiness.readyCount],
+        ['Covenants calculados', covenantReadiness.calculatedCount],
+        ['Covenants con datos faltantes', covenantReadiness.missingDataCount],
+        [],
+        ['Covenant', 'Listo para reporte', 'Evidencia', 'Valor actual', 'Valor anterior', 'Inputs usados', 'Observaciones pendientes'],
+        ...covenantReadiness.rows.map(row => [
+          row.covenant.name,
+          row.ready ? 'SÍ' : 'NO',
+          row.evidence,
+          row.latestValue ?? '',
+          row.previousValue ?? '',
+          row.refsEvidence.map(ref => `${ref.label}: ${ref.value ?? 'N/D'} (${ref.source})`).join('; '),
+          row.issues.join('; '),
+        ]),
+      ];
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(evidenceRows), 'Evidencia Covenant');
     }
 
     XLSX.writeFile(wb, `Reporte_Monitoreo_${client.name}.xlsx`);
@@ -631,7 +840,14 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
           </label>
           <label>
             <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Línea Crédito</span>
-            <input type="number" value={client.totalCreditValue || 0} onChange={e => onClientUpdate({ totalCreditValue: Number(e.target.value) || 0 })} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-mono font-bold outline-none focus:ring-2 focus:ring-indigo-400" />
+            <input
+              key={`${client.id}:${client.totalCreditValue}`}
+              type="text"
+              inputMode="decimal"
+              defaultValue={client.totalCreditValue || 0}
+              onBlur={e => onClientUpdate({ totalCreditValue: parseFinancialNumber(e.target.value) })}
+              className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-mono font-bold outline-none focus:ring-2 focus:ring-indigo-400"
+            />
           </label>
           <label>
             <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Aforo requerido</span>
@@ -972,6 +1188,19 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
         {financialCovenants.length > 0 && blockVisible('financialCovenants') && (
           <div style={{ marginBottom: 24, width: '100%', ...blockStyle('financialCovenants') }}>
             <h3 style={{ fontSize: 12, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.1em', color: '#0066E6', margin: '0 0 16px 0' }}>Covenants Financieros</h3>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8, marginBottom: 10 }}>
+              {[
+                { label: 'Último corte', value: covenantTrend[0]?.period || 'N/D', color: '#334155', bg: '#f8fafc' },
+                { label: 'Deterioros', value: String(deteriorationCount), color: '#be123c', bg: '#fff1f2' },
+                { label: 'Mejoras', value: String(improvementCount), color: '#047857', bg: '#ecfdf5' },
+                { label: 'Soporte reporte', value: `${covenantReadiness.score}%`, color: covenantReadiness.score >= 80 ? '#047857' : covenantReadiness.score >= 50 ? '#92400e' : '#be123c', bg: covenantReadiness.score >= 80 ? '#ecfdf5' : covenantReadiness.score >= 50 ? '#fef3c7' : '#fff1f2' },
+              ].map(item => (
+                <div key={item.label} style={{ border: `1px solid ${item.color}25`, borderRadius: 8, padding: '6px 10px', backgroundColor: item.bg }}>
+                  <div style={{ fontSize: 7, color: '#64748b', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.08em' }}>{item.label}</div>
+                  <div style={{ fontSize: 13, color: item.color, fontWeight: 900, marginTop: 2 }}>{item.value}</div>
+                </div>
+              ))}
+            </div>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr>
@@ -982,11 +1211,16 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
               </thead>
               <tbody>
                 {financialCovenants.map((cov, i) => {
+                  const trend = covenantTrendById.get(cov.id);
+                  const trendColor = trend?.movement === 'deterioration' ? '#be123c' : trend?.movement === 'betterment' ? '#047857' : '#64748b';
+                  const statusColor = trend?.status === 'incumple' ? '#991b1b' : trend?.status === 'alerta' ? '#92400e' : '#065f46';
                   return (
                     <tr key={cov.id} style={{ backgroundColor: i % 2 === 0 ? '#fff' : '#f8fafc' }}>
                       <TD>
                         <span style={{ fontWeight: 900, color: '#0070c9' }}>{cov.name}</span>
                         {isContractCovenant(cov) && <span style={{ marginLeft: 6, fontSize: 7, fontWeight: 900, color: '#92400e', backgroundColor: '#fef3c7', border: '1px solid #fde68a', borderRadius: 4, padding: '1px 4px' }}>CONTRATO</span>}
+                        {trend && <span style={{ marginLeft: 6, fontSize: 7, fontWeight: 900, color: trendColor }}>{trend.movementLabel.toUpperCase()}</span>}
+                        {trend && <span style={{ marginLeft: 6, fontSize: 7, fontWeight: 900, color: statusColor }}>{trend.status.toUpperCase()}</span>}
                         <br/><span style={{ fontSize: 7, color: '#94a3b8' }}>{cov.description}</span>
                       </TD>
                       <TD style={{ ...cellCStyle, fontFamily: 'monospace', fontWeight: 900 }}>{cov.threshold}</TD>
@@ -1004,6 +1238,44 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
                 })}
               </tbody>
             </table>
+            <div style={{ marginTop: 10, backgroundColor: '#f8fafc', border: '1px solid #cbd5e1', borderLeft: '4px solid #0018E6', borderRadius: 8, padding: '8px 10px' }}>
+              <div style={{ fontSize: 7, fontWeight: 900, color: '#0018E6', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>Insight para el analista</div>
+              <p style={{ fontSize: 8, fontWeight: 700, color: '#334155', margin: '0 0 4px 0', lineHeight: 1.35 }}>{covenantInsight.headline}</p>
+              {covenantInsight.bullets.slice(0, 3).map((bullet, index) => (
+                <p key={index} style={{ fontSize: 7.5, color: '#475569', margin: '2px 0 0 0', lineHeight: 1.35 }}>• {bullet}</p>
+              ))}
+            </div>
+            {reportMode === 'interno' && covenantReadiness.rows.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontSize: 7, fontWeight: 900, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 5 }}>Checklist de evidencia</div>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr>
+                      <TH>Covenant</TH>
+                      <TH>Evidencia</TH>
+                      <TH>Inputs</TH>
+                      <TH>Pendiente</TH>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {covenantReadiness.rows.slice(0, 6).map(row => (
+                      <tr key={row.covenant.id} style={{ backgroundColor: row.ready ? '#f0fdf4' : '#fff7ed' }}>
+                        <TD style={{ fontWeight: 900, color: row.ready ? '#065f46' : '#9a3412' }}>{row.covenant.name}</TD>
+                        <TD style={{ fontSize: 7.5 }}>{row.evidence}</TD>
+                        <TD style={{ fontSize: 7.5 }}>
+                          {row.refsEvidence.length > 0
+                            ? row.refsEvidence.slice(0, 3).map(ref => `${ref.label}: ${ref.value === null ? 'N/D' : ref.value.toLocaleString('es-MX', { maximumFractionDigits: 2 })}`).join('; ')
+                            : 'Sin referencias explícitas'}
+                        </TD>
+                        <TD style={{ fontSize: 7.5, color: row.ready ? '#065f46' : '#9a3412' }}>
+                          {row.ready ? 'Listo' : row.issues.slice(0, 3).join('; ')}
+                        </TD>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
 

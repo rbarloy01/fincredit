@@ -141,6 +141,7 @@ CREATE TABLE IF NOT EXISTS covenant_annotations (
 CREATE TABLE IF NOT EXISTS financial_statements (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   client_id           UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  source_document_id  UUID,
   source_company_name TEXT,
   document_type       TEXT,
   period              TEXT NOT NULL,
@@ -156,12 +157,52 @@ CREATE TABLE IF NOT EXISTS financial_statements (
 CREATE TABLE IF NOT EXISTS loan_tapes (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   client_id      UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  source_document_id UUID,
   name           TEXT NOT NULL,
   file_name      TEXT,
   tape_type      TEXT DEFAULT 'credito',
   extracted_data JSONB,
+  analyst_state  JSONB NOT NULL DEFAULT '{}'::jsonb,
   upload_date    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- ── Source Documents / Private Upload Registry ──────────────────────────────
+CREATE TABLE IF NOT EXISTS documents (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id              UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  client_id           UUID REFERENCES clients(id) ON DELETE SET NULL,
+  source_kind         TEXT NOT NULL DEFAULT 'upload',
+  drive_file_id       TEXT,
+  drive_parent_id     TEXT,
+  drive_path          TEXT DEFAULT '',
+  source_uri          TEXT,
+  storage_bucket      TEXT,
+  storage_path        TEXT,
+  file_name           TEXT NOT NULL,
+  mime_type           TEXT,
+  size_bytes          BIGINT,
+  checksum            TEXT,
+  document_type       TEXT NOT NULL DEFAULT 'unknown',
+  period              TEXT DEFAULT '',
+  period_date         DATE,
+  source_status       TEXT NOT NULL DEFAULT 'active',
+  extraction_status   TEXT NOT NULL DEFAULT 'pending',
+  confidence_score    NUMERIC DEFAULT 0,
+  raw_metadata        JSONB NOT NULL DEFAULT '{}'::jsonb,
+  uploaded_by         UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  last_synced_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(org_id, drive_file_id)
+);
+
+ALTER TABLE financial_statements
+  ADD CONSTRAINT financial_statements_source_document_id_fkey
+  FOREIGN KEY (source_document_id) REFERENCES documents(id) ON DELETE SET NULL;
+
+ALTER TABLE loan_tapes
+  ADD CONSTRAINT loan_tapes_source_document_id_fkey
+  FOREIGN KEY (source_document_id) REFERENCES documents(id) ON DELETE SET NULL;
 
 -- ── SaaS Monitoring Core ─────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS monitoring_periods (
@@ -230,6 +271,7 @@ ALTER TABLE monitoring_periods    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE document_requirements ENABLE ROW LEVEL SECURITY;
 ALTER TABLE monitoring_alerts     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_events          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE documents             ENABLE ROW LEVEL SECURITY;
 
 CREATE OR REPLACE FUNCTION public.current_user_role()
 RETURNS TEXT
@@ -258,26 +300,227 @@ AS $$
   SELECT COALESCE(public.current_user_role() = 'manager', false)
 $$;
 
+CREATE OR REPLACE FUNCTION public.current_user_org_id()
+RETURNS UUID
+LANGUAGE SQL
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT org_id FROM profiles WHERE id = auth.uid()
+$$;
+
+CREATE OR REPLACE FUNCTION public.is_current_org(target_org_id UUID)
+RETURNS BOOLEAN
+LANGUAGE SQL
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT COALESCE(
+    public.is_approved_user()
+    AND target_org_id IS NOT NULL
+    AND target_org_id = public.current_user_org_id(),
+    false
+  )
+$$;
+
+CREATE OR REPLACE FUNCTION public.client_in_current_org(target_client_id UUID)
+RETURNS BOOLEAN
+LANGUAGE SQL
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT COALESCE(EXISTS (
+    SELECT 1
+    FROM clients c
+    WHERE c.id = target_client_id
+      AND public.is_current_org(c.org_id)
+  ), false)
+$$;
+
+CREATE OR REPLACE FUNCTION public.transaction_in_current_org(target_transaction_id UUID)
+RETURNS BOOLEAN
+LANGUAGE SQL
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT COALESCE(EXISTS (
+    SELECT 1
+    FROM transactions t
+    JOIN clients c ON c.id = t.client_id
+    WHERE t.id = target_transaction_id
+      AND public.is_current_org(c.org_id)
+  ), false)
+$$;
+
+CREATE OR REPLACE FUNCTION public.covenant_in_current_org(target_covenant_id UUID)
+RETURNS BOOLEAN
+LANGUAGE SQL
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT COALESCE(EXISTS (
+    SELECT 1
+    FROM covenants cov
+    JOIN clients c ON c.id = cov.client_id
+    WHERE cov.id = target_covenant_id
+      AND public.is_current_org(c.org_id)
+  ), false)
+$$;
+
 CREATE POLICY "profile_read_self_or_manager" ON profiles
   FOR SELECT TO authenticated
-  USING (id = auth.uid() OR public.is_manager());
+  USING (
+    id = auth.uid()
+    OR (
+      public.is_manager()
+      AND org_id = public.current_user_org_id()
+    )
+  );
 CREATE POLICY "profile_update_manager" ON profiles
   FOR UPDATE TO authenticated
-  USING (public.is_manager())
-  WITH CHECK (true);
+  USING (
+    public.is_manager()
+    AND org_id = public.current_user_org_id()
+  )
+  WITH CHECK (org_id = public.current_user_org_id());
 
-CREATE POLICY "approved_all" ON organizations         FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
-CREATE POLICY "approved_all" ON clients               FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
-CREATE POLICY "approved_all" ON custom_fields         FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
-CREATE POLICY "approved_all" ON client_settings       FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
-CREATE POLICY "approved_all" ON org_settings          FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
-CREATE POLICY "approved_all" ON transactions          FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
-CREATE POLICY "approved_all" ON contract_files        FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
-CREATE POLICY "approved_all" ON covenants             FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
-CREATE POLICY "approved_all" ON covenant_annotations  FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
-CREATE POLICY "approved_all" ON financial_statements  FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
-CREATE POLICY "approved_all" ON loan_tapes            FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
-CREATE POLICY "approved_all" ON monitoring_periods    FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
-CREATE POLICY "approved_all" ON document_requirements FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
-CREATE POLICY "approved_all" ON monitoring_alerts     FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
-CREATE POLICY "approved_all" ON audit_events          FOR ALL TO authenticated USING (public.is_approved_user()) WITH CHECK (public.is_approved_user());
+CREATE POLICY "org_scoped_all" ON organizations
+  FOR ALL TO authenticated
+  USING (public.is_current_org(id))
+  WITH CHECK (public.is_current_org(id));
+
+CREATE POLICY "client_org_scoped_all" ON clients
+  FOR ALL TO authenticated
+  USING (public.is_current_org(org_id))
+  WITH CHECK (public.is_current_org(org_id));
+
+CREATE POLICY "org_scoped_all" ON org_settings
+  FOR ALL TO authenticated
+  USING (public.is_current_org(org_id))
+  WITH CHECK (public.is_current_org(org_id));
+
+CREATE POLICY "client_child_org_scoped_all" ON custom_fields
+  FOR ALL TO authenticated
+  USING (public.client_in_current_org(client_id))
+  WITH CHECK (public.client_in_current_org(client_id));
+
+CREATE POLICY "client_child_org_scoped_all" ON client_settings
+  FOR ALL TO authenticated
+  USING (public.client_in_current_org(client_id))
+  WITH CHECK (public.client_in_current_org(client_id));
+
+CREATE POLICY "client_child_org_scoped_all" ON transactions
+  FOR ALL TO authenticated
+  USING (public.client_in_current_org(client_id))
+  WITH CHECK (public.client_in_current_org(client_id));
+
+CREATE POLICY "client_child_org_scoped_all" ON contract_files
+  FOR ALL TO authenticated
+  USING (
+    public.client_in_current_org(client_id)
+    AND public.transaction_in_current_org(transaction_id)
+  )
+  WITH CHECK (
+    public.client_in_current_org(client_id)
+    AND public.transaction_in_current_org(transaction_id)
+  );
+
+CREATE POLICY "client_child_org_scoped_all" ON covenants
+  FOR ALL TO authenticated
+  USING (public.client_in_current_org(client_id))
+  WITH CHECK (public.client_in_current_org(client_id));
+
+CREATE POLICY "covenant_child_org_scoped_all" ON covenant_annotations
+  FOR ALL TO authenticated
+  USING (public.covenant_in_current_org(covenant_id))
+  WITH CHECK (public.covenant_in_current_org(covenant_id));
+
+CREATE POLICY "client_child_org_scoped_all" ON financial_statements
+  FOR ALL TO authenticated
+  USING (public.client_in_current_org(client_id))
+  WITH CHECK (public.client_in_current_org(client_id));
+
+CREATE POLICY "client_child_org_scoped_all" ON loan_tapes
+  FOR ALL TO authenticated
+  USING (public.client_in_current_org(client_id))
+  WITH CHECK (public.client_in_current_org(client_id));
+
+CREATE POLICY "document_org_scoped_all" ON documents
+  FOR ALL TO authenticated
+  USING (public.is_current_org(org_id))
+  WITH CHECK (public.is_current_org(org_id));
+
+CREATE POLICY "client_child_org_scoped_all" ON monitoring_periods
+  FOR ALL TO authenticated
+  USING (public.client_in_current_org(client_id))
+  WITH CHECK (public.client_in_current_org(client_id));
+
+CREATE POLICY "client_child_org_scoped_all" ON document_requirements
+  FOR ALL TO authenticated
+  USING (public.client_in_current_org(client_id))
+  WITH CHECK (public.client_in_current_org(client_id));
+
+CREATE POLICY "client_child_org_scoped_all" ON monitoring_alerts
+  FOR ALL TO authenticated
+  USING (public.client_in_current_org(client_id))
+  WITH CHECK (public.client_in_current_org(client_id));
+
+CREATE POLICY "client_child_org_scoped_all" ON audit_events
+  FOR ALL TO authenticated
+  USING (client_id IS NOT NULL AND public.client_in_current_org(client_id))
+  WITH CHECK (client_id IS NOT NULL AND public.client_in_current_org(client_id));
+
+-- ── Private Supabase Storage Bucket ─────────────────────────────────────────
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+  'financial-documents',
+  'financial-documents',
+  false,
+  52428800,
+  ARRAY[
+    'application/pdf',
+    'text/csv',
+    'text/plain',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'image/png',
+    'image/jpeg',
+    'image/webp'
+  ]
+)
+ON CONFLICT (id) DO UPDATE
+SET public = false,
+    file_size_limit = EXCLUDED.file_size_limit,
+    allowed_mime_types = EXCLUDED.allowed_mime_types;
+
+CREATE POLICY "financial_document_storage_select" ON storage.objects
+  FOR SELECT TO authenticated
+  USING (
+    bucket_id = 'financial-documents'
+    AND public.is_current_org(((storage.foldername(name))[1])::uuid)
+  );
+
+CREATE POLICY "financial_document_storage_insert" ON storage.objects
+  FOR INSERT TO authenticated
+  WITH CHECK (
+    bucket_id = 'financial-documents'
+    AND public.is_current_org(((storage.foldername(name))[1])::uuid)
+  );
+
+CREATE POLICY "financial_document_storage_update" ON storage.objects
+  FOR UPDATE TO authenticated
+  USING (
+    bucket_id = 'financial-documents'
+    AND public.is_current_org(((storage.foldername(name))[1])::uuid)
+  )
+  WITH CHECK (
+    bucket_id = 'financial-documents'
+    AND public.is_current_org(((storage.foldername(name))[1])::uuid)
+  );
+
+CREATE POLICY "financial_document_storage_delete" ON storage.objects
+  FOR DELETE TO authenticated
+  USING (
+    bucket_id = 'financial-documents'
+    AND public.is_current_org(((storage.foldername(name))[1])::uuid)
+  );

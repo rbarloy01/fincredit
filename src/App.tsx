@@ -1,17 +1,28 @@
-import React, { useState, useEffect } from 'react';
+import React, { lazy, Suspense, useState, useEffect } from 'react';
 import { auth, Session } from './services/auth';
 import LoginPage from './components/auth/LoginPage';
 import ClientList from './components/clients/ClientList';
-import ClientForm from './components/clients/ClientForm';
-import ClientDetail from './components/clients/ClientDetail';
-import SettingsPage from './components/settings/SettingsPage';
-import BenchmarkingPage from './components/benchmarking/BenchmarkingPage';
-import AccountConsolidationPage from './components/consolidation/AccountConsolidationPage';
 import { Client, CustomField } from './db/index';
 import { AISettings, loadAISettings } from './services/ai';
-import { BarChart3, Building2, Layers3, Settings, LogOut, ShieldCheck, Moon, Sun } from 'lucide-react';
+import { BarChart3, Building2, Inbox, Layers3, Settings, LogOut, ShieldCheck, Moon, Sun } from 'lucide-react';
 
-type Route = 'clients' | 'client_new' | 'client_edit' | 'client_detail' | 'benchmarking' | 'consolidation' | 'settings';
+const ClientForm = lazy(() => import('./components/clients/ClientForm'));
+const ClientDetail = lazy(() => import('./components/clients/ClientDetail'));
+const SettingsPage = lazy(() => import('./components/settings/SettingsPage'));
+const BenchmarkingPage = lazy(() => import('./components/benchmarking/BenchmarkingPage'));
+const AccountConsolidationPage = lazy(() => import('./components/consolidation/AccountConsolidationPage'));
+const IngestionInboxPage = lazy(() => import('./components/ingestion/IngestionInboxPage'));
+
+type Route = 'clients' | 'client_new' | 'client_edit' | 'client_detail' | 'benchmarking' | 'consolidation' | 'ingestion' | 'settings';
+
+const RouteFallback = () => (
+  <div className="flex min-h-[60vh] items-center justify-center">
+    <svg className="animate-spin h-8 w-8 text-indigo-500" viewBox="0 0 24 24" fill="none">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+    </svg>
+  </div>
+);
 
 const App: React.FC = () => {
   const [session, setSession] = useState<Session | null>(null);
@@ -23,14 +34,26 @@ const App: React.FC = () => {
   const [theme, setTheme] = useState<'day' | 'night'>(() => (localStorage.getItem('finmonitor_theme') as 'day' | 'night') || 'day');
 
   useEffect(() => {
-    auth.createFirstUser().then(() => {
-      const s = auth.getSession();
-      setSession(s);
-      setInitializing(false);
-    }).catch(err => {
-      console.error('Initialization error:', err);
-      setInitializing(false);
-    });
+    let active = true;
+    const initialize = async () => {
+      try {
+        await Promise.race([
+          auth.createFirstUser(),
+          new Promise<void>((_, reject) => {
+            window.setTimeout(() => reject(new Error('Tiempo de espera agotado al restaurar la sesión')), 6000);
+          }),
+        ]);
+      } catch (err) {
+        console.error('Initialization error:', err);
+      } finally {
+        if (active) {
+          setSession(auth.getSession());
+          setInitializing(false);
+        }
+      }
+    };
+    initialize();
+    return () => { active = false; };
   }, []);
 
   const handleLogin = (s: Session) => {
@@ -72,12 +95,12 @@ const App: React.FC = () => {
 
   if (initializing) {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+      <div className="bluebonnet-auth min-h-screen bg-slate-950 flex items-center justify-center">
         <div className="text-center">
-          <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+          <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg shadow-indigo-500/30">
             <ShieldCheck className="w-8 h-8 text-white" />
           </div>
-          <p className="text-slate-400 text-sm">Iniciando FinMonitor...</p>
+          <p className="text-slate-400 text-sm font-bold">Iniciando FinMonitor...</p>
         </div>
       </div>
     );
@@ -89,9 +112,9 @@ const App: React.FC = () => {
 
   if (session.role === 'pending') {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center px-4">
+      <div className="bluebonnet-auth min-h-screen bg-slate-950 flex items-center justify-center px-4">
         <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-10 text-center shadow-2xl">
-          <div className="w-16 h-16 bg-amber-500 rounded-2xl flex items-center justify-center mx-auto mb-5">
+          <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-5 shadow-lg shadow-indigo-500/30">
             <ShieldCheck className="w-8 h-8 text-white" />
           </div>
           <h1 className="text-2xl font-black text-white tracking-tight">Acceso pendiente</h1>
@@ -104,7 +127,7 @@ const App: React.FC = () => {
           </div>
           <button
             onClick={handleLogout}
-            className="mt-6 w-full bg-white hover:bg-slate-100 text-slate-900 font-black py-3 rounded-xl text-sm"
+            className="mt-6 w-full bg-white hover:bg-slate-100 text-slate-900 font-black py-3 rounded-xl text-sm shadow-lg"
           >
             Cerrar sesión
           </button>
@@ -117,6 +140,7 @@ const App: React.FC = () => {
     { id: 'clients' as Route, label: 'Clientes', icon: Building2 },
     { id: 'benchmarking' as Route, label: 'Benchmarking', icon: BarChart3 },
     { id: 'consolidation' as Route, label: 'Consolidación', icon: Layers3 },
+    ...(session.role === 'manager' ? [{ id: 'ingestion' as Route, label: 'Ingestion', icon: Inbox }] : []),
     ...(session.role === 'manager' ? [{ id: 'settings' as Route, label: 'Configuración', icon: Settings }] : []),
   ];
 
@@ -127,12 +151,12 @@ const App: React.FC = () => {
         {/* Logo */}
         <div className="p-6 border-b border-slate-100">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 bg-indigo-600 rounded-xl flex items-center justify-center shadow-md">
+            <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center shadow-md shadow-indigo-200">
               <ShieldCheck className="w-5 h-5 text-white" />
             </div>
             <div>
               <span className="text-lg font-black text-slate-900 tracking-tight">FinMonitor</span>
-              <p className="text-[10px] text-slate-400 font-medium leading-none mt-0.5">Crédito IFNB</p>
+              <p className="text-[10px] text-indigo-600 font-black leading-none mt-0.5 uppercase tracking-widest">Bluebonnet</p>
             </div>
           </div>
         </div>
@@ -146,7 +170,7 @@ const App: React.FC = () => {
               className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-bold transition-all ${
                 route === item.id || (route === 'client_detail' && item.id === 'clients') || (route === 'client_new' && item.id === 'clients') || (route === 'client_edit' && item.id === 'clients')
                   ? 'bg-indigo-600 text-white shadow-md shadow-indigo-200'
-                  : 'text-slate-500 hover:bg-slate-50 hover:text-slate-900'
+                  : 'text-slate-500 hover:bg-slate-50 hover:text-slate-900 border border-transparent hover:border-indigo-100'
               }`}
             >
               <item.icon className="w-4 h-4" />
@@ -162,14 +186,14 @@ const App: React.FC = () => {
             className="mb-3 w-full flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl text-xs font-black bg-slate-50 text-slate-600 hover:bg-slate-100 transition-all border border-slate-100"
           >
             <span className="flex items-center gap-2">
-              {theme === 'day' ? <Sun className="w-4 h-4 text-amber-500" /> : <Moon className="w-4 h-4 text-indigo-300" />}
+              {theme === 'day' ? <Sun className="w-4 h-4 text-cyan-500" /> : <Moon className="w-4 h-4 text-indigo-300" />}
               {theme === 'day' ? 'Modo día' : 'Modo noche'}
             </span>
             <span className="text-[10px] uppercase tracking-widest">{theme === 'day' ? 'Light' : 'Dark'}</span>
           </button>
           <div className="bg-slate-50 rounded-xl p-3 mb-3">
             <div className="flex items-center gap-3">
-              <div className="w-8 h-8 bg-indigo-200 rounded-full flex items-center justify-center text-indigo-800 font-black text-sm">
+              <div className="w-8 h-8 bg-indigo-200 rounded-full flex items-center justify-center text-indigo-800 font-black text-sm ring-2 ring-white">
                 {session.userName.charAt(0).toUpperCase()}
               </div>
               <div className="flex-1 min-w-0">
@@ -199,50 +223,57 @@ const App: React.FC = () => {
 
       {/* Main content */}
       <main className="flex-1 overflow-y-auto">
-        {(route === 'clients') && (
-          <ClientList
-            session={session}
-            onSelectClient={handleSelectClient}
-            onNewClient={handleNewClient}
-          />
-        )}
+        <Suspense fallback={<RouteFallback />}>
+          {(route === 'clients') && (
+            <ClientList
+              session={session}
+              onSelectClient={handleSelectClient}
+              onNewClient={handleNewClient}
+            />
+          )}
 
-        {route === 'benchmarking' && (
-          <BenchmarkingPage />
-        )}
+          {route === 'benchmarking' && (
+            <BenchmarkingPage />
+          )}
 
-        {route === 'consolidation' && (
-          <AccountConsolidationPage aiSettings={aiSettings} session={session} />
-        )}
+          {route === 'consolidation' && (
+            <AccountConsolidationPage aiSettings={aiSettings} session={session} />
+          )}
 
-        {(route === 'client_new' || route === 'client_edit') && (
-          <ClientForm
-            session={session}
-            initialData={editingClient}
-            onSave={handleSaveClient}
-            onCancel={() => setRoute('clients')}
-          />
-        )}
+          {route === 'ingestion' && session.role === 'manager' && (
+            <IngestionInboxPage session={session} />
+          )}
 
-        {route === 'client_detail' && selectedClientId && (
-          <ClientDetail
-            clientId={selectedClientId}
-            session={session}
-            aiSettings={aiSettings}
-            onBack={() => setRoute('clients')}
-            onDeleted={() => {
-              setSelectedClientId(null);
-              setRoute('clients');
-            }}
-          />
-        )}
+          {(route === 'client_new' || route === 'client_edit') && (
+            <ClientForm
+              session={session}
+              aiSettings={aiSettings}
+              initialData={editingClient}
+              onSave={handleSaveClient}
+              onCancel={() => setRoute('clients')}
+            />
+          )}
 
-        {route === 'settings' && (
-          <SettingsPage
-            session={session}
-            onSettingsChange={handleSettingsChange}
-          />
-        )}
+          {route === 'client_detail' && selectedClientId && (
+            <ClientDetail
+              clientId={selectedClientId}
+              session={session}
+              aiSettings={aiSettings}
+              onBack={() => setRoute('clients')}
+              onDeleted={() => {
+                setSelectedClientId(null);
+                setRoute('clients');
+              }}
+            />
+          )}
+
+          {route === 'settings' && (
+            <SettingsPage
+              session={session}
+              onSettingsChange={handleSettingsChange}
+            />
+          )}
+        </Suspense>
       </main>
     </div>
   );

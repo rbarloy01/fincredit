@@ -44,7 +44,7 @@ const CompanyOverviewPanel: React.FC<Props> = ({ client, statements, covenants, 
   const generate = async () => {
     setGenerating(true);
     try {
-      if (aiSettings.apiKey && latest) {
+      if (latest) {
         const covData = covenants.filter(c => c.type === 'financial').map(c => {
           const r = evaluateCovenantAuto(c, statements);
           return { name: c.name, threshold: c.threshold, value: r.value?.toString(), status: r.status };

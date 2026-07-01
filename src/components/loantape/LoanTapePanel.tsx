@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { lazy, Suspense, useState, useEffect, useRef } from 'react';
 import { db, LoanTape_DB } from '../../db/index';
 import { Session } from '../../services/auth';
 import { AISettings, analyzeLoanTape, StructuredLoanTapeAnalysis } from '../../services/ai';
@@ -6,12 +6,18 @@ import {
   Upload, Trash2, Sparkles, TrendingUp, TrendingDown, Minus,
   BarChart3, FileSpreadsheet, ChevronDown, ChevronRight,
   ShieldCheck, ShieldAlert, ShieldX, AlertTriangle, CheckCircle, XCircle,
-  Download, FileText,
+  FileText, Bot, Plus, LayoutDashboard,
 } from 'lucide-react';
-import { exportLoanTape } from '../../lib/export';
-import { analyzeLoanTapesLocally, standardizeLoanTape } from '../../lib/loanTapeAnalytics';
-import * as XLSX from 'xlsx';
+import { analyzeLoanTapesLocally, answerLoanTapeQuestion, buildLoanTapeDataProfile, standardizeLoanTape } from '../../lib/loanTapeAnalytics';
+import {
+  createLoanTapeWorkspaceBlock,
+  LoanTapeAnalystState,
+  LoanTapeBlockType,
+  normalizeLoanTapeAnalystState,
+} from '../../lib/loanTapeWorkspace';
 import WorkingOverlay from '../common/WorkingOverlay';
+
+const WorkspaceBlock = lazy(() => import('./LoanTapeWorkspaceBlock'));
 
 interface Props {
   clientId: string;
@@ -78,7 +84,8 @@ const SEVERITY_COLORS: Record<string, string> = {
 const fmtMoney = (value: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 0 }).format(value || 0);
 const fmtPct = (value: number) => `${((value || 0) * 100).toFixed(1)}%`;
 const fmtNum = (value: number) => Number.isFinite(Number(value)) ? Number(value).toFixed(2) : '—';
-
+const QUICK_QUESTIONS = ['qué falta', 'mora', 'top concentración', 'por producto', 'cambios vs mes anterior'];
+const BLOCK_PROMPTS = ['Resumen ejecutivo', 'Gráfica de mora por DPD', 'Top clientes por saldo', 'Cartera por producto', 'Evolución vs mes anterior'];
 function SmallDataTable({ title, rows, columns }: { title: string; rows?: any[]; columns: Array<{ key: string; label: string; format?: (value: any) => string }> }) {
   if (!rows?.length) return null;
   return (
@@ -113,12 +120,50 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
   const [analyzing, setAnalyzing] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [exporting, setExporting] = useState<'excel' | 'pdf' | null>(null);
+  const [analystStates, setAnalystStates] = useState<Record<string, LoanTapeAnalystState>>({});
+  const analystStatesRef = useRef<Record<string, LoanTapeAnalystState>>({});
+  const analystSaveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    return () => {
+      Object.keys(analystSaveTimers.current).forEach(tapeId => {
+        clearTimeout(analystSaveTimers.current[tapeId]);
+        void db.updateLoanTape(tapeId, { analystState: analystStatesRef.current[tapeId] });
+      });
+    };
+  }, []);
+
+  const saveAnalystState = (tapeId: string, next: LoanTapeAnalystState, debounce = false) => {
+    const normalized = { ...next, updatedAt: new Date().toISOString() };
+    analystStatesRef.current = { ...analystStatesRef.current, [tapeId]: normalized };
+    setAnalystStates(analystStatesRef.current);
+    setTapes(current => current.map(tape => tape.id === tapeId ? { ...tape, analystState: normalized } : tape));
+
+    if (analystSaveTimers.current[tapeId]) clearTimeout(analystSaveTimers.current[tapeId]);
+    const persist = () => {
+      delete analystSaveTimers.current[tapeId];
+      db.updateLoanTape(tapeId, { analystState: analystStatesRef.current[tapeId] })
+        .catch(error => console.error('Unable to persist loan tape analyst state.', error));
+    };
+    if (debounce) analystSaveTimers.current[tapeId] = setTimeout(persist, 500);
+    else persist();
+  };
+
+  const updateAnalystState = (
+    tapeId: string,
+    updater: (current: LoanTapeAnalystState) => LoanTapeAnalystState,
+    debounce = false,
+  ) => {
+    const current = analystStatesRef.current[tapeId] || normalizeLoanTapeAnalystState(undefined);
+    saveAnalystState(tapeId, updater(current), debounce);
+  };
 
   const handleExport = async (format: 'excel' | 'pdf') => {
     setExporting(format);
     try {
+      const { exportLoanTape } = await import('../../lib/export');
       await exportLoanTape(tapes, clientName, format, format === 'pdf' ? panelRef.current ?? undefined : undefined);
     } finally {
       setExporting(null);
@@ -127,8 +172,33 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
 
   const loadTapes = async () => {
     const list = await db.getLoanTapes(clientId);
-    setTapes(list);
-    onTapesChange(list);
+    let legacyBlocks: Record<string, any[]> = {};
+    try {
+      legacyBlocks = JSON.parse(localStorage.getItem('finmonitor_loan_tape_workspace') || '{}');
+    } catch {}
+    const migrations: Promise<void>[] = [];
+    const hydratedList = list.map(tape => {
+      const persisted = normalizeLoanTapeAnalystState(tape.analystState);
+      if (persisted.workspaceBlocks.length || !Array.isArray(legacyBlocks[tape.id]) || !legacyBlocks[tape.id].length) return tape;
+      const analystState = {
+        ...persisted,
+        workspaceBlocks: legacyBlocks[tape.id],
+        updatedAt: new Date().toISOString(),
+      };
+      migrations.push(db.updateLoanTape(tape.id, { analystState }));
+      return { ...tape, analystState };
+    });
+    if (migrations.length) {
+      const results = await Promise.allSettled(migrations);
+      if (results.every(result => result.status === 'fulfilled')) {
+        localStorage.removeItem('finmonitor_loan_tape_workspace');
+      }
+    }
+    const loadedStates = Object.fromEntries(hydratedList.map(tape => [tape.id, normalizeLoanTapeAnalystState(tape.analystState)]));
+    analystStatesRef.current = loadedStates;
+    setAnalystStates(loadedStates);
+    setTapes(hydratedList);
+    onTapesChange(hydratedList);
     setLoading(false);
   };
 
@@ -139,6 +209,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
       throw new Error(`${file.name}: solo se aceptan archivos Excel (.xlsx, .xls) o CSV`);
     }
     const buffer = await file.arrayBuffer();
+    const XLSX = await import('xlsx');
     const workbook = XLSX.read(new Uint8Array(buffer), { type: 'array' });
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
@@ -150,8 +221,16 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
     if (headers.some(h => /factoraje|factor|cedente/i.test(h))) tapeType = 'factoraje';
     else if (headers.some(h => /credito|prestamo|loan|vencimiento|saldo/i.test(h))) tapeType = 'credito';
 
+    const sourceDocument = await db.uploadClientDocument(clientId, file, 'loan_tape', {
+      clientName,
+      uploadSurface: 'loan_tape_panel',
+      rows: rows.length,
+      tapeType,
+    });
+
     return db.createLoanTape({
       clientId,
+      sourceDocumentId: sourceDocument.id,
       name: file.name.replace(/\.[^.]+$/, ''),
       fileName: file.name,
       tapeType,
@@ -188,9 +267,13 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
         : { ...tape.extractedData, rows, _standardized: standardized };
       const localTapes = tapes.map(t => t.id === tape.id ? { ...t, extractedData: baseData } : t);
       const localAnalysis = analyzeLoanTapesLocally(localTapes, tape.id);
-      const analysis = aiSettings.apiKey
-        ? { ...localAnalysis, ...(await analyzeLoanTape(aiSettings, rows, clientName || clientId)), portfolioQuality: localAnalysis.portfolioQuality, dpd_distribution: localAnalysis.dpd_distribution, concentrations: localAnalysis.concentrations, anomalies: localAnalysis.anomalies, validation: localAnalysis.validation }
-        : localAnalysis;
+      let analysis = localAnalysis;
+      try {
+        analysis = { ...localAnalysis, ...(await analyzeLoanTape(aiSettings, rows, clientName || clientId)), portfolioQuality: localAnalysis.portfolioQuality, dpd_distribution: localAnalysis.dpd_distribution, concentrations: localAnalysis.concentrations, anomalies: localAnalysis.anomalies, validation: localAnalysis.validation };
+      } catch (error) {
+        if (aiSettings.apiKey) throw error;
+        console.warn('Loan tape AI analysis unavailable; using local analysis.', error);
+      }
       const updatedData = Array.isArray(tape.extractedData)
         ? { rows: tape.extractedData, _standardized: standardized, _analysis: analysis }
         : { ...baseData, _analysis: analysis };
@@ -207,6 +290,50 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
     if (!confirm('¿Eliminar este loan tape?')) return;
     await db.deleteLoanTape(id);
     await loadTapes();
+  };
+
+  const askQuickQuestion = (tapeId: string, question: string, standardizedRows: any[], analysis: StructuredLoanTapeAnalysis | null, mappingRows: any[]) => {
+    const answer = answerLoanTapeQuestion(question, standardizedRows, analysis, mappingRows);
+    updateAnalystState(tapeId, current => ({
+      ...current,
+      qa: {
+        draft: question,
+        question,
+        answer,
+        updatedAt: new Date().toISOString(),
+      },
+    }));
+  };
+
+  const createWorkspaceBlock = (
+    tapeId: string,
+    prompt: string,
+    standardizedRows: any[],
+    analysis: StructuredLoanTapeAnalysis | null,
+    mappingRows: any[],
+  ) => {
+    const cleanPrompt = prompt.trim();
+    if (!cleanPrompt) return;
+    const item = createLoanTapeWorkspaceBlock(cleanPrompt, standardizedRows, analysis, mappingRows);
+    updateAnalystState(tapeId, current => ({
+      ...current,
+      workspaceBlocks: [...current.workspaceBlocks, item],
+      qa: { ...current.qa, draft: '' },
+    }));
+  };
+
+  const updateWorkspaceBlockType = (tapeId: string, blockId: string, type: LoanTapeBlockType) => {
+    updateAnalystState(tapeId, current => ({
+      ...current,
+      workspaceBlocks: current.workspaceBlocks.map(item => item.id === blockId ? { ...item, type } : item),
+    }));
+  };
+
+  const deleteWorkspaceBlock = (tapeId: string, blockId: string) => {
+    updateAnalystState(tapeId, current => ({
+      ...current,
+      workspaceBlocks: current.workspaceBlocks.filter(item => item.id !== blockId),
+    }));
   };
 
   if (loading) {
@@ -288,6 +415,8 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
           const mappingRows: any[] = Array.isArray(data?._mappingReport) ? data._mappingReport : [];
           const standardizedRows: any[] = Array.isArray(data?._standardized) ? data._standardized : [];
           const analysis: StructuredLoanTapeAnalysis | null = data?._analysis || null;
+          const profile = buildLoanTapeDataProfile(standardizedRows, mappingRows);
+          const analystState = analystStates[tape.id] || normalizeLoanTapeAnalystState(tape.analystState);
 
           return (
             <div key={tape.id} className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
@@ -325,7 +454,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
                       </svg>
                     ) : <Sparkles className="w-3.5 h-3.5" />}
-                    {analyzing === tape.id ? 'Analizando...' : 'Analizar'}
+                    {analyzing === tape.id ? 'Analizando...' : analysis ? 'Actualizar análisis' : 'Analizar'}
                   </button>
                   <button onClick={() => handleDelete(tape.id)} className="text-slate-300 hover:text-rose-500 transition-colors">
                     <Trash2 className="w-4 h-4" />
@@ -336,6 +465,122 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
               {/* Expanded: analysis */}
               {isExpanded && analysis && (
                 <div className="border-t border-slate-100 p-6 bg-slate-50 space-y-6">
+                  <div className="bg-slate-900 text-white rounded-2xl border border-slate-800 overflow-hidden">
+                    <div className="grid grid-cols-1 xl:grid-cols-3">
+                      <div className="p-5 border-b xl:border-b-0 xl:border-r border-white/10">
+                        <div className="flex items-center gap-2 mb-3">
+                          <Bot className="w-4 h-4 text-indigo-300" />
+                          <p className="text-xs font-black uppercase tracking-widest text-indigo-200">Julius-style Data Check</p>
+                        </div>
+                        <div className="flex items-end gap-3">
+                          <p className="text-4xl font-black">{profile.readinessScore}</p>
+                          <p className="text-xs font-bold text-slate-300 mb-1">/100 preparación</p>
+                        </div>
+                        <p className="text-xs text-slate-300 mt-3 leading-relaxed">
+                          {profile.canAnalyze
+                            ? 'El tape se puede analizar, pero revisa huecos antes de tomar decisiones de crédito.'
+                            : 'Faltan campos base; el análisis puede verse bonito pero no sería confiable todavía.'}
+                        </p>
+                      </div>
+                      <div className="p-5 border-b xl:border-b-0 xl:border-r border-white/10">
+                        <p className="text-xs font-black uppercase tracking-widest text-slate-300 mb-3">Qué falta realmente</p>
+                        <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
+                          {profile.missingFields.filter(f => f.severity !== 'low').slice(0, 6).map(f => (
+                            <div key={f.field} className="bg-white/5 border border-white/10 rounded-xl p-3">
+                              <div className="flex items-center justify-between gap-3">
+                                <p className="text-xs font-black text-white">{f.field}</p>
+                                <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${f.severity === 'high' ? 'bg-rose-400/20 text-rose-100' : 'bg-amber-400/20 text-amber-100'}`}>
+                                  {f.mapped ? `${(f.missingPct * 100).toFixed(0)}% vacío` : 'NO MAPEADO'}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-slate-300 mt-1">{f.impact}</p>
+                            </div>
+                          ))}
+                          {profile.missingFields.every(f => f.severity === 'low') && (
+                            <p className="text-sm font-semibold text-emerald-200">No hay campos críticos faltantes relevantes.</p>
+                          )}
+                        </div>
+                      </div>
+                      <div className="p-5">
+                        <p className="text-xs font-black uppercase tracking-widest text-slate-300 mb-1">Construye con el chat</p>
+                        <p className="text-[11px] text-slate-400 mb-3">Pide una tabla, KPI o gráfica y se añadirá al workspace.</p>
+                        <div className="flex gap-2">
+                          <input
+                            value={analystState.qa.draft}
+                            onChange={e => updateAnalystState(tape.id, current => ({
+                              ...current,
+                              qa: { ...current.qa, draft: e.target.value },
+                            }), true)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') createWorkspaceBlock(tape.id, analystState.qa.draft, standardizedRows, analysis, mappingRows);
+                            }}
+                            placeholder='Ej. "gráfica de mora por DPD"'
+                            className="min-w-0 flex-1 bg-white/10 border border-white/10 rounded-xl px-3 py-2 text-xs text-white placeholder:text-slate-400 outline-none focus:border-indigo-300"
+                          />
+                          <button
+                            onClick={() => createWorkspaceBlock(tape.id, analystState.qa.draft, standardizedRows, analysis, mappingRows)}
+                            className="bg-indigo-500 hover:bg-indigo-400 text-white rounded-xl px-3 flex items-center justify-center transition-all"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5 mt-2">
+                          {BLOCK_PROMPTS.map(question => (
+                            <button
+                              key={question}
+                              onClick={() => createWorkspaceBlock(tape.id, question, standardizedRows, analysis, mappingRows)}
+                              className="text-[10px] font-black uppercase tracking-wide text-slate-200 bg-white/10 hover:bg-white/15 border border-white/10 rounded-full px-2.5 py-1 transition-all"
+                            >
+                              {question}
+                            </button>
+                          ))}
+                        </div>
+                        <div className="mt-3 bg-black/20 border border-white/10 rounded-xl p-3 flex items-center gap-3">
+                          <LayoutDashboard className="w-5 h-5 text-indigo-300" />
+                          <div>
+                            <p className="text-sm font-black">{analystState.workspaceBlocks.length} bloques</p>
+                            <p className="text-[10px] text-slate-400">Guardados con este loan tape</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-5">
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <Bot className="w-4 h-4 text-indigo-600" />
+                          <p className="text-xs font-black uppercase tracking-widest text-indigo-900">Workspace de análisis</p>
+                        </div>
+                        <p className="text-xs text-indigo-700 mt-1">Cada mensaje crea un bloque nuevo; puedes cambiarlo entre tabla, barras, línea o dona.</p>
+                      </div>
+                      <button
+                        onClick={() => createWorkspaceBlock(tape.id, 'Resumen ejecutivo', standardizedRows, analysis, mappingRows)}
+                        className="flex items-center gap-1.5 bg-indigo-600 text-white rounded-xl px-3 py-2 text-xs font-black hover:bg-indigo-500"
+                      >
+                        <Plus className="w-3.5 h-3.5" /> Nuevo bloque
+                      </button>
+                    </div>
+                  </div>
+
+                  {analystState.workspaceBlocks.length > 0 && (
+                    <div className="space-y-4">
+                      {analystState.workspaceBlocks.map(item => (
+                        <Suspense
+                          key={item.id}
+                          fallback={<div className="h-48 animate-pulse rounded-2xl border border-slate-200 bg-white" />}
+                        >
+                          <WorkspaceBlock
+                            item={item}
+                            onDelete={() => deleteWorkspaceBlock(tape.id, item.id)}
+                            onTypeChange={type => updateWorkspaceBlockType(tape.id, item.id, type)}
+                          />
+                        </Suspense>
+                      ))}
+                    </div>
+                  )}
+
                   {/* Risk score + summary */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div className="bg-white rounded-xl p-5 border border-slate-200 flex flex-col items-center justify-center">
@@ -671,11 +916,63 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
 
               {/* Expanded: no analysis */}
               {isExpanded && !analysis && (
-                <div className="border-t border-slate-100 p-6 bg-slate-50">
-                  <div className="text-center py-6">
+                <div className="border-t border-slate-100 p-6 bg-slate-50 space-y-4">
+                  <div className="bg-white rounded-2xl border border-slate-200 p-5">
+                    <div className="flex items-center justify-between gap-4 mb-4">
+                      <div>
+                        <p className="text-xs font-black text-slate-700 uppercase tracking-widest">Diagnóstico antes de analizar</p>
+                        <p className="text-sm text-slate-500 mt-1">{rows.length} registros cargados · preparación {profile.readinessScore}/100</p>
+                      </div>
+                      <StatusBadge status={profile.readinessScore >= 80 ? 'good' : profile.readinessScore >= 55 ? 'warning' : 'critical'} />
+                    </div>
+                    <SmallDataTable
+                      title="Campos críticos faltantes"
+                      rows={profile.missingFields.filter(f => f.severity !== 'low')}
+                      columns={[
+                        { key: 'field', label: 'Campo' },
+                        { key: 'mapped', label: 'Mapeado', format: v => v ? 'Sí' : 'No' },
+                        { key: 'missingPct', label: '% Vacío', format: v => fmtPct(v || 0) },
+                        { key: 'impact', label: 'Impacto' },
+                      ]}
+                    />
+                    {profile.nextActions.length > 0 && (
+                      <div className="mt-4">
+                        <p className="text-xs font-black text-slate-700 uppercase tracking-widest mb-2">Siguiente mejor acción</p>
+                        <div className="space-y-2">
+                          {profile.nextActions.map((item, index) => (
+                            <p key={index} className="text-xs font-semibold text-slate-600 bg-slate-50 border border-slate-100 rounded-xl px-3 py-2">{item}</p>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      {QUICK_QUESTIONS.slice(0, 3).map(question => (
+                        <button
+                          key={question}
+                          onClick={() => askQuickQuestion(tape.id, question, standardizedRows, analysis, mappingRows)}
+                          className="text-[10px] font-black uppercase tracking-wide text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 rounded-full px-3 py-1.5 transition-all"
+                        >
+                          {question}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {analystState.qa.answer && (
+                    <div className="bg-slate-900 text-white rounded-2xl border border-slate-800 p-4">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Bot className="w-4 h-4 text-indigo-300" />
+                        <p className="text-xs font-black uppercase tracking-widest text-indigo-200">Respuesta rápida</p>
+                      </div>
+                      {analystState.qa.question && (
+                        <p className="text-[10px] font-black uppercase tracking-wide text-slate-400 mb-2">{analystState.qa.question}</p>
+                      )}
+                      <pre className="text-xs leading-relaxed whitespace-pre-wrap font-sans text-slate-100">{analystState.qa.answer}</pre>
+                    </div>
+                  )}
+                  <div className="text-center py-4">
                     <BarChart3 className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                    <p className="text-slate-500 text-sm font-semibold">{rows.length} registros cargados</p>
-                    <p className="text-slate-400 text-xs mt-1">Haz clic en "Analizar" para generar el análisis de cartera con IA</p>
+                    <p className="text-slate-500 text-sm font-semibold">Haz clic en "Analizar" para generar métricas, anomalías y chat local</p>
+                    <p className="text-slate-400 text-xs mt-1">El diagnóstico ya te dice si el tape trae lo necesario.</p>
                   </div>
                 </div>
               )}

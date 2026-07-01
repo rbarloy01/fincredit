@@ -1,8 +1,25 @@
 body {
   margin: 0;
-  background: #f8fafc;
+  background:
+    radial-gradient(circle at top left, rgba(0, 204, 238, 0.16), transparent 30rem),
+    linear-gradient(135deg, #f6fbff 0%, #eef6ff 46%, #f8fbff 100%);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  color: #0f172a;
+  color: #07111f;
+}
+
+:root {
+  --bluebonnet: #1400e0;
+  --cyan: #00ccee;
+  --true-blue: #0066ff;
+  --ink: #07111f;
+  --muted-ink: #456078;
+  --panel: rgba(255, 255, 255, 0.92);
+  --panel-solid: #ffffff;
+  --panel-soft: #edf8ff;
+  --line: rgba(0, 102, 255, 0.18);
+  --line-strong: rgba(20, 0, 224, 0.24);
+  --brand-gradient: linear-gradient(135deg, var(--bluebonnet) 0%, var(--true-blue) 58%, var(--cyan) 100%);
+  --brand-shadow: 0 20px 44px rgba(20, 0, 224, 0.18);
 }
 
 .font-mono {
@@ -11,16 +28,19 @@ body {
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: #cbd5e1 transparent;
+  scrollbar-color: rgba(0, 102, 255, 0.34) transparent;
 }
 
 ::selection {
-  background: #c7d2fe;
-  color: #111827;
+  background: rgba(0, 204, 238, 0.34);
+  color: var(--ink);
 }
 
 .finmonitor-shell {
   color-scheme: light;
+  background:
+    radial-gradient(circle at 12% 0%, rgba(0, 204, 238, 0.2), transparent 28rem),
+    linear-gradient(135deg, #f5fbff 0%, #edf6ff 52%, #f9fcff 100%) !important;
   transition: background-color 160ms ease, color 160ms ease;
 }
 
@@ -31,49 +51,184 @@ body {
   transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, box-shadow 160ms ease;
 }
 
+.finmonitor-shell .bg-white,
+.bluebonnet-auth .bg-slate-900 {
+  background-color: var(--panel) !important;
+  backdrop-filter: blur(18px);
+}
+
+.finmonitor-shell .bg-slate-50,
+.finmonitor-shell .bg-slate-100,
+.finmonitor-shell .bg-slate-50\/50 {
+  background-color: var(--panel-soft) !important;
+}
+
+.finmonitor-shell .bg-slate-900,
+.finmonitor-shell .bg-slate-950 {
+  background: linear-gradient(135deg, #0b0f3d 0%, var(--bluebonnet) 54%, var(--true-blue) 100%) !important;
+}
+
+.finmonitor-shell .bg-indigo-600,
+.finmonitor-shell .bg-indigo-500,
+.finmonitor-shell .bg-blue-600,
+.finmonitor-shell .bg-slate-900,
+.bluebonnet-auth .bg-indigo-600,
+.bluebonnet-auth .bg-indigo-500,
+.bluebonnet-auth .bg-slate-950 {
+  background: var(--brand-gradient) !important;
+}
+
+.finmonitor-shell .hover\:bg-indigo-500:hover,
+.finmonitor-shell .hover\:bg-indigo-600:hover,
+.finmonitor-shell .hover\:bg-blue-500:hover,
+.bluebonnet-auth .hover\:bg-indigo-500:hover {
+  background: linear-gradient(135deg, var(--true-blue), var(--cyan)) !important;
+}
+
+.finmonitor-shell .text-indigo-900,
+.finmonitor-shell .text-indigo-800,
+.finmonitor-shell .text-indigo-700,
+.finmonitor-shell .text-indigo-600,
+.finmonitor-shell .text-blue-800,
+.finmonitor-shell .text-blue-700,
+.finmonitor-shell .text-blue-600,
+.finmonitor-shell .text-slate-900,
+.finmonitor-shell .text-slate-800,
+.finmonitor-shell .text-slate-700 {
+  color: var(--ink) !important;
+}
+
+.finmonitor-shell .text-indigo-500,
+.finmonitor-shell .text-blue-500,
+.bluebonnet-auth .text-blue-600 {
+  color: var(--true-blue) !important;
+}
+
+.finmonitor-shell .text-slate-600,
+.finmonitor-shell .text-slate-500,
+.finmonitor-shell .text-slate-400 {
+  color: var(--muted-ink) !important;
+}
+
+.finmonitor-shell .border-slate-100,
+.finmonitor-shell .border-slate-200,
+.finmonitor-shell .border-slate-300,
+.finmonitor-shell .border-indigo-100,
+.finmonitor-shell .border-indigo-200,
+.finmonitor-shell .border-blue-200 {
+  border-color: var(--line) !important;
+}
+
+.finmonitor-shell .bg-indigo-50,
+.finmonitor-shell .bg-indigo-100,
+.finmonitor-shell .bg-blue-50,
+.finmonitor-shell .bg-blue-100,
+.finmonitor-shell .bg-cyan-50,
+.finmonitor-shell .bg-cyan-100 {
+  background-color: rgba(0, 204, 238, 0.13) !important;
+}
+
+.finmonitor-shell .shadow-indigo-50,
+.finmonitor-shell .shadow-indigo-100,
+.finmonitor-shell .shadow-indigo-200,
+.finmonitor-shell .shadow-indigo-500\/20,
+.finmonitor-shell .shadow-indigo-500\/30 {
+  box-shadow: var(--brand-shadow) !important;
+}
+
+.finmonitor-shell input:focus,
+.finmonitor-shell textarea:focus,
+.finmonitor-shell select:focus,
+.bluebonnet-auth input:focus {
+  --tw-ring-color: rgba(0, 204, 238, 0.54) !important;
+  border-color: rgba(0, 204, 238, 0.7) !important;
+  box-shadow: 0 0 0 3px rgba(0, 204, 238, 0.18) !important;
+}
+
+.finmonitor-shell aside {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.96), rgba(242,249,255,0.9)),
+    radial-gradient(circle at top, rgba(0, 204, 238, 0.18), transparent 22rem) !important;
+}
+
+.bluebonnet-auth {
+  background:
+    radial-gradient(circle at 18% 18%, rgba(0, 204, 238, 0.32), transparent 24rem),
+    radial-gradient(circle at 82% 80%, rgba(0, 102, 255, 0.28), transparent 28rem),
+    linear-gradient(135deg, #09063b 0%, #1400e0 48%, #0066ff 100%) !important;
+}
+
+.bluebonnet-auth .bg-slate-900 {
+  border-color: rgba(0, 204, 238, 0.22) !important;
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255,255,255,0.5) !important;
+}
+
+.bluebonnet-auth .text-white,
+.bluebonnet-auth .text-slate-300 {
+  color: #f7fbff !important;
+}
+
+.bluebonnet-auth .text-slate-400,
+.bluebonnet-auth .text-slate-500,
+.bluebonnet-auth .text-slate-600 {
+  color: rgba(235, 248, 255, 0.72) !important;
+}
+
+.bluebonnet-auth .bg-slate-800 {
+  background-color: rgba(6, 14, 56, 0.72) !important;
+  border-color: rgba(0, 204, 238, 0.18) !important;
+}
+
+.bluebonnet-auth .border-slate-700,
+.bluebonnet-auth .border-slate-800 {
+  border-color: rgba(0, 204, 238, 0.2) !important;
+}
+
 .theme-night {
   color-scheme: dark;
-  background: #07111f !important;
-  color: #e5e7eb;
+  background:
+    radial-gradient(circle at 10% 0%, rgba(0, 204, 238, 0.16), transparent 28rem),
+    linear-gradient(135deg, #05051d 0%, #080b2e 52%, #001b4e 100%) !important;
+  color: #eaf7ff;
 }
 
 .theme-night .bg-slate-50,
 .theme-night .bg-slate-100,
 .theme-night .bg-white {
-  background-color: #0f1b2d !important;
+  background-color: rgba(7, 17, 49, 0.86) !important;
 }
 
 .theme-night .bg-slate-50\/50 {
-  background-color: rgba(15, 27, 45, 0.72) !important;
+  background-color: rgba(7, 17, 49, 0.66) !important;
 }
 
 .theme-night .border-slate-100,
 .theme-night .border-slate-200,
 .theme-night .border-slate-300 {
-  border-color: #23314a !important;
+  border-color: rgba(0, 204, 238, 0.16) !important;
 }
 
 .theme-night .text-slate-900,
 .theme-night .text-slate-800,
 .theme-night .text-slate-700 {
-  color: #f8fafc !important;
+  color: #f7fbff !important;
 }
 
 .theme-night .text-slate-600,
 .theme-night .text-slate-500 {
-  color: #b6c3d5 !important;
+  color: #b9d8ea !important;
 }
 
 .theme-night .text-slate-400 {
-  color: #7f8ea3 !important;
+  color: #82a8bf !important;
 }
 
 .theme-night input,
 .theme-night textarea,
 .theme-night select {
-  background-color: #0b1626 !important;
-  border-color: #2b3a55 !important;
-  color: #f8fafc !important;
+  background-color: rgba(4, 10, 34, 0.82) !important;
+  border-color: rgba(0, 204, 238, 0.18) !important;
+  color: #f7fbff !important;
 }
 
 .theme-night input::placeholder,
@@ -91,13 +246,13 @@ body {
 
 .theme-night .hover\:bg-slate-50:hover,
 .theme-night .hover\:bg-slate-100:hover {
-  background-color: #18263a !important;
+  background-color: rgba(0, 102, 255, 0.16) !important;
 }
 
 .theme-night table .bg-slate-50,
 .theme-night tr.bg-slate-50,
 .theme-night tr.bg-slate-50\/50 {
-  background-color: #101d30 !important;
+  background-color: rgba(8, 22, 58, 0.9) !important;
 }
 
 .theme-night .pdf-page,

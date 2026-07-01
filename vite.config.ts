@@ -133,7 +133,7 @@ async function ensureProfile(supabaseUrl: string, serviceKey: string, body: any,
   if (profileRes.status >= 300) throw new Error(parseJson(profileRes.body, {}).message || 'Error al preparar perfil');
 }
 
-async function requireManager(req: any, supabaseUrl: string, serviceKey: string): Promise<{ ok: boolean; status: number; error?: string }> {
+async function requireManager(req: any, supabaseUrl: string, serviceKey: string): Promise<{ ok: boolean; status: number; error?: string; user?: any }> {
   const raw = req.headers?.authorization || req.headers?.Authorization || '';
   const token = String(raw).replace(/^Bearer\s+/i, '').trim();
   if (!token) return { ok: false, status: 401, error: 'No autenticado' };
@@ -151,7 +151,7 @@ async function requireManager(req: any, supabaseUrl: string, serviceKey: string)
   if (profileRes.status >= 300) return { ok: false, status: 500, error: 'No se pudo verificar permisos' };
   if (profile?.[0]?.role !== 'manager') return { ok: false, status: 403, error: 'Solo managers pueden administrar usuarios' };
 
-  return { ok: true, status: 200 };
+  return { ok: true, status: 200, user };
 }
 
 export default defineConfig(({ mode }) => {
@@ -227,6 +227,43 @@ export default defineConfig(({ mode }) => {
               res.setHeader('Content-Type', 'application/json');
               res.end(JSON.stringify({ orgId }));
             } catch (error: any) { res.statusCode = 500; res.end(JSON.stringify({ error: error?.message || 'Error interno' })); }
+          });
+
+          server.middlewares.use('/api/admin/health', async (req, res) => {
+            if (req.method !== 'GET') { res.statusCode = 405; res.end('Method not allowed'); return; }
+            try {
+              const supabaseUrl = env.SUPABASE_URL || env.VITE_SUPABASE_URL;
+              const serviceKey = env.SUPABASE_SERVICE_KEY;
+              if (!supabaseUrl || !serviceKey) { res.statusCode = 500; res.end(JSON.stringify({ error: 'Supabase admin env missing' })); return; }
+              const access = await requireManager(req, supabaseUrl, serviceKey);
+              if (!access.ok) { res.statusCode = access.status; res.end(JSON.stringify({ error: access.error })); return; }
+
+              const [settingsRes, profileRes] = await Promise.all([
+                fetch(`${supabaseUrl}/auth/v1/settings`, { headers: { apikey: serviceKey } }),
+                fetch(`${supabaseUrl}/rest/v1/profiles?select=id,role,org_id&id=eq.${encodeURIComponent(access.user.id)}&limit=1`, {
+                  headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+                }),
+              ]);
+              const settings = parseJson(await settingsRes.text(), {});
+              const profile = parseJson(await profileRes.text(), [])?.[0] || null;
+              res.statusCode = 200;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({
+                googleProviderEnabled: settingsRes.ok && settings?.external?.google === true,
+                googleProviderCheckError: settingsRes.ok ? null : 'No se pudo consultar la configuración de Supabase Auth',
+                aiKeys: {
+                  gemini: Boolean(env.GEMINI_API_KEY),
+                  claude: Boolean(env.ANTHROPIC_API_KEY),
+                  openai: Boolean(env.OPENAI_API_KEY),
+                },
+                profile: {
+                  found: profileRes.ok && Boolean(profile?.id),
+                  role: profile?.role || null,
+                  orgId: profile?.org_id || null,
+                  checkError: profileRes.ok ? null : 'No se pudo consultar el perfil actual',
+                },
+              }));
+            } catch (error: any) { res.statusCode = 500; res.end(JSON.stringify({ error: error?.message || 'Health check error' })); }
           });
 
           server.middlewares.use('/api/admin/users/create', async (req, res) => {

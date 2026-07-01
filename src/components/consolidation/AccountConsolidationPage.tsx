@@ -136,7 +136,6 @@ const AccountConsolidationPage: React.FC<Props> = ({ aiSettings, session }) => {
   };
 
   const runAI = async () => {
-    if (!aiSettings.apiKey) { alert('Configura API key en Configuración.'); return; }
     setRunning(true);
     try {
       const result = await suggestAccountConsolidation(

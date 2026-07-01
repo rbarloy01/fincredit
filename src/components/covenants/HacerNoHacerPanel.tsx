@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import { db, Covenant_DB, CovenantAnnotation } from '../../db/index';
 import { Session } from '../../services/auth';
 import { Plus, ChevronDown, ChevronRight, MessageCircle, Send, CheckCircle, XCircle, Clock, X, Trash2, ListChecks, Download, FileText } from 'lucide-react';
-import { exportHacerNoHacer } from '../../lib/export';
 
 const nanoid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
@@ -84,6 +83,7 @@ const HacerNoHacerPanel: React.FC<Props> = ({ clientId, clientName = '', session
   const handleExport = async (format: 'excel' | 'pdf') => {
     setExporting(format);
     try {
+      const { exportHacerNoHacer } = await import('../../lib/export');
       await exportHacerNoHacer(covenants, clientName, format, format === 'pdf' ? panelRef.current ?? undefined : undefined);
     } finally {
       setExporting(null);

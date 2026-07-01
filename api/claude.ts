@@ -1,5 +1,7 @@
 import { forwardJson, readJson, sendJson } from './_helpers.js';
 
+export const maxDuration = 60;
+
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' });
   try {
@@ -13,6 +15,9 @@ export default async function handler(req: any, res: any) {
     res.status(result.status).setHeader('Content-Type', 'application/json');
     res.end(result.text);
   } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      return sendJson(res, 504, { error: 'Claude tardó demasiado en responder. Reintenta o cambia de proveedor.' });
+    }
     sendJson(res, 500, { error: error?.message || 'Claude proxy error' });
   }
 }

@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { db, User, Role } from '../../db/index';
 import { Session, auth } from '../../services/auth';
 import { AIProvider, AISettings, loadAISettings, saveAISettings, testConnection } from '../../services/ai';
-import { Key, Users, Save, Plus, Trash2, Eye, EyeOff, Check, X, Info, Zap } from 'lucide-react';
+import { Users, Save, Plus, Trash2, Eye, EyeOff, Check, X, Info, Zap, ShieldCheck, RefreshCw, AlertTriangle } from 'lucide-react';
+import { supabase } from '../../lib/supabase';
 
 interface Props {
   session: Session;
@@ -14,6 +15,16 @@ const PROVIDERS: { id: AIProvider; label: string; placeholder: string; color: st
   { id: 'claude', label: 'Anthropic Claude', placeholder: 'sk-ant-api03-...', color: 'bg-violet-100 text-violet-800 border-violet-200' },
   { id: 'openai', label: 'OpenAI GPT-4o', placeholder: 'sk-proj-...', color: 'bg-emerald-100 text-emerald-800 border-emerald-200' },
 ];
+
+type HealthStatus = 'pass' | 'fail';
+
+interface HealthDiagnostic {
+  id: string;
+  label: string;
+  status: HealthStatus;
+  detail: string;
+  nextStep: string;
+}
 
 const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
   const [aiSettings, setAiSettings] = useState<AISettings>(loadAISettings);
@@ -31,10 +42,109 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
   const [newRole, setNewRole] = useState<'manager' | 'analyst'>('analyst');
   const [creatingUser, setCreatingUser] = useState(false);
   const [userError, setUserError] = useState('');
+  const [healthDiagnostics, setHealthDiagnostics] = useState<HealthDiagnostic[]>([]);
+  const [healthLoading, setHealthLoading] = useState(false);
+  const [healthCheckedAt, setHealthCheckedAt] = useState<Date | null>(null);
+  const [healthError, setHealthError] = useState('');
 
   useEffect(() => {
     if (session.role === 'manager') db.getUsers().then(setUsers);
   }, [session.role]);
+
+  const runHealthCheck = async () => {
+    setHealthLoading(true);
+    setHealthError('');
+    try {
+      const { data: { session: authSession } } = await supabase.auth.getSession();
+      if (!authSession?.access_token) throw new Error('La sesión de Supabase no está disponible. Cierra sesión y vuelve a ingresar.');
+
+      const ensureResponse = await fetch('/api/admin/org/ensure', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authSession.access_token}`,
+        },
+        body: JSON.stringify({}),
+      });
+      const ensureJson = await ensureResponse.json().catch(() => ({}));
+
+      const healthResponse = await fetch('/api/admin/health', {
+        headers: { Authorization: `Bearer ${authSession.access_token}` },
+      });
+      const health = await healthResponse.json().catch(() => ({}));
+      if (!healthResponse.ok) throw new Error(health.error || 'No se pudo ejecutar el diagnóstico del servidor.');
+
+      const googleClientEnabled = auth.isGoogleAuthEnabled();
+      const googleReady = googleClientEnabled && health.googleProviderEnabled;
+      const aiEntries = [
+        ['Gemini', health.aiKeys?.gemini, 'GEMINI_API_KEY'],
+        ['Claude', health.aiKeys?.claude, 'ANTHROPIC_API_KEY'],
+        ['OpenAI', health.aiKeys?.openai, 'OPENAI_API_KEY'],
+      ] as const;
+      const configuredAi = aiEntries.filter(([, configured]) => configured).map(([label]) => label);
+      const missingAi = aiEntries.filter(([, configured]) => !configured).map(([, , envName]) => envName);
+
+      setHealthDiagnostics([
+        {
+          id: 'google',
+          label: 'Acceso con Google',
+          status: googleReady ? 'pass' : 'fail',
+          detail: googleReady
+            ? 'La app muestra Google y Supabase Auth tiene el proveedor habilitado.'
+            : !googleClientEnabled
+              ? 'VITE_ENABLE_GOOGLE_AUTH no está habilitado en este despliegue.'
+              : health.googleProviderCheckError || 'Google no está habilitado en Supabase Auth.',
+          nextStep: googleReady
+            ? 'Sin acción requerida.'
+            : !googleClientEnabled
+              ? 'Configura VITE_ENABLE_GOOGLE_AUTH=true y vuelve a desplegar.'
+              : 'Activa Google en Supabase → Authentication → Providers y valida las URLs de redirección.',
+        },
+        {
+          id: 'org-ensure',
+          label: '/api/admin/org/ensure',
+          status: ensureResponse.ok && Boolean(ensureJson.orgId) ? 'pass' : 'fail',
+          detail: ensureResponse.ok && ensureJson.orgId
+            ? `Endpoint operativo; organización resuelta (${String(ensureJson.orgId).slice(0, 8)}…).`
+            : ensureJson.error || `El endpoint respondió HTTP ${ensureResponse.status}.`,
+          nextStep: ensureResponse.ok && ensureJson.orgId
+            ? 'Sin acción requerida.'
+            : 'Verifica SUPABASE_URL, SUPABASE_SERVICE_KEY y que las tablas organizations/profiles estén migradas.',
+        },
+        {
+          id: 'ai-keys',
+          label: 'Llaves de IA en servidor',
+          status: configuredAi.length > 0 ? 'pass' : 'fail',
+          detail: configuredAi.length > 0
+            ? `Disponibles: ${configuredAi.join(', ')}.${missingAi.length ? ` Faltan: ${missingAi.join(', ')}.` : ''}`
+            : 'No hay llaves de IA configuradas del lado del servidor.',
+          nextStep: configuredAi.length > 0
+            ? 'El proveedor seleccionado debe corresponder a una llave disponible, o usar una llave local.'
+            : 'Agrega GEMINI_API_KEY, ANTHROPIC_API_KEY u OPENAI_API_KEY en las variables del despliegue.',
+        },
+        {
+          id: 'profile-org',
+          label: 'Perfil unido a organización',
+          status: Boolean(health.profile?.found && health.profile?.orgId) ? 'pass' : 'fail',
+          detail: health.profile?.found && health.profile?.orgId
+            ? `Perfil manager unido a la organización ${String(health.profile.orgId).slice(0, 8)}….`
+            : health.profile?.checkError || (health.profile?.found ? 'El perfil existe, pero org_id está vacío.' : 'No se encontró el perfil del usuario actual.'),
+          nextStep: health.profile?.found && health.profile?.orgId
+            ? 'Sin acción requerida.'
+            : 'Corrige la migración de profiles.org_id y vuelve a ejecutar el endpoint de organización.',
+        },
+      ]);
+      setHealthCheckedAt(new Date());
+    } catch (error: any) {
+      setHealthError(error?.message || 'No se pudo completar el diagnóstico.');
+    } finally {
+      setHealthLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (session.role === 'manager') void runHealthCheck();
+  }, [session.role, session.userId]);
 
   const handleSave = () => {
     saveAISettings(aiSettings);
@@ -44,7 +154,6 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
   };
 
   const handleTest = async () => {
-    if (!aiSettings.apiKey.trim()) return;
     setTesting(true); setTestResult(null); setTestMsg('');
     try {
       const result = await testConnection(aiSettings);
@@ -101,6 +210,80 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
           <p className="text-slate-500 text-sm mt-1">Administra preferencias del sistema</p>
         </div>
 
+        {session.role === 'manager' && (
+          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
+            <div className="flex items-start justify-between gap-4 mb-5">
+              <div className="flex items-start gap-3">
+                <div className="w-8 h-8 bg-emerald-100 rounded-lg flex items-center justify-center shrink-0">
+                  <ShieldCheck className="w-4 h-4 text-emerald-700" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-black text-slate-900 uppercase tracking-widest">Salud de despliegue y onboarding</h2>
+                  <p className="text-xs text-slate-500 mt-1">Ejecuta estas pruebas antes de invitar o aprobar otro usuario.</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={runHealthCheck}
+                disabled={healthLoading}
+                className="flex items-center gap-2 bg-slate-900 hover:bg-slate-800 text-white font-bold px-3.5 py-2 rounded-xl text-xs disabled:opacity-60 transition-all shrink-0"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${healthLoading ? 'animate-spin' : ''}`} />
+                {healthLoading ? 'Verificando' : 'Volver a verificar'}
+              </button>
+            </div>
+
+            {healthError && (
+              <div className="flex gap-3 bg-rose-50 border border-rose-200 rounded-xl p-4 text-rose-800 text-sm">
+                <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                <div><p className="font-black">No se pudo completar el diagnóstico</p><p className="text-xs mt-1">{healthError}</p></div>
+              </div>
+            )}
+
+            {!healthError && healthDiagnostics.length > 0 && (
+              <>
+                <div className={`rounded-xl border px-4 py-3 mb-3 ${
+                  healthDiagnostics.every(item => item.status === 'pass')
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                    : 'bg-amber-50 border-amber-200 text-amber-900'
+                }`}>
+                  <p className="text-sm font-black">
+                    {healthDiagnostics.filter(item => item.status === 'pass').length} de {healthDiagnostics.length} verificaciones aprobadas
+                  </p>
+                  <p className="text-xs mt-0.5">
+                    {healthDiagnostics.every(item => item.status === 'pass')
+                      ? 'El flujo base está listo para el siguiente onboarding.'
+                      : 'Resuelve los puntos fallidos antes de enviar otra invitación.'}
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  {healthDiagnostics.map(item => (
+                    <div key={item.id} className={`rounded-xl border p-4 ${item.status === 'pass' ? 'border-emerald-200 bg-emerald-50/40' : 'border-rose-200 bg-rose-50/50'}`}>
+                      <div className="flex items-start gap-3">
+                        <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${item.status === 'pass' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'}`}>
+                          {item.status === 'pass' ? <Check className="w-3.5 h-3.5" /> : <X className="w-3.5 h-3.5" />}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-black text-slate-900">{item.label}</p>
+                          <p className="text-xs text-slate-600 mt-1 leading-5">{item.detail}</p>
+                          <p className={`text-xs mt-1.5 font-bold ${item.status === 'pass' ? 'text-emerald-700' : 'text-rose-700'}`}>
+                            Siguiente paso: {item.nextStep}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {healthCheckedAt && <p className="text-[11px] text-slate-400 mt-3 text-right">Última verificación: {healthCheckedAt.toLocaleString('es-MX')}</p>}
+              </>
+            )}
+
+            {!healthError && healthLoading && healthDiagnostics.length === 0 && (
+              <div className="h-24 rounded-xl bg-slate-50 border border-slate-200 animate-pulse" />
+            )}
+          </div>
+        )}
+
         {/* AI Provider */}
         <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
           <div className="flex items-center gap-3 mb-6">
@@ -149,7 +332,7 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
               </div>
               <p className="text-xs text-slate-400 mt-2 flex items-center gap-1">
                 <Info className="w-3 h-3" />
-                La API Key se guarda localmente en tu navegador
+                Opcional: si se deja vacía, el servidor usará la llave configurada en variables de entorno
               </p>
             </div>
             <div className="flex items-center gap-3 flex-wrap">
@@ -157,7 +340,7 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
                 {keySaved ? <Check className="w-4 h-4" /> : <Save className="w-4 h-4" />}
                 {keySaved ? 'Guardada' : 'Guardar'}
               </button>
-              <button onClick={handleTest} disabled={testing || !aiSettings.apiKey.trim()} className="flex items-center gap-2 bg-white border border-slate-200 text-slate-700 font-bold px-4 py-2.5 rounded-xl text-sm hover:bg-slate-50 disabled:opacity-50 transition-all">
+              <button onClick={handleTest} disabled={testing} className="flex items-center gap-2 bg-white border border-slate-200 text-slate-700 font-bold px-4 py-2.5 rounded-xl text-sm hover:bg-slate-50 disabled:opacity-50 transition-all">
                 {testing ? <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg> : null}
                 Test Conexión
               </button>

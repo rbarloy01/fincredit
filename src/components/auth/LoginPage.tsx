@@ -40,13 +40,7 @@ const LoginPage: React.FC<Props> = ({ onLogin }) => {
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 flex items-center justify-center px-4">
-      {/* Background gradient blobs */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-40 -left-40 w-96 h-96 bg-indigo-600/20 rounded-full blur-3xl" />
-        <div className="absolute -bottom-40 -right-40 w-96 h-96 bg-indigo-800/20 rounded-full blur-3xl" />
-      </div>
-
+    <div className="bluebonnet-auth min-h-screen bg-slate-950 flex items-center justify-center px-4">
       <div className="relative z-10 w-full max-w-md">
         {/* Card */}
         <div className="bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl shadow-black/60 p-10">
@@ -56,7 +50,7 @@ const LoginPage: React.FC<Props> = ({ onLogin }) => {
               <ShieldCheck className="w-8 h-8 text-white" />
             </div>
             <h1 className="text-3xl font-black text-white tracking-tight">FinMonitor</h1>
-            <p className="text-slate-400 text-sm mt-1 text-center">Sistema de Monitoreo de Crédito IFNB</p>
+            <p className="text-slate-400 text-sm mt-1 text-center font-semibold">Sistema de Monitoreo de Crédito IFNB</p>
           </div>
 
           {/* Error */}

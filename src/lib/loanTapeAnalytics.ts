@@ -1,5 +1,6 @@
 import { LoanTape_DB } from '../db/index';
 import { StructuredLoanTapeAnalysis } from '../services/ai';
+import { parseNullableFinancialNumber } from './numberParsing';
 
 export interface StandardLoan {
   loan_id: string | null;
@@ -25,7 +26,17 @@ export interface MappingNote {
   reasoning: string;
 }
 
+export interface LoanTapeExportContext {
+  tape: LoanTape_DB;
+  standardizedRows: StandardLoan[];
+  mappingReport: MappingNote[];
+  profile: ReturnType<typeof buildLoanTapeDataProfile>;
+  analysis: StructuredLoanTapeAnalysis;
+}
+
 type Severity = 'high' | 'medium' | 'low';
+
+const CRITICAL_FIELDS: Array<keyof StandardLoan> = ['loan_id', 'client', 'amount', 'outstanding_balance', 'interest_rate', 'loan_type', 'days_overdue', 'start_date', 'end_date'];
 
 const SYNONYMS: Record<keyof StandardLoan, string[]> = {
   loan_id: ['contrato', 'loan id', 'loan number', 'loan no', 'folio', 'numero credito', 'no contrato', 'id prestamo', 'operacion'],
@@ -57,15 +68,7 @@ function normalize(value: any): string {
 }
 
 function parseNumber(value: any): number | null {
-  if (value === null || value === undefined || value === '') return null;
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  const raw = String(value).trim();
-  if (!raw) return null;
-  const negative = /^\(.*\)$/.test(raw);
-  const cleaned = raw.replace(/[,$%\s]/g, '').replace(/[()]/g, '');
-  const parsed = Number(cleaned);
-  if (!Number.isFinite(parsed)) return null;
-  return negative ? -parsed : parsed;
+  return parseNullableFinancialNumber(value);
 }
 
 function excelSerialToDate(serial: number): string | null {
@@ -172,6 +175,19 @@ function latestRows(rows: StandardLoan[]) {
   return { latest, rows: latest ? rows.filter(r => r.file_date === latest) : rows };
 }
 
+function latestAndPreviousRows(rows: StandardLoan[]) {
+  const dates = Array.from(new Set(rows.map(r => r.file_date).filter(Boolean) as string[])).sort();
+  const latest = dates[dates.length - 1] || null;
+  const previous = dates[dates.length - 2] || null;
+  if (!latest) return { latest: null, previous: null, latestRows: rows, previousRows: [] as StandardLoan[] };
+  return {
+    latest,
+    previous,
+    latestRows: rows.filter(r => r.file_date === latest),
+    previousRows: previous ? rows.filter(r => r.file_date === previous) : [] as StandardLoan[],
+  };
+}
+
 function sum(rows: StandardLoan[]) {
   return rows.reduce((acc, r) => acc + (r.outstanding_balance || 0), 0);
 }
@@ -188,12 +204,28 @@ function fmtPct(value: number) {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+function trend(current: number, previous: number, higherIsWorse = false) {
+  if (!Number.isFinite(previous) || previous === 0 || Math.abs(current - previous) < 0.000001) return 'stable';
+  const up = current > previous;
+  if (higherIsWorse) return up ? 'down' : 'up';
+  return up ? 'up' : 'down';
+}
+
+function fmtChange(current: number, previous: number, kind: 'money' | 'pct' | 'number') {
+  if (!Number.isFinite(previous) || previous === 0) return undefined;
+  const delta = current - previous;
+  if (kind === 'money') return `${delta >= 0 ? '+' : ''}${fmtMoney(delta)}`;
+  if (kind === 'pct') return `${delta >= 0 ? '+' : ''}${(delta * 100).toFixed(1)} pp`;
+  return `${delta >= 0 ? '+' : ''}${delta.toFixed(0)}`;
+}
+
 function quality(rows: StandardLoan[]) {
   const total = sum(rows);
   const groups = {
-    vigente: rows.filter(r => (r.days_overdue || 0) === 0),
-    atrasada: rows.filter(r => (r.days_overdue || 0) >= 1 && (r.days_overdue || 0) <= 90),
-    vencida: rows.filter(r => (r.days_overdue || 0) > 90),
+    vigente: rows.filter(r => r.days_overdue !== null && r.days_overdue === 0),
+    atrasada: rows.filter(r => r.days_overdue !== null && r.days_overdue >= 1 && r.days_overdue <= 90),
+    vencida: rows.filter(r => r.days_overdue !== null && r.days_overdue > 90),
+    sin_dato: rows.filter(r => r.days_overdue === null),
   };
   return Object.fromEntries(Object.entries(groups).map(([k, v]) => {
     const balance = sum(v);
@@ -211,11 +243,17 @@ function dpdDistribution(rows: StandardLoan[]) {
     { bucket: '91-180', min: 91, max: 180 },
     { bucket: '>180', min: 181, max: Infinity },
   ];
-  return buckets.map(b => {
-    const items = rows.filter(r => (r.days_overdue || 0) >= b.min && (r.days_overdue || 0) <= b.max);
+  const distribution = buckets.map(b => {
+    const items = rows.filter(r => r.days_overdue !== null && r.days_overdue >= b.min && r.days_overdue <= b.max);
     const balance = sum(items);
     return { bucket: b.bucket, count: items.length, balance, pct: pct(balance, total) };
   });
+  const missing = rows.filter(r => r.days_overdue === null);
+  if (missing.length) {
+    const balance = sum(missing);
+    distribution.push({ bucket: 'Sin dato', count: missing.length, balance, pct: pct(balance, total) });
+  }
+  return distribution;
 }
 
 function groupBy(rows: StandardLoan[], field: keyof StandardLoan, limit = 10) {
@@ -239,6 +277,21 @@ function groupBy(rows: StandardLoan[], field: keyof StandardLoan, limit = 10) {
     })
     .sort((a, b) => b.balance - a.balance)
     .slice(0, limit);
+}
+
+function weightedAverage(rows: StandardLoan[], field: 'days_overdue' | 'interest_rate') {
+  const usable = rows.filter(row => row[field] !== null && Number.isFinite(row[field]) && (row.outstanding_balance || 0) > 0);
+  const weight = sum(usable);
+  if (!weight) return null;
+  return usable.reduce((total, row) => total + Number(row[field]) * (row.outstanding_balance || 0), 0) / weight;
+}
+
+function topShare(rows: StandardLoan[], count: number) {
+  const total = sum(rows);
+  const largest = [...rows]
+    .sort((a, b) => (b.outstanding_balance || 0) - (a.outstanding_balance || 0))
+    .slice(0, count);
+  return pct(sum(largest), total);
 }
 
 function loanTypeProfile(rows: StandardLoan[]) {
@@ -302,8 +355,7 @@ function validate(rows: StandardLoan[]) {
 
   rows.forEach((r, index) => {
     const loanId = r.loan_id || `fila ${index + 1}`;
-    const critical: Array<keyof StandardLoan> = ['loan_id', 'client', 'amount', 'outstanding_balance', 'interest_rate', 'loan_type', 'days_overdue', 'start_date', 'end_date'];
-    critical.forEach(field => {
+    CRITICAL_FIELDS.forEach(field => {
       if (r[field] === null || r[field] === undefined || r[field] === '') {
         issues.push({ loan_id: loanId, rule_id: 'missing', field, message: `Campo requerido sin mapear o vacío: ${field}`, severity: 'high' });
       }
@@ -323,6 +375,153 @@ function validate(rows: StandardLoan[]) {
 
   duplicates.forEach(key => issues.push({ loan_id: key.split('::')[1], rule_id: 'duplicate_loan_id', field: 'loan_id', message: 'loan_id duplicado dentro del mismo file_date', severity: 'high' }));
   return issues;
+}
+
+function missingFieldProfile(rows: StandardLoan[], mappingReport: MappingNote[] = []) {
+  const mapped = new Set(mappingReport.map(m => m.target_term));
+  return CRITICAL_FIELDS.map(field => {
+    const missingRows = rows.filter(r => r[field] === null || r[field] === undefined || r[field] === '').length;
+    return {
+      field,
+      mapped: mapped.has(field),
+      missingRows,
+      missingPct: rows.length ? missingRows / rows.length : 1,
+      severity: !mapped.has(field) || missingRows / Math.max(rows.length, 1) > 0.2 ? 'high' as Severity : missingRows > 0 ? 'medium' as Severity : 'low' as Severity,
+      impact: field === 'loan_id' ? 'No se pueden comparar meses ni detectar duplicados.'
+        : field === 'outstanding_balance' ? 'No se puede medir saldo, concentración, DPD ponderado ni aforo.'
+        : field === 'days_overdue' ? 'No se puede clasificar cartera vigente/atrasada/vencida.'
+        : field === 'amount' ? 'No se puede comparar línea original contra saldo actual.'
+        : field === 'interest_rate' ? 'No se puede perfilar tasa ni precio de riesgo.'
+        : field === 'loan_type' ? 'No se puede segmentar por producto.'
+        : field === 'client' ? 'No se puede medir concentración por acreditado.'
+        : 'Limita análisis de vintage, vencimiento y cambios esperados.',
+    };
+  }).sort((a, b) => {
+    const rank = { high: 0, medium: 1, low: 2 };
+    return rank[a.severity] - rank[b.severity] || b.missingPct - a.missingPct;
+  });
+}
+
+export function buildLoanTapeDataProfile(rows: StandardLoan[], mappingReport: MappingNote[] = []) {
+  const totalRows = rows.length;
+  const active = activeRows(rows);
+  const { latest, rows: latestRowsOnly } = latestRows(active.length ? active : rows);
+  const missingFields = missingFieldProfile(rows, mappingReport);
+  const mappedFields = Array.from(new Set(mappingReport.map(m => m.target_term)));
+  const highMissing = missingFields.filter(f => f.severity === 'high');
+  const validation = validate(rows);
+  const duplicateCount = validation.filter(v => v.rule_id === 'duplicate_loan_id').length;
+  const readinessScore = Math.max(0, Math.min(100, Math.round(
+    100
+    - highMissing.length * 12
+    - missingFields.filter(f => f.severity === 'medium').length * 5
+    - Math.min(25, validation.length / Math.max(totalRows, 1) * 100)
+  )));
+  const canAnalyze = highMissing.length === 0 || (mappedFields.includes('outstanding_balance') && mappedFields.includes('days_overdue'));
+  const nextActions = [
+    ...highMissing.slice(0, 5).map(f => `Mapear o completar ${f.field}: ${f.impact}`),
+    ...(duplicateCount ? [`Resolver ${duplicateCount} loan_id duplicado(s) antes de comparar periodos.`] : []),
+    ...(mappedFields.includes('file_date') || latest ? [] : ['Agregar fecha de corte o incluirla en el nombre del archivo para análisis temporal.']),
+  ].slice(0, 6);
+
+  return {
+    readinessScore,
+    canAnalyze,
+    totalRows,
+    latestFileDate: latest,
+    latestRows: latestRowsOnly.length,
+    mappedFields,
+    unmappedCriticalFields: missingFields.filter(f => !f.mapped).map(f => f.field),
+    missingFields,
+    validationCount: validation.length,
+    duplicateCount,
+    nextActions,
+  };
+}
+
+export function buildLoanTapeExportContexts(tapes: LoanTape_DB[]): LoanTapeExportContext[] {
+  return tapes.map(tape => {
+    const data = tape.extractedData;
+    const rawRows = Array.isArray(data) ? data : (data?.rows || []);
+    const standardized = standardizeLoanTape(rawRows, tape.fileName);
+    const standardizedRows = Array.isArray(data?._standardized)
+      ? data._standardized as StandardLoan[]
+      : standardized.standardized;
+    const mappingReport = Array.isArray(data?._mappingReport)
+      ? data._mappingReport as MappingNote[]
+      : standardized.mappingReport;
+    const localAnalysis = analyzeLoanTapesLocally(tapes, tape.id);
+    const storedAnalysis = data?._analysis as StructuredLoanTapeAnalysis | undefined;
+    const analysis = storedAnalysis
+      ? {
+          ...localAnalysis,
+          ...storedAnalysis,
+          portfolioQuality: localAnalysis.portfolioQuality,
+          dpd_distribution: localAnalysis.dpd_distribution,
+          concentrations: localAnalysis.concentrations,
+          anomalies: localAnalysis.anomalies,
+          validation: localAnalysis.validation,
+        }
+      : localAnalysis;
+
+    return {
+      tape,
+      standardizedRows,
+      mappingReport,
+      profile: buildLoanTapeDataProfile(standardizedRows, mappingReport),
+      analysis,
+    };
+  });
+}
+
+function answerRows(rows: any[], columns: string[]) {
+  if (!rows.length) return 'No encontré registros para esa consulta.';
+  return rows.slice(0, 10).map((row, index) => {
+    const parts = columns.map(col => `${col}: ${row[col] ?? 'N/D'}`).join(' · ');
+    return `${index + 1}. ${parts}`;
+  }).join('\n');
+}
+
+export function answerLoanTapeQuestion(question: string, rows: StandardLoan[], analysis?: StructuredLoanTapeAnalysis | null, mappingReport: MappingNote[] = []) {
+  const q = normalize(question);
+  const active = activeRows(rows);
+  const { rows: latest } = latestRows(active.length ? active : rows);
+  const total = sum(latest);
+  const profile = buildLoanTapeDataProfile(rows, mappingReport);
+
+  if (!q.trim()) return 'Pregúntame algo sobre mora, concentración, saldos, cambios vs mes anterior o calidad de datos.';
+  if (/(falta|missing|calidad|map|columna|confiable|readiness|listo)/.test(q)) {
+    const missing = profile.missingFields.filter(f => f.severity !== 'low').slice(0, 8);
+    if (!missing.length) return `El tape está bastante usable: score ${profile.readinessScore}/100, ${profile.mappedFields.length} campos mapeados y ${profile.validationCount} alertas de validación.`;
+    return `Score de preparación: ${profile.readinessScore}/100.\n\nLo que falta o pega más:\n${missing.map(f => `- ${f.field}: ${f.mapped ? `${(f.missingPct * 100).toFixed(1)}% filas vacías` : 'no mapeado'}; ${f.impact}`).join('\n')}`;
+  }
+  if (/(top|mayor|grande|concentracion|cliente)/.test(q)) {
+    const top = [...latest].sort((a, b) => (b.outstanding_balance || 0) - (a.outstanding_balance || 0)).slice(0, 10)
+      .map(r => ({ loan_id: r.loan_id, client: r.client, outstanding_balance: fmtMoney(r.outstanding_balance || 0), pct: fmtPct(pct(r.outstanding_balance || 0, total)), days_overdue: r.days_overdue }));
+    return `Top créditos por saldo:\n${answerRows(top, ['loan_id', 'client', 'outstanding_balance', 'pct', 'days_overdue'])}`;
+  }
+  if (/(mora|dpd|atras|vencid|overdue)/.test(q)) {
+    const overdue = [...latest].filter(r => (r.days_overdue || 0) > 0).sort((a, b) => (b.days_overdue || 0) - (a.days_overdue || 0));
+    const overdueBalance = sum(overdue);
+    const top = overdue.slice(0, 10).map(r => ({ loan_id: r.loan_id, client: r.client, days_overdue: r.days_overdue, outstanding_balance: fmtMoney(r.outstanding_balance || 0), pct: fmtPct(pct(r.outstanding_balance || 0, total)) }));
+    return `Cartera con DPD > 0: ${overdue.length} créditos, ${fmtMoney(overdueBalance)} (${fmtPct(pct(overdueBalance, total))} del saldo).\n\nMayores atrasos:\n${answerRows(top, ['loan_id', 'client', 'days_overdue', 'outstanding_balance', 'pct'])}`;
+  }
+  if (/(cambio|mes|anterior|nuevo|desapare|deterior|mejor)/.test(q)) {
+    const a = analysis?.anomalies || anomalies(rows);
+    const lines = [
+      `Nuevos créditos: ${a.new_loans?.length || 0}`,
+      `Créditos que desaparecen: ${a.disappeared_loans?.length || 0}`,
+      `Deterioros DPD: ${a.dpd_deterioration?.length || 0}`,
+      `Mejoras DPD: ${a.dpd_improvement?.length || 0}`,
+      `Cambios de condición: ${a.condition_changes?.length || 0}`,
+    ];
+    return `${lines.join('\n')}\n\nDetalle más relevante:\n${answerRows([...(a.dpd_deterioration || []), ...(a.new_loans || [])].slice(0, 10), ['loan_id', 'days_overdue_prev', 'days_overdue_latest', 'outstanding_balance', 'category'])}`;
+  }
+  if (/(producto|tipo|segmento)/.test(q)) {
+    const productRows = loanTypeProfile(latest).slice(0, 10).map(r => ({ ...r, balance: fmtMoney(r.balance), pct: fmtPct(r.pct), avg_interest_rate: r.avg_interest_rate?.toFixed(2) ?? 'N/D', avg_days_overdue: r.avg_days_overdue?.toFixed(1) ?? 'N/D' }));
+    return `Perfil por producto:\n${answerRows(productRows, ['name', 'count', 'balance', 'pct', 'avg_interest_rate', 'avg_days_overdue'])}`;
+  }
+  return analysis?.executiveSummary || `Resumen: ${latest.length} registros activos, saldo ${fmtMoney(total)}. Preguntas útiles: "qué falta", "top concentración", "mora", "cambios vs mes anterior", "por producto".`;
 }
 
 function anomalies(rows: StandardLoan[]) {
@@ -369,8 +568,14 @@ function anomalies(rows: StandardLoan[]) {
     if (!prior) return;
     const prevDpd = prior.days_overdue || 0;
     const latestDpd = current.days_overdue || 0;
-    if (prevDpd >= 1 && latestDpd === 0) dpd_improvement.push({ loan_id: id, days_overdue_prev: prevDpd, days_overdue_latest: latestDpd });
-    if (prevDpd === 0 && latestDpd >= 1) dpd_deterioration.push({ loan_id: id, days_overdue_prev: prevDpd, days_overdue_latest: latestDpd });
+    if (latestDpd < prevDpd) dpd_improvement.push({ loan_id: id, days_overdue_prev: prevDpd, days_overdue_latest: latestDpd, delta_days_overdue: latestDpd - prevDpd });
+    if (latestDpd > prevDpd) dpd_deterioration.push({
+      loan_id: id,
+      days_overdue_prev: prevDpd,
+      days_overdue_latest: latestDpd,
+      delta_days_overdue: latestDpd - prevDpd,
+      outstanding_balance: current.outstanding_balance,
+    });
     if (prevDpd > 0 && latestDpd > 0 && (prevDpd === latestDpd || Math.abs(latestDpd - prevDpd) > 30)) {
       dpd_inconsistency.push({ loan_id: id, days_overdue_prev: prevDpd, days_overdue_latest: latestDpd, delta_days_overdue: latestDpd - prevDpd, category: prevDpd === latestDpd ? 'No change in days' : 'Increment bigger than monthly cadence' });
     }
@@ -386,21 +591,37 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
   const allStandardized = tapes.flatMap(tape => {
     const data = tape.extractedData;
     const stored = data?._standardized;
-    if (Array.isArray(stored)) return stored as StandardLoan[];
+    const fallbackDate = parseDate(tape.uploadDate);
+    if (Array.isArray(stored)) {
+      return (stored as StandardLoan[]).map(row => ({ ...row, file_date: row.file_date || fallbackDate }));
+    }
     const rows = Array.isArray(data) ? data : (data?.rows || []);
-    return standardizeLoanTape(rows, tape.fileName).standardized;
+    return standardizeLoanTape(rows, tape.fileName).standardized.map(row => ({ ...row, file_date: row.file_date || fallbackDate }));
   });
   const selected = tapes.find(t => t.id === selectedTapeId);
+  const selectedRawRows = selected
+    ? (Array.isArray(selected.extractedData) ? selected.extractedData : (selected.extractedData?.rows || []))
+    : [];
+  const selectedStandardized = selected ? standardizeLoanTape(selectedRawRows, selected.fileName) : null;
   const selectedRows = selected
-    ? (selected.extractedData?._standardized || standardizeLoanTape(Array.isArray(selected.extractedData) ? selected.extractedData : (selected.extractedData?.rows || []), selected.fileName).standardized)
+    ? ((selected.extractedData?._standardized || selectedStandardized?.standardized || []) as StandardLoan[])
+        .map(row => ({ ...row, file_date: row.file_date || parseDate(selected.uploadDate) }))
     : allStandardized;
+  const selectedMappingReport = selected
+    ? (selected.extractedData?._mappingReport || selectedStandardized?.mappingReport || [])
+    : [];
   const active = activeRows(allStandardized);
-  const { rows: latest } = latestRows(active.length ? active : selectedRows);
+  const activeOrSelected = active.length ? active : selectedRows;
+  const { previous, latestRows: latest, previousRows } = latestAndPreviousRows(activeOrSelected);
   const q: any = quality(latest);
+  const pq: any = quality(previousRows);
   const dpd = dpdDistribution(latest);
   const total = sum(latest);
+  const previousTotal = sum(previousRows);
   const loanCount = new Set(latest.map(r => r.loan_id).filter(Boolean)).size;
+  const previousLoanCount = new Set(previousRows.map(r => r.loan_id).filter(Boolean)).size;
   const clientCount = new Set(latest.map(r => r.client).filter(Boolean)).size;
+  const previousClientCount = new Set(previousRows.map(r => r.client).filter(Boolean)).size;
   const validation = validate(selectedRows);
   const concentrations = {
     by_client: groupBy(latest, 'client', 20),
@@ -412,32 +633,71 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
   };
   const vencidaPct = q.vencida?.pct || 0;
   const atrasadaPct = q.atrasada?.pct || 0;
+  const previousVencidaPct = pq.vencida?.pct || 0;
+  const previousAtrasadaPct = pq.atrasada?.pct || 0;
   const maxClientPct = concentrations.by_client[0]?.pct || 0;
-  const riskScore = Math.min(100, Math.round((vencidaPct * 100 * 4) + (atrasadaPct * 100 * 1.5) + (maxClientPct > 0.3 ? 15 : 0) + (validation.length ? 10 : 0)));
+  const previousMaxClientPct = groupBy(previousRows, 'client', 1)[0]?.pct || 0;
+  const weightedDpd = weightedAverage(latest, 'days_overdue');
+  const previousWeightedDpd = weightedAverage(previousRows, 'days_overdue');
+  const weightedRate = weightedAverage(latest, 'interest_rate');
+  const previousWeightedRate = weightedAverage(previousRows, 'interest_rate');
+  const top10Pct = topShare(latest, 10);
+  const previousTop10Pct = topShare(previousRows, 10);
+  const missingDpdPct = q.sin_dato?.pct || 0;
+  const validationPenalty = Math.min(15, validation.length / Math.max(selectedRows.length, 1) * 20);
+  const riskScore = Math.min(100, Math.round(
+    (vencidaPct * 100 * 4)
+    + (atrasadaPct * 100 * 1.5)
+    + (maxClientPct > 0.3 ? 15 : maxClientPct > 0.2 ? 8 : 0)
+    + (missingDpdPct * 20)
+    + validationPenalty
+  ));
   const overallStatus = vencidaPct > 0.1 || riskScore >= 70 ? 'critical' : vencidaPct >= 0.05 || atrasadaPct > 0.2 || riskScore >= 40 ? 'warning' : 'good';
+  const dataProfile = buildLoanTapeDataProfile(selectedRows, selectedMappingReport);
+  const anomalySet: any = anomalies(activeOrSelected);
+  const trendDirection = previousRows.length
+    ? trend((vencidaPct * 2) + atrasadaPct + maxClientPct, (previousVencidaPct * 2) + previousAtrasadaPct + previousMaxClientPct, true)
+    : 'stable';
 
   const findings = [
+    ...dataProfile.missingFields.filter(f => f.severity !== 'low').slice(0, 5).map(f => ({ severity: f.severity, category: 'Preparación de Datos', title: `${f.field} ${f.mapped ? 'incompleto' : 'sin mapear'}`, detail: f.mapped ? `${fmtPct(f.missingPct)} de filas sin dato.` : 'No encontré una columna equivalente en el archivo.', recommendation: f.impact })),
     ...validation.slice(0, 10).map(v => ({ severity: v.severity, category: 'Calidad de Datos', title: v.rule_id, detail: `${v.loan_id}: ${v.message}`, recommendation: 'Revisar mapeo o dato fuente.' })),
     ...concentrations.by_client.filter(c => c.severity !== 'low').slice(0, 5).map(c => ({ severity: c.severity, category: 'Concentración', title: `Concentración en ${c.name}`, detail: `${fmtPct(c.pct)} del saldo de cartera`, recommendation: 'Revisar límite contractual por acreditado.' })),
-  ];
+    ...(anomalySet.dpd_deterioration?.length ? [{ severity: 'medium', category: 'Deterioro', title: `${anomalySet.dpd_deterioration.length} créditos entraron en mora`, detail: 'Comparación contra el corte anterior.', recommendation: 'Priorizar cobranza y revisar si el deterioro está concentrado por cliente/producto.' }] : []),
+    ...(anomalySet.disappeared_loans?.length ? [{ severity: 'low', category: 'Cambios de Portafolio', title: `${anomalySet.disappeared_loans.length} créditos desaparecieron`, detail: 'Puede ser pago, recompra, castigo o inconsistencia de ID.', recommendation: 'Validar contra movimientos y calendario de vencimientos.' }] : []),
+    ...(missingDpdPct > 0 ? [{ severity: missingDpdPct > 0.1 ? 'high' : 'medium', category: 'Cobertura DPD', title: `${fmtPct(missingDpdPct)} del saldo no tiene DPD`, detail: 'Ese saldo no se clasificó como vigente, atrasado ni vencido.', recommendation: 'Completar DPD antes de usar la mezcla de cartera para decisiones o covenants.' }] : []),
+  ].sort((a, b) => ({ high: 0, medium: 1, low: 2 }[a.severity] ?? 3) - ({ high: 0, medium: 1, low: 2 }[b.severity] ?? 3));
+
+  const topClient = concentrations.by_client[0];
+  const deteriorationIds = new Set((anomalySet.dpd_deterioration || []).map((item: any) => item.loan_id));
+  const deteriorationBalance = sum(latest.filter(row => row.loan_id && deteriorationIds.has(row.loan_id)));
+  const comparisonText = previous
+    ? ` Contra ${previous}, el saldo cambió ${fmtChange(total, previousTotal, 'money') || 'sin variación calculable'}, la cartera vencida ${fmtChange(vencidaPct, previousVencidaPct, 'pct') || 'sin variación calculable'} y ${anomalySet.dpd_deterioration?.length || 0} créditos deterioraron DPD por ${fmtMoney(deteriorationBalance)}.`
+    : ' No existe un corte anterior comparable; la tendencia se habilitará al cargar otro periodo.';
+  const concentrationText = topClient
+    ? ` El mayor cliente es ${topClient.name} con ${fmtPct(topClient.pct)} del saldo; Top 10 concentra ${fmtPct(top10Pct)}.`
+    : '';
 
   return {
     overallStatus,
     riskScore,
-    executiveSummary: `Análisis local generado con ${loanCount} créditos, ${clientCount} clientes y saldo total ${fmtMoney(total)}. Cartera vigente ${fmtPct(q.vigente?.pct || 0)}, atrasada ${fmtPct(atrasadaPct)} y vencida ${fmtPct(vencidaPct)}.`,
-    trendDirection: 'stable',
+    executiveSummary: `Cartera de ${loanCount} créditos y ${clientCount} clientes por ${fmtMoney(total)}: vigente ${fmtPct(q.vigente?.pct || 0)}, atrasada ${fmtPct(atrasadaPct)}, vencida ${fmtPct(vencidaPct)}${missingDpdPct ? ` y ${fmtPct(missingDpdPct)} sin DPD` : ''}.${concentrationText}${comparisonText}`,
+    trendDirection,
     portfolioQuality: q,
     dpd_distribution: dpd,
     concentrations,
-    anomalies: anomalies(active),
+    anomalies: anomalySet,
     validation,
     metrics: [
-      { name: 'Saldo total outstanding', latestValue: fmtMoney(total), trend: 'stable', status: overallStatus, congruent: true },
-      { name: 'Numero de creditos', latestValue: String(loanCount), trend: 'stable', status: 'good', congruent: true },
-      { name: 'Numero de clientes', latestValue: String(clientCount), trend: 'stable', status: 'good', congruent: true },
-      { name: '% cartera vencida', latestValue: fmtPct(vencidaPct), trend: 'stable', status: vencidaPct > 0.1 ? 'critical' : vencidaPct >= 0.05 ? 'warning' : 'good', congruent: true },
-      { name: '% cartera atrasada', latestValue: fmtPct(atrasadaPct), trend: 'stable', status: atrasadaPct > 0.2 ? 'warning' : 'good', congruent: true },
-      { name: 'Concentracion max cliente', latestValue: fmtPct(maxClientPct), trend: 'stable', status: maxClientPct > 0.2 ? 'critical' : maxClientPct > 0.1 ? 'warning' : 'good', congruent: true },
+      { name: 'Saldo total outstanding', latestValue: fmtMoney(total), previousValue: previousRows.length ? fmtMoney(previousTotal) : undefined, change: fmtChange(total, previousTotal, 'money'), trend: trend(total, previousTotal), status: overallStatus, congruent: true },
+      { name: 'Numero de creditos', latestValue: String(loanCount), previousValue: previousRows.length ? String(previousLoanCount) : undefined, change: fmtChange(loanCount, previousLoanCount, 'number'), trend: trend(loanCount, previousLoanCount), status: 'good', congruent: true },
+      { name: 'Numero de clientes', latestValue: String(clientCount), previousValue: previousRows.length ? String(previousClientCount) : undefined, change: fmtChange(clientCount, previousClientCount, 'number'), trend: trend(clientCount, previousClientCount), status: 'good', congruent: true },
+      { name: '% cartera vencida', latestValue: fmtPct(vencidaPct), previousValue: previousRows.length ? fmtPct(previousVencidaPct) : undefined, change: fmtChange(vencidaPct, previousVencidaPct, 'pct'), trend: trend(vencidaPct, previousVencidaPct, true), status: vencidaPct > 0.1 ? 'critical' : vencidaPct >= 0.05 ? 'warning' : 'good', congruent: true },
+      { name: '% cartera atrasada', latestValue: fmtPct(atrasadaPct), previousValue: previousRows.length ? fmtPct(previousAtrasadaPct) : undefined, change: fmtChange(atrasadaPct, previousAtrasadaPct, 'pct'), trend: trend(atrasadaPct, previousAtrasadaPct, true), status: atrasadaPct > 0.2 ? 'warning' : 'good', congruent: true },
+      { name: 'Concentracion max cliente', latestValue: fmtPct(maxClientPct), previousValue: previousRows.length ? fmtPct(previousMaxClientPct) : undefined, change: fmtChange(maxClientPct, previousMaxClientPct, 'pct'), trend: trend(maxClientPct, previousMaxClientPct, true), status: maxClientPct > 0.2 ? 'critical' : maxClientPct > 0.1 ? 'warning' : 'good', congruent: true },
+      { name: 'Concentracion Top 10 creditos', latestValue: fmtPct(top10Pct), previousValue: previousRows.length ? fmtPct(previousTop10Pct) : undefined, change: fmtChange(top10Pct, previousTop10Pct, 'pct'), trend: trend(top10Pct, previousTop10Pct, true), status: top10Pct > 0.75 ? 'critical' : top10Pct > 0.5 ? 'warning' : 'good', congruent: true },
+      { name: 'DPD ponderado por saldo', latestValue: weightedDpd === null ? 'N/D' : `${weightedDpd.toFixed(1)} dias`, previousValue: previousWeightedDpd === null ? undefined : `${previousWeightedDpd.toFixed(1)} dias`, change: weightedDpd !== null && previousWeightedDpd !== null ? fmtChange(weightedDpd, previousWeightedDpd, 'number') : undefined, trend: weightedDpd !== null && previousWeightedDpd !== null ? trend(weightedDpd, previousWeightedDpd, true) : 'stable', status: weightedDpd !== null && weightedDpd > 60 ? 'critical' : weightedDpd !== null && weightedDpd > 30 ? 'warning' : 'good', congruent: true },
+      { name: 'Tasa ponderada por saldo', latestValue: weightedRate === null ? 'N/D' : `${weightedRate.toFixed(2)}%`, previousValue: previousWeightedRate === null ? undefined : `${previousWeightedRate.toFixed(2)}%`, change: weightedRate !== null && previousWeightedRate !== null ? `${weightedRate - previousWeightedRate >= 0 ? '+' : ''}${(weightedRate - previousWeightedRate).toFixed(2)} pp` : undefined, trend: weightedRate !== null && previousWeightedRate !== null ? trend(weightedRate, previousWeightedRate) : 'stable', status: 'good', congruent: true },
     ],
     findings,
     congruencyChecks: [],

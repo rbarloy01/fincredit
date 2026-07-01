@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "verify:numbers": "esbuild scripts/verify-number-normalization.ts --bundle --platform=node --format=cjs --define:import.meta.env.VITE_SUPABASE_URL='\"http://localhost\"' --define:import.meta.env.VITE_SUPABASE_ANON_KEY='\"verification-key\"' --outfile=/tmp/finmonitor-number-verification.cjs && node /tmp/finmonitor-number-verification.cjs"
   },
   "dependencies": {
     "@google/genai": "^1.41.0",
@@ -15,6 +16,7 @@
     "@supabase/supabase-js": "^2.105.4",
     "@tailwindcss/vite": "^4.2.1",
     "exceljs": "^4.4.0",
+    "googleapis": "^173.0.0",
     "html2canvas": "^1.4.1",
     "html2pdf.js": "^0.14.0",
     "jspdf": "^4.2.0",

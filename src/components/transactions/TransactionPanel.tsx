@@ -6,8 +6,9 @@ import {
   Plus, ChevronDown, ChevronRight, Upload, FileText, Trash2,
   Sparkles, Save, X, Calendar, DollarSign, FileSignature, Download,
 } from 'lucide-react';
-import { exportTransacciones } from '../../lib/export';
 import WorkingOverlay from '../common/WorkingOverlay';
+import { parseFinancialNumber } from '../../lib/numberParsing';
+import { extractPdfText, isUsefulExtractedText } from '../../lib/documentParsing';
 
 const nanoid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
@@ -92,6 +93,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
   const handleExport = async (format: 'excel' | 'pdf') => {
     setExporting(format);
     try {
+      const { exportTransacciones } = await import('../../lib/export');
       await exportTransacciones(transactions, clientName, format, format === 'pdf' ? panelRef.current ?? undefined : undefined);
     } finally {
       setExporting(null);
@@ -126,7 +128,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
         description: form.description.trim(),
         date: form.date,
         creditType: form.creditType,
-        originalAmount: parseFloat(form.originalAmount) || 0,
+        originalAmount: parseFinancialNumber(form.originalAmount),
         currency: form.currency,
         signedAt: form.signedAt,
         maturityAt: form.maturityAt,
@@ -153,10 +155,15 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
     try {
       for (let i = 0; i < fileList.length; i++) {
         const file = fileList[i];
+        const sourceDocument = await db.uploadClientDocument(clientId, file, 'contract', {
+          transactionId: txId,
+          uploadSurface: 'transactions_panel',
+        });
         const base64Data = await toBase64(file);
         await db.addContractFile({
           transactionId: txId,
           clientId,
+          sourceDocumentId: sourceDocument.id,
           originalName: file.name,
           mimeType: file.type,
           base64Data,
@@ -202,7 +209,6 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
     }));
 
   const handleAnalyze = async (txId: string) => {
-    if (!aiSettings.apiKey) { alert('Configure la API Key en Configuración'); return; }
     const txFiles = files[txId] || [];
     if (txFiles.length === 0) { alert('Sube al menos un contrato antes de analizar'); return; }
 
@@ -215,7 +221,13 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
         const mimeType = inferMimeType(f);
         if (mimeType === 'text/plain') {
           textParts.push(`Archivo: ${f.originalName}\n${decodeBase64Text(f.base64Data)}`);
-        } else if (mimeType === 'application/pdf' || mimeType.startsWith('image/')) {
+        } else if (mimeType === 'application/pdf') {
+          const bytes = Uint8Array.from(atob(f.base64Data), char => char.charCodeAt(0));
+          const pdfFile = new File([bytes], f.originalName, { type: mimeType });
+          const parsedText = await extractPdfText(pdfFile);
+          if (isUsefulExtractedText(parsedText)) textParts.push(`Archivo: ${f.originalName}\n${parsedText}`);
+          else mediaFiles.push({ base64: f.base64Data, mimeType, fileName: f.originalName });
+        } else if (mimeType.startsWith('image/')) {
           mediaFiles.push({ base64: f.base64Data, mimeType, fileName: f.originalName });
         }
       }
@@ -371,7 +383,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                 </div>
                 <div>
                   <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Monto Original</label>
-                  <input type="number" className={inputClass} value={form.originalAmount} onChange={e => handleFormChange('originalAmount', e.target.value)} placeholder="0" />
+                  <input type="text" inputMode="decimal" className={inputClass} value={form.originalAmount} onChange={e => handleFormChange('originalAmount', e.target.value)} placeholder="1,250,000.00" />
                 </div>
                 <div>
                   <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Moneda</label>

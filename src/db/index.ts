@@ -1,5 +1,6 @@
 // FinMonitor DB — Supabase backend
 import { supabase } from '../lib/supabase';
+import { normalizeFinancialNumberString, parseFinancialNumber } from '../lib/numberParsing';
 
 export type Role = 'manager' | 'analyst' | 'pending';
 export type ActiveRole = Exclude<Role, 'pending'>;
@@ -69,6 +70,7 @@ export interface ContractFile {
   id: string;
   transactionId: string;
   clientId: string;
+  sourceDocumentId?: string;
   originalName: string;
   mimeType: string;
   base64Data: string;
@@ -106,6 +108,7 @@ export interface CovenantAnnotation {
 export interface FinancialStatement_DB {
   id: string;
   clientId: string;
+  sourceDocumentId?: string;
   sourceCompanyName?: string;
   documentType?: string;
   period: string;
@@ -125,25 +128,128 @@ export interface FinancialStatement_DB {
 export interface LoanTape_DB {
   id: string;
   clientId: string;
+  sourceDocumentId?: string;
   name: string;
   uploadDate: string;
   fileName: string;
   tapeType: 'credito' | 'factoraje' | 'otro';
   extractedData: any;
+  analystState?: {
+    workspaceBlocks?: any[];
+    qa?: {
+      draft?: string;
+      question?: string;
+      answer?: string;
+      updatedAt?: string;
+    };
+    updatedAt?: string;
+  };
 }
 
+export interface SourceDocument {
+  id: string;
+  orgId: string;
+  clientId?: string;
+  sourceKind: 'upload' | 'drive' | 'external';
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  documentType: 'financial_statement' | 'loan_tape' | 'contract' | 'other' | 'unknown';
+  storageBucket?: string;
+  storagePath?: string;
+  extractionStatus: string;
+  uploadedBy?: string;
+  createdAt: string;
+}
+
+const FINANCIAL_DOCUMENT_BUCKET = 'financial-documents';
+
 // ── Row mappers ───────────────────────────────────────────────────────────────
+
+const FINANCIAL_KEYS = new Set([
+  'amount', 'original_amount', 'originalAmount', 'outstanding_balance', 'outstandingBalance',
+  'balance', 'current_due', 'currentDue', 'max_default_amount', 'maxDefaultAmount',
+  'total_credit_value', 'totalCreditValue', 'revenue', 'cogs', 'operatingExpenses',
+  'operating_expenses', 'ebitda', 'interestExpense', 'interest_expense', 'netIncome',
+  'net_income', 'currentAssets', 'current_assets', 'currentLiabilities',
+  'current_liabilities', 'totalDebt', 'total_debt', 'totalAssets', 'total_assets',
+  'equity', 'value', 'pct', 'percentage', 'rate', 'interest_rate', 'avg_interest_rate',
+  'days_overdue', 'avg_days_overdue', 'count', 'riskScore',
+]);
+
+export function normalizeFinancialWriteValue(value: unknown): number {
+  return parseFinancialNumber(value, 0);
+}
+
+function normalizeFinancialObject<T extends Record<string, any>>(obj: T, preserveNullish = false): T {
+  return Object.fromEntries(
+    Object.entries(obj || {}).map(([key, value]) => [
+      key,
+      FINANCIAL_KEYS.has(key) && (!preserveNullish || (value !== null && value !== undefined && value !== ''))
+        ? normalizeFinancialWriteValue(value)
+        : value,
+    ]),
+  ) as T;
+}
+
+function normalizeRawLineItems(items: FinancialStatement_DB['rawLineItems'] = []) {
+  return items.map(item => ({
+    ...item,
+    name: String(item.name || '').trim(),
+    value: normalizeFinancialWriteValue(item.value),
+    sectionPath: item.sectionPath ?? null,
+    statementType: item.statementType || 'otro',
+  }));
+}
+
+function normalizeExtraAccounts(accounts: FinancialStatement_DB['extraAccounts'] = []) {
+  return accounts.map(account => ({
+    ...account,
+    key: String(account.key || '').trim(),
+    label: String(account.label || '').trim(),
+    value: normalizeFinancialWriteValue(account.value),
+  }));
+}
+
+function normalizeMappedData(mappedData: FinancialStatement_DB['mappedData']) {
+  return normalizeFinancialObject({ ...mappedData });
+}
+
+function normalizeLoanTapeData(data: any): any {
+  if (!data || typeof data !== 'object') return data;
+  if (Array.isArray(data)) return data;
+  const next = { ...data };
+  if (Array.isArray(next._standardized)) {
+    next._standardized = next._standardized.map((row: any) => normalizeFinancialObject({ ...row }, true));
+  }
+  if (next._analysis && typeof next._analysis === 'object') {
+    next._analysis = normalizeKnownFinancialJson(next._analysis);
+  }
+  return next;
+}
+
+function normalizeKnownFinancialJson(value: any): any {
+  if (Array.isArray(value)) return value.map(normalizeKnownFinancialJson);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => {
+      if (FINANCIAL_KEYS.has(key)) return [key, item === null || item === undefined || item === '' ? item : normalizeFinancialWriteValue(item)];
+      if (Array.isArray(item) || (item && typeof item === 'object')) return [key, normalizeKnownFinancialJson(item)];
+      return [key, item];
+    }),
+  );
+}
 
 function toClient(r: any): Client {
   return {
     id: r.id, orgId: r.org_id || '', name: r.name, taxId: r.tax_id || '', industry: r.industry || '',
     score: r.score || '', currency: r.currency || 'MXN',
-    totalCreditValue: r.total_credit_value || 0, creditType: r.credit_type || [],
+    totalCreditValue: normalizeFinancialWriteValue(r.total_credit_value), creditType: r.credit_type || [],
     contractName: r.contract_name || '', analystName: r.analyst_name || '',
     createdBy: r.created_by || '', createdAt: r.created_at,
-    paymentHistory: r.payment_history || [], currentDue: r.current_due || 0,
-    maxDefaultDays: r.max_default_days || 0, maxDefaultAmount: r.max_default_amount || 0,
-    defaultFrequency12m: r.default_frequency_12m || 0, opinion: r.opinion || '',
+    paymentHistory: r.payment_history || [], currentDue: normalizeFinancialWriteValue(r.current_due),
+    maxDefaultDays: normalizeFinancialWriteValue(r.max_default_days), maxDefaultAmount: normalizeFinancialWriteValue(r.max_default_amount),
+    defaultFrequency12m: normalizeFinancialWriteValue(r.default_frequency_12m), opinion: r.opinion || '',
     aforoRequerido: r.aforo_requerido || '', aforoHistory: r.aforo_history || [],
     documentation: r.documentation || [], reportDate: r.report_date || '',
     frequency: r.frequency || 'mensual', lastPeriod: r.last_period || '',
@@ -155,10 +261,10 @@ function fromClient(c: Omit<Client, 'id' | 'createdAt'>): any {
   return {
     ...(c.orgId ? { org_id: c.orgId } : {}),
     name: c.name, tax_id: c.taxId, industry: c.industry, score: c.score,
-    currency: c.currency, total_credit_value: c.totalCreditValue, credit_type: c.creditType,
+    currency: c.currency, total_credit_value: normalizeFinancialWriteValue(c.totalCreditValue), credit_type: c.creditType,
     contract_name: c.contractName, analyst_name: c.analystName, created_by: c.createdBy || null,
-    payment_history: c.paymentHistory, current_due: c.currentDue,
-    max_default_days: c.maxDefaultDays, max_default_amount: c.maxDefaultAmount,
+    payment_history: c.paymentHistory, current_due: normalizeFinancialWriteValue(c.currentDue),
+    max_default_days: normalizeFinancialWriteValue(c.maxDefaultDays), max_default_amount: normalizeFinancialWriteValue(c.maxDefaultAmount),
     default_frequency_12m: c.defaultFrequency12m, opinion: c.opinion,
     aforo_requerido: c.aforoRequerido, aforo_history: c.aforoHistory,
     documentation: c.documentation, report_date: c.reportDate,
@@ -170,7 +276,7 @@ function fromClient(c: Omit<Client, 'id' | 'createdAt'>): any {
 function toTransaction(r: any): Transaction {
   return {
     id: r.id, clientId: r.client_id, name: r.name, description: r.description || '',
-    date: r.date || '', creditType: r.credit_type || '', originalAmount: r.original_amount || 0,
+    date: r.date || '', creditType: r.credit_type || '', originalAmount: normalizeFinancialWriteValue(r.original_amount),
     currency: r.currency || 'MXN', signedAt: r.signed_at || '', maturityAt: r.maturity_at || '',
     createdBy: r.created_by || '', createdAt: r.created_at,
   };
@@ -179,6 +285,7 @@ function toTransaction(r: any): Transaction {
 function toContractFile(r: any): ContractFile {
   return {
     id: r.id, transactionId: r.transaction_id, clientId: r.client_id,
+    sourceDocumentId: r.source_document_id || undefined,
     originalName: r.original_name, mimeType: r.mime_type || '',
     base64Data: r.base64_data || '', uploadedAt: r.uploaded_at,
     extractionStatus: r.extraction_status || 'pending',
@@ -189,7 +296,7 @@ function toContractFile(r: any): ContractFile {
 function toCovenant(r: any): Covenant_DB {
   return {
     id: r.id, clientId: r.client_id, transactionId: r.transaction_id,
-    name: r.name, type: r.type, formula: r.formula || '', threshold: r.threshold || '',
+    name: r.name, type: r.type, formula: r.formula || '', threshold: normalizeFinancialNumberString(r.threshold),
     operator: r.operator || 'none', description: r.description || '',
     complianceStatus: r.compliance_status || 'pendiente',
     formulaByPeriod: r.formula_by_period || {},
@@ -206,7 +313,8 @@ function toAnnotation(r: any): CovenantAnnotation {
 
 function toStatement(r: any): FinancialStatement_DB {
   return {
-    id: r.id, clientId: r.client_id, sourceCompanyName: r.source_company_name,
+    id: r.id, clientId: r.client_id, sourceDocumentId: r.source_document_id || undefined,
+    sourceCompanyName: r.source_company_name,
     documentType: r.document_type, period: r.period, periodDate: r.period_date,
     uploadDate: r.upload_date, fileName: r.file_name || '',
     rawLineItems: r.raw_line_items || [], mappedData: r.mapped_data || {},
@@ -216,9 +324,29 @@ function toStatement(r: any): FinancialStatement_DB {
 
 function toLoanTape(r: any): LoanTape_DB {
   return {
-    id: r.id, clientId: r.client_id, name: r.name,
+    id: r.id, clientId: r.client_id, sourceDocumentId: r.source_document_id || undefined,
+    name: r.name,
     uploadDate: r.upload_date, fileName: r.file_name || '',
     tapeType: r.tape_type || 'credito', extractedData: r.extracted_data,
+    analystState: r.analyst_state || undefined,
+  };
+}
+
+function toSourceDocument(r: any): SourceDocument {
+  return {
+    id: r.id,
+    orgId: r.org_id,
+    clientId: r.client_id || undefined,
+    sourceKind: r.source_kind || 'external',
+    fileName: r.file_name,
+    mimeType: r.mime_type || '',
+    sizeBytes: Number(r.size_bytes || 0),
+    documentType: r.document_type || 'unknown',
+    storageBucket: r.storage_bucket || undefined,
+    storagePath: r.storage_path || undefined,
+    extractionStatus: r.extraction_status || 'pending',
+    uploadedBy: r.uploaded_by || undefined,
+    createdAt: r.created_at,
   };
 }
 
@@ -233,6 +361,9 @@ async function currentAuthUser() {
 
 async function resolveOrgId(userId?: string): Promise<string | null> {
   if (!userId) return null;
+  const authUser = await currentAuthUser();
+  if (!authUser || authUser.id !== userId) return null;
+
   const { data: profile, error: profileError } = await supabase.from('profiles').select('org_id').eq('id', userId).maybeSingle();
   if (profileError && !/column .*org_id|org_id.*column|schema cache/i.test(profileError.message || '')) {
     err('resolveOrgId', profileError);
@@ -240,29 +371,19 @@ async function resolveOrgId(userId?: string): Promise<string | null> {
   if (profile?.org_id) return profile.org_id;
 
   try {
-    const authUser = await currentAuthUser();
+    const { data: { session } } = await supabase.auth.getSession();
     const response = await fetch('/api/admin/org/ensure', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userId,
-        userEmail: authUser?.id === userId ? authUser.email || '' : '',
-        userName: authUser?.id === userId ? authUser.user_metadata?.full_name || authUser.user_metadata?.name || authUser.email || 'Usuario' : 'Usuario',
-        role: 'pending',
-        organizationName: 'Syscap',
-        slug: 'syscap',
-      }),
+      headers: {
+        'Content-Type': 'application/json',
+        ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+      },
+      body: JSON.stringify({}),
     });
     const json = await response.json().catch(() => ({}));
     if (response.ok && json.orgId) return json.orgId;
   } catch {
-    // Continue with client-side fallback for older local setups.
-  }
-
-  const { data: org } = await supabase.from('organizations').select('id').limit(1).maybeSingle();
-  if (org?.id) {
-    await supabase.from('profiles').update({ org_id: org.id }).eq('id', userId);
-    return org.id;
+    // The server endpoint is authoritative for assigning organizations.
   }
   return null;
 }
@@ -274,6 +395,19 @@ function legacyLocalValue<T>(key: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function safeFileName(name: string): string {
+  const cleaned = name.normalize('NFKD')
+    .replace(/[^\w.\-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return cleaned || `document_${Date.now()}`;
+}
+
+function documentStoragePath(orgId: string, clientId: string, documentType: SourceDocument['documentType'], fileName: string): string {
+  const id = crypto.randomUUID();
+  return `${orgId}/${clientId}/${documentType}/${id}/${safeFileName(fileName)}`;
 }
 
 // ── DB object ────────────────────────────────────────────────────────────────
@@ -331,12 +465,15 @@ export const db = {
   // ── Clients ────────────────────────────────────────────────────────────────
   async createClient(data: Omit<Client, 'id' | 'createdAt'>): Promise<Client> {
     const payload = fromClient(data);
-    const orgId = await resolveOrgId(data.createdBy);
+    const authUser = await currentAuthUser();
+    if (!authUser?.id) throw new Error('No se pudo identificar al usuario autenticado.');
+    payload.created_by = authUser.id;
+    const orgId = await resolveOrgId(authUser.id);
     if (!orgId) throw new Error('No se pudo preparar la organización del usuario. Intenta cerrar sesión e iniciar con Google nuevamente.');
     payload.org_id = orgId;
     let { data: row, error } = await supabase.from('clients').insert(payload).select().single();
     if (error && /org_id|organización|organization/i.test(error.message || '')) {
-      const ensuredOrgId = await resolveOrgId(data.createdBy);
+      const ensuredOrgId = await resolveOrgId(authUser.id);
       if (ensuredOrgId) {
         const retry = await supabase.from('clients').insert({ ...payload, org_id: ensuredOrgId }).select().single();
         row = retry.data;
@@ -365,14 +502,14 @@ export const db = {
     if (updates.industry !== undefined) row.industry = updates.industry;
     if (updates.score !== undefined) row.score = updates.score;
     if (updates.currency !== undefined) row.currency = updates.currency;
-    if (updates.totalCreditValue !== undefined) row.total_credit_value = updates.totalCreditValue;
+    if (updates.totalCreditValue !== undefined) row.total_credit_value = normalizeFinancialWriteValue(updates.totalCreditValue);
     if (updates.creditType !== undefined) row.credit_type = updates.creditType;
     if (updates.contractName !== undefined) row.contract_name = updates.contractName;
     if (updates.analystName !== undefined) row.analyst_name = updates.analystName;
     if (updates.paymentHistory !== undefined) row.payment_history = updates.paymentHistory;
-    if (updates.currentDue !== undefined) row.current_due = updates.currentDue;
-    if (updates.maxDefaultDays !== undefined) row.max_default_days = updates.maxDefaultDays;
-    if (updates.maxDefaultAmount !== undefined) row.max_default_amount = updates.maxDefaultAmount;
+    if (updates.currentDue !== undefined) row.current_due = normalizeFinancialWriteValue(updates.currentDue);
+    if (updates.maxDefaultDays !== undefined) row.max_default_days = normalizeFinancialWriteValue(updates.maxDefaultDays);
+    if (updates.maxDefaultAmount !== undefined) row.max_default_amount = normalizeFinancialWriteValue(updates.maxDefaultAmount);
     if (updates.defaultFrequency12m !== undefined) row.default_frequency_12m = updates.defaultFrequency12m;
     if (updates.opinion !== undefined) row.opinion = updates.opinion;
     if (updates.aforoRequerido !== undefined) row.aforo_requerido = updates.aforoRequerido;
@@ -393,8 +530,9 @@ export const db = {
   },
 
   async getClientSetting<T>(clientId: string, key: string, fallback: T): Promise<T> {
-    const localFallback = () => {
-      try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback)); } catch { return fallback; }
+    const localFallback = () => legacyLocalValue(key, fallback);
+    const hasLegacyLocal = () => {
+      try { return localStorage.getItem(key) !== null; } catch { return false; }
     };
     const { data, error } = await supabase
       .from('client_settings')
@@ -421,7 +559,9 @@ export const db = {
       return value;
     }
     if (data?.value === undefined || data?.value === null) {
-      return localFallback();
+      const value = localFallback();
+      if (hasLegacyLocal()) void this.setClientSetting(clientId, key, value);
+      return value;
     }
     localStorage.setItem(key, JSON.stringify(data.value));
     return data.value as T;
@@ -511,7 +651,7 @@ export const db = {
   async createTransaction(data: Omit<Transaction, 'id' | 'createdAt'>): Promise<Transaction> {
     const { data: row, error } = await supabase.from('transactions').insert({
       client_id: data.clientId, name: data.name, description: data.description,
-      date: data.date, credit_type: data.creditType, original_amount: data.originalAmount,
+      date: data.date, credit_type: data.creditType, original_amount: normalizeFinancialWriteValue(data.originalAmount),
       currency: data.currency, signed_at: data.signedAt, maturity_at: data.maturityAt,
       created_by: data.createdBy || null,
     }).select().single();
@@ -536,7 +676,7 @@ export const db = {
     if (updates.description !== undefined) row.description = updates.description;
     if (updates.date !== undefined) row.date = updates.date;
     if (updates.creditType !== undefined) row.credit_type = updates.creditType;
-    if (updates.originalAmount !== undefined) row.original_amount = updates.originalAmount;
+    if (updates.originalAmount !== undefined) row.original_amount = normalizeFinancialWriteValue(updates.originalAmount);
     if (updates.currency !== undefined) row.currency = updates.currency;
     if (updates.signedAt !== undefined) row.signed_at = updates.signedAt;
     if (updates.maturityAt !== undefined) row.maturity_at = updates.maturityAt;
@@ -553,6 +693,7 @@ export const db = {
   async addContractFile(data: Omit<ContractFile, 'id' | 'uploadedAt'>): Promise<ContractFile> {
     const { data: row, error } = await supabase.from('contract_files').insert({
       transaction_id: data.transactionId, client_id: data.clientId,
+      source_document_id: data.sourceDocumentId || null,
       original_name: data.originalName, mime_type: data.mimeType,
       base64_data: data.base64Data, extraction_status: data.extractionStatus,
       extracted_covenants: data.extractedCovenants || null,
@@ -584,7 +725,7 @@ export const db = {
   async createCovenant(data: Omit<Covenant_DB, 'id' | 'createdAt'>): Promise<Covenant_DB> {
     const payload: any = {
       client_id: data.clientId, transaction_id: data.transactionId || null,
-      name: data.name, type: data.type, formula: data.formula, threshold: data.threshold,
+      name: data.name, type: data.type, formula: data.formula, threshold: normalizeFinancialNumberString(data.threshold),
       operator: data.operator, description: data.description,
       compliance_status: data.complianceStatus || 'pendiente',
       formula_by_period: data.formulaByPeriod || {},
@@ -616,7 +757,7 @@ export const db = {
     const row: any = {};
     if (updates.name !== undefined) row.name = updates.name;
     if (updates.formula !== undefined) row.formula = updates.formula;
-    if (updates.threshold !== undefined) row.threshold = updates.threshold;
+    if (updates.threshold !== undefined) row.threshold = normalizeFinancialNumberString(updates.threshold);
     if (updates.operator !== undefined) row.operator = updates.operator;
     if (updates.description !== undefined) row.description = updates.description;
     if (updates.formulaByPeriod !== undefined) row.formula_by_period = updates.formulaByPeriod;
@@ -655,13 +796,73 @@ export const db = {
     return (data || []).map(toAnnotation);
   },
 
+  // ── Private Source Documents ───────────────────────────────────────────────
+  async uploadClientDocument(
+    clientId: string,
+    file: File,
+    documentType: SourceDocument['documentType'],
+    metadata: Record<string, any> = {},
+  ): Promise<SourceDocument> {
+    const authUser = await currentAuthUser();
+    if (!authUser?.id) throw new Error('No se pudo identificar al usuario autenticado.');
+    const orgId = await resolveOrgId(authUser.id);
+    if (!orgId) throw new Error('No se pudo resolver la organización para guardar el archivo.');
+
+    const storagePath = documentStoragePath(orgId, clientId, documentType, file.name);
+    const mimeType = file.type || 'application/octet-stream';
+    const uploaded = await supabase.storage
+      .from(FINANCIAL_DOCUMENT_BUCKET)
+      .upload(storagePath, file, {
+        contentType: mimeType,
+        cacheControl: '3600',
+        upsert: false,
+      });
+    if (uploaded.error) err('uploadClientDocument.storage', uploaded.error);
+
+    const { data: row, error } = await supabase.from('documents').insert({
+      org_id: orgId,
+      client_id: clientId,
+      source_kind: 'upload',
+      source_uri: `supabase://${FINANCIAL_DOCUMENT_BUCKET}/${storagePath}`,
+      storage_bucket: FINANCIAL_DOCUMENT_BUCKET,
+      storage_path: storagePath,
+      file_name: file.name,
+      mime_type: mimeType,
+      size_bytes: file.size,
+      document_type: documentType,
+      extraction_status: 'uploaded',
+      raw_metadata: metadata,
+      uploaded_by: authUser.id,
+    }).select().single();
+
+    if (error) {
+      await supabase.storage.from(FINANCIAL_DOCUMENT_BUCKET).remove([storagePath]);
+      err('uploadClientDocument.record', error);
+    }
+    return toSourceDocument(row);
+  },
+
+  async getSourceDocument(id: string): Promise<SourceDocument | undefined> {
+    const { data } = await supabase.from('documents').select('*').eq('id', id).maybeSingle();
+    return data ? toSourceDocument(data) : undefined;
+  },
+
+  async createSignedDocumentUrl(id: string, expiresIn = 60): Promise<string> {
+    const doc = await this.getSourceDocument(id);
+    if (!doc?.storageBucket || !doc.storagePath) throw new Error('El documento no tiene archivo privado asociado.');
+    const { data, error } = await supabase.storage.from(doc.storageBucket).createSignedUrl(doc.storagePath, expiresIn);
+    if (error) err('createSignedDocumentUrl', error);
+    return data.signedUrl;
+  },
+
   // ── Financial Statements ───────────────────────────────────────────────────
   async createStatement(data: Omit<FinancialStatement_DB, 'id' | 'uploadDate'>): Promise<FinancialStatement_DB> {
     const { data: row, error } = await supabase.from('financial_statements').insert({
-      client_id: data.clientId, source_company_name: data.sourceCompanyName || null,
+      client_id: data.clientId, source_document_id: data.sourceDocumentId || null,
+      source_company_name: data.sourceCompanyName || null,
       document_type: data.documentType || null, period: data.period, period_date: data.periodDate,
-      file_name: data.fileName, raw_line_items: data.rawLineItems,
-      mapped_data: data.mappedData, extra_accounts: data.extraAccounts,
+      file_name: data.fileName, raw_line_items: normalizeRawLineItems(data.rawLineItems),
+      mapped_data: normalizeMappedData(data.mappedData), extra_accounts: normalizeExtraAccounts(data.extraAccounts),
     }).select().single();
     if (error) err('createStatement', error);
     return toStatement(row);
@@ -680,9 +881,9 @@ export const db = {
 
   async updateStatement(id: string, updates: Partial<FinancialStatement_DB>): Promise<void> {
     const row: any = {};
-    if (updates.mappedData !== undefined) row.mapped_data = updates.mappedData;
-    if (updates.rawLineItems !== undefined) row.raw_line_items = updates.rawLineItems;
-    if (updates.extraAccounts !== undefined) row.extra_accounts = updates.extraAccounts;
+    if (updates.mappedData !== undefined) row.mapped_data = normalizeMappedData(updates.mappedData);
+    if (updates.rawLineItems !== undefined) row.raw_line_items = normalizeRawLineItems(updates.rawLineItems);
+    if (updates.extraAccounts !== undefined) row.extra_accounts = normalizeExtraAccounts(updates.extraAccounts);
     if (updates.period !== undefined) row.period = updates.period;
     if (updates.periodDate !== undefined) row.period_date = updates.periodDate;
     const { error } = await supabase.from('financial_statements').update(row).eq('id', id);
@@ -697,8 +898,10 @@ export const db = {
   // ── Loan Tapes ─────────────────────────────────────────────────────────────
   async createLoanTape(data: Omit<LoanTape_DB, 'id' | 'uploadDate'>): Promise<LoanTape_DB> {
     const { data: row, error } = await supabase.from('loan_tapes').insert({
-      client_id: data.clientId, name: data.name, file_name: data.fileName,
-      tape_type: data.tapeType, extracted_data: data.extractedData,
+      client_id: data.clientId, source_document_id: data.sourceDocumentId || null,
+      name: data.name, file_name: data.fileName,
+      tape_type: data.tapeType, extracted_data: normalizeLoanTapeData(data.extractedData),
+      analyst_state: data.analystState || {},
     }).select().single();
     if (error) err('createLoanTape', error);
     return toLoanTape(row);
@@ -718,7 +921,8 @@ export const db = {
   async updateLoanTape(id: string, updates: Partial<LoanTape_DB>): Promise<void> {
     const row: any = {};
     if (updates.name !== undefined) row.name = updates.name;
-    if (updates.extractedData !== undefined) row.extracted_data = updates.extractedData;
+    if (updates.extractedData !== undefined) row.extracted_data = normalizeLoanTapeData(updates.extractedData);
+    if (updates.analystState !== undefined) row.analyst_state = updates.analystState;
     const { error } = await supabase.from('loan_tapes').update(row).eq('id', id);
     if (error) err('updateLoanTape', error);
   },

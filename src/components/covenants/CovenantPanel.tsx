@@ -5,6 +5,7 @@ import {
   Plus, ChevronDown, ChevronRight, MessageCircle, Send,
   TrendingUp, CheckCircle, AlertTriangle, XCircle, X, Trash2
 } from 'lucide-react';
+import { parseNullableFinancialNumber } from '../../lib/numberParsing';
 
 const nanoid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
@@ -52,8 +53,8 @@ function evaluateCovenant(cov: Covenant_DB, statements: FinancialStatement_DB[])
 
   if (value === null) return { value: null, status: 'cumple' };
 
-  const threshold = parseFloat(cov.threshold);
-  if (isNaN(threshold)) return { value, status: 'cumple' };
+  const threshold = parseNullableFinancialNumber(cov.threshold);
+  if (threshold === null) return { value, status: 'cumple' };
 
   let meets = true;
   switch (cov.operator) {

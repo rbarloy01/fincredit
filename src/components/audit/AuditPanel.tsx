@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { db, FinancialStatement_DB } from '../../db/index';
-import { classifyAccount } from '../financials/FinancialPanel';
+import { classifyAccount } from '../../lib/accountClassification';
 import { X } from 'lucide-react';
 
 type StatementType = 'balance_general' | 'estado_resultados' | 'flujo_efectivo' | 'otro';

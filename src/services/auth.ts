@@ -18,17 +18,14 @@ function profileName(user: SupabaseUser): string {
 
 async function ensureOrg(user: SupabaseUser): Promise<string | null> {
   try {
+    const { data: { session } } = await supabase.auth.getSession();
     const response = await fetch('/api/admin/org/ensure', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userId: user.id,
-        userEmail: user.email || '',
-        userName: profileName(user),
-        role: 'pending',
-        organizationName: 'Syscap',
-        slug: 'syscap',
-      }),
+      headers: {
+        'Content-Type': 'application/json',
+        ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+      },
+      body: JSON.stringify({}),
     });
     const json = await response.json().catch(() => ({}));
     return response.ok ? json.orgId || null : null;
