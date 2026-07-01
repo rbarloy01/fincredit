@@ -457,7 +457,7 @@ const BenchmarkingPage: React.FC = () => {
       liquidityMedian !== null && liquidityMedian < 1 ? `Razón corriente mediana por debajo de 1.0x (${formatMetric(liquidityMedian, 'current_ratio')}).` : 'Completar cuentas de activo/pasivo corriente para robustecer el análisis de liquidez.',
     ];
     return {
-      title: 'Mini Estudio Tipo Syntage',
+      title: 'Covenant Metrics & Insights',
       periodLabel: period === 'latest' ? 'Último disponible' : period,
       exposure,
       clients: filtered.length,
@@ -486,7 +486,7 @@ const BenchmarkingPage: React.FC = () => {
           ['Clientes incluidos', filtered.length],
           ['Exposición total', filtered.reduce((s, r) => s + (r.client.totalCreditValue || 0), 0)],
           ['Segmentación activa', dims.length ? dims.map(dim => BENCHMARK_FILTERS.find(f => f.key === dim)?.label || dim).join(' + ') : 'Global'],
-          ['Score promedio tipo Syntage', syntageStudy.avgScore],
+          ['Insight Readiness Score', syntageStudy.avgScore],
           ['Banda promedio', syntageStudy.band],
           [],
           ['Segmento', 'Clientes', 'Exposición', '% Exposición', ...ratioKeys.map(k => ratioLabels[k])],
@@ -525,7 +525,7 @@ const BenchmarkingPage: React.FC = () => {
             'Client ID', 'Cliente', 'RFC', 'Industria', 'Moneda', 'Exposición', 'Ticket promedio', 'Segmento',
             'Entidad jurídica', 'Antigüedad operativa', 'Producto principal', 'Segmento objetivo', 'Modelo de fondeo',
             'Geografía', 'Canal originación', 'Etapa madurez', 'Rango ticket', 'Tipo EF', 'Años financieros',
-            'Crédito / contrato', '# Covenants financieros', 'Score Syntage', 'Banda Syntage',
+            'Crédito / contrato', '# Covenants financieros', 'Insight Readiness Score', 'Readiness band',
             'Periodo', 'Fecha periodo', 'Tipo documento', 'Archivo fuente',
             ...ratioKeys.map(key => ratioLabels[key]),
             ...syntageRatioKeys.map(key => `Δ ${ratioLabels[key]}`),
@@ -545,15 +545,15 @@ const BenchmarkingPage: React.FC = () => {
         colWidths: [32, 28, 34, 14, 12, 14, 16],
       };
       const miniStudySheet: SheetDef = {
-        name: 'Mini Estudio Syntage',
+        name: 'Covenant Metrics',
         rows: [
-          ['MINI ESTUDIO TIPO SYNTAGE'],
+          ['COVENANT METRICS & INSIGHTS'],
           [],
           ['Periodo analizado', syntageStudy.periodLabel],
           ['Clientes', syntageStudy.clients],
           ['Segmentos', syntageStudy.segments],
           ['Exposición total', syntageStudy.exposure],
-          ['Score promedio', syntageStudy.avgScore],
+          ['Insight Readiness Score', syntageStudy.avgScore],
           ['Banda promedio', syntageStudy.band],
           ['Mediana Deuda/EBITDA', syntageStudy.debtMedian],
           ['Mediana DSCR', syntageStudy.dscrMedian],
@@ -571,8 +571,8 @@ const BenchmarkingPage: React.FC = () => {
           ...syntageStudy.watchItems.map(item => [item]),
           [],
           ['Notas metodológicas'],
-          ['Score Syntage = cobertura financiera 45%, años históricos 20%, contrato 20%, covenants 15%.'],
-          ['Este mini-estudio usa los filtros activos y está diseñado para revisión rápida previa a comité.'],
+          ['Insight Readiness Score = cobertura financiera 45%, años históricos 20%, contrato 20%, covenants 15%.'],
+          ['Este entregable usa los filtros activos y está diseñado para revisión rápida previa a comité.'],
         ],
         colWidths: [38, 18, 18, 16],
         wrapColumns: [1],
@@ -585,14 +585,14 @@ const BenchmarkingPage: React.FC = () => {
           ['Variable', 'Definición'],
           ...BENCHMARK_FILTERS.map(filter => [filter.label, `Campo usado para segmentar benchmark: ${filter.key}`]),
           ...ratioKeys.map(key => [ratioLabels[key], ratioFormulaDescriptions[key] || key]),
-          ['Score Syntage', 'Índice 0-100 de completitud analítica: métricas financieras, años, contrato y covenants.'],
-          ['Banda Syntage', 'Alta >=80, Media alta >=60, Media >=40, Baja <40.'],
+          ['Insight Readiness Score', 'Índice 0-100 de completitud analítica: métricas financieras, años, contrato y covenants.'],
+          ['Readiness band', 'Alta >=80, Media alta >=60, Media >=40, Baja <40.'],
         ],
         colWidths: [28, 80],
         wrapColumns: [2],
       };
       const { exportToExcel } = await import('../../lib/export');
-      await exportToExcel([summary, cohortSheet, baseSheet, covSheet, miniStudySheet, dictionarySheet], 'Benchmarking_Further_Analysis_Syntage');
+      await exportToExcel([summary, cohortSheet, baseSheet, covSheet, miniStudySheet, dictionarySheet], 'Benchmarking_Covenant_Metrics_Insights');
     } finally {
       setExporting(false);
     }
@@ -660,7 +660,7 @@ const BenchmarkingPage: React.FC = () => {
         <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <ClipboardList className="w-4 h-4 text-indigo-600" />
-            <h2 className="text-sm font-black text-slate-900 uppercase tracking-widest">Mini Estudio Tipo Syntage</h2>
+            <h2 className="text-sm font-black text-slate-900 uppercase tracking-widest">Covenant Metrics & Insights</h2>
           </div>
           <span className="text-xs font-black text-indigo-600 uppercase tracking-widest">{syntageStudy.periodLabel}</span>
         </div>
