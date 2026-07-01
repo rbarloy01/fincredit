@@ -72,8 +72,7 @@ body {
 
 .finmonitor-shell .bg-slate-900,
 .finmonitor-shell .bg-slate-950 {
-  background:
-    linear-gradient(135deg, #050827 0%, #090d3f 58%, #06285f 100%) !important;
+  background-color: #07111f !important;
 }
 
 .finmonitor-shell .bg-indigo-600,
@@ -194,26 +193,84 @@ body {
 
 .theme-night {
   color-scheme: dark;
-  background:
-    linear-gradient(118deg, rgba(0, 204, 238, 0.14) 0%, transparent 38%),
-    linear-gradient(135deg, #05051d 0%, #080b2e 52%, #001b4e 100%) !important;
+  background: #07111f !important;
   color: #eaf7ff;
+}
+
+.theme-night aside {
+  background: #081321 !important;
+  border-color: #1d2a3f !important;
+  box-shadow: none !important;
+}
+
+.theme-night aside > div {
+  border-color: #1d2a3f !important;
+}
+
+.theme-night aside .bg-slate-50,
+.theme-night aside .bg-slate-100,
+.theme-night aside .bg-white {
+  background-color: #0c192a !important;
+  backdrop-filter: none !important;
+}
+
+.theme-night aside button:not(.bg-indigo-600) {
+  background: transparent !important;
+  border-color: transparent !important;
+  color: #91a5bb !important;
+  box-shadow: none !important;
+}
+
+.theme-night aside button:not(.bg-indigo-600):hover {
+  background-color: #102239 !important;
+  border-color: #1d2a3f !important;
+  color: #f7fbff !important;
+}
+
+.theme-night aside .bg-indigo-600 {
+  background: #1400e0 !important;
+  box-shadow: 0 10px 24px rgba(20, 0, 224, 0.22) !important;
+}
+
+.theme-night aside .text-indigo-600 {
+  color: #00ccee !important;
+}
+
+.theme-night aside .text-slate-900,
+.theme-night aside .text-slate-800,
+.theme-night aside .text-slate-700 {
+  color: #f7fbff !important;
+}
+
+.theme-night aside .text-slate-600,
+.theme-night aside .text-slate-500,
+.theme-night aside .text-slate-400 {
+  color: #91a5bb !important;
+}
+
+.theme-night aside .bg-indigo-200 {
+  background-color: #12284a !important;
+  color: #dff8ff !important;
+}
+
+.theme-night aside .ring-white {
+  --tw-ring-color: #0c192a !important;
 }
 
 .theme-night .bg-slate-50,
 .theme-night .bg-slate-100,
 .theme-night .bg-white {
-  background-color: rgba(7, 17, 49, 0.86) !important;
+  background-color: #0f1b2d !important;
 }
 
 .theme-night .bg-slate-50\/50 {
-  background-color: rgba(7, 17, 49, 0.66) !important;
+  background-color: rgba(15, 27, 45, 0.78) !important;
 }
 
 .theme-night .border-slate-100,
 .theme-night .border-slate-200,
 .theme-night .border-slate-300 {
-  border-color: rgba(0, 204, 238, 0.16) !important;
+  border-color: #23314a !important;
 }
 
 .theme-night .text-slate-900,
@@ -224,34 +281,51 @@ body {
 
 .theme-night .text-slate-600,
 .theme-night .text-slate-500 {
-  color: #b9d8ea !important;
+  color: #b6c3d5 !important;
 }
 
 .theme-night .text-slate-400 {
-  color: #9ccce3 !important;
+  color: #8fa3ba !important;
 }
 
 .theme-night .text-indigo-300 {
-  color: #8eeeff !important;
+  color: #7ddff1 !important;
 }
 
 .theme-night .bg-slate-900,
 .theme-night .bg-slate-950 {
-  background:
-    linear-gradient(135deg, #050720 0%, #090d3e 56%, #06316a 100%) !important;
-  border-color: rgba(0, 204, 238, 0.18) !important;
+  background-color: #091426 !important;
+  background-image: linear-gradient(135deg, rgba(20, 0, 224, 0.1), rgba(0, 102, 255, 0.08)) !important;
+  border-color: #23314a !important;
 }
 
 .theme-night .bg-slate-900 .text-slate-400,
 .theme-night .bg-slate-950 .text-slate-400 {
-  color: rgba(225, 247, 255, 0.74) !important;
+  color: #b9c9dc !important;
+}
+
+.theme-night .bg-white\/10 {
+  background-color: rgba(255, 255, 255, 0.06) !important;
+}
+
+.theme-night .border-white\/10 {
+  border-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+.theme-night .bg-indigo-50,
+.theme-night .bg-indigo-100,
+.theme-night .bg-blue-50,
+.theme-night .bg-blue-100,
+.theme-night .bg-cyan-50,
+.theme-night .bg-cyan-100 {
+  background-color: rgba(0, 102, 255, 0.14) !important;
 }
 
 .theme-night input,
 .theme-night textarea,
 .theme-night select {
-  background-color: rgba(4, 10, 34, 0.82) !important;
-  border-color: rgba(0, 204, 238, 0.18) !important;
+  background-color: #0b1626 !important;
+  border-color: #2b3a55 !important;
   color: #f7fbff !important;
 }
 

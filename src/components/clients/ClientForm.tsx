@@ -1,9 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Client, CustomField, db } from '../../db/index';
 import { Session } from '../../services/auth';
-import { AISettings } from '../../services/ai';
-import { Plus, Trash2, ChevronLeft, Save } from 'lucide-react';
+import { AISettings, AIMedia, ContractClientExtractionResult, extractClientFromContract } from '../../services/ai';
+import { Plus, Trash2, ChevronLeft, Save, Upload, FileSignature, Sparkles, CheckCircle, X } from 'lucide-react';
 import { parseFinancialNumber } from '../../lib/numberParsing';
+import { extractPdfText, isUsefulExtractedText, renderPdfPreviewImages } from '../../lib/documentParsing';
+import WorkingOverlay from '../common/WorkingOverlay';
 
 const nanoid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
@@ -16,26 +18,45 @@ interface Props {
 }
 
 const INDUSTRIES = ['SOFOM', 'SOFIPO', 'Arrendadora', 'Factoraje', 'Crédito Simple', 'Otro'];
+const CREDIT_TYPES = ['Simple', 'Revolvente', 'Flex', 'Factoraje', 'Arrendamiento', 'Crédito Puente', 'Otro'];
 const FIELD_TYPES = [
   { value: 'text', label: 'Texto' },
   { value: 'number', label: 'Número' },
   { value: 'date', label: 'Fecha' },
 ];
 
-const ClientForm: React.FC<Props> = ({ session, initialData, onSave, onCancel }) => {
+function toBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve((reader.result as string).split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function decodeText(base64: string): string {
+  const bytes = Uint8Array.from(atob(base64), char => char.charCodeAt(0));
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+const ClientForm: React.FC<Props> = ({ session, aiSettings, initialData, onSave, onCancel }) => {
   const [name, setName] = useState(initialData?.name || '');
   const [taxId, setTaxId] = useState(initialData?.taxId || '');
   const [industry, setIndustry] = useState(initialData?.industry || 'SOFOM');
-  const [creditType] = useState<string[]>(initialData?.creditType || []);
-  const [currency] = useState<'MXN' | 'USD' | 'EUR'>(initialData?.currency || 'MXN');
-  const [totalCreditValue] = useState(initialData?.totalCreditValue?.toString() || '');
-  const [contractName] = useState(initialData?.contractName || '');
+  const [creditType, setCreditType] = useState<string[]>(initialData?.creditType || []);
+  const [currency, setCurrency] = useState<'MXN' | 'USD' | 'EUR'>(initialData?.currency || 'MXN');
+  const [totalCreditValue, setTotalCreditValue] = useState(initialData?.totalCreditValue?.toString() || '');
+  const [contractName, setContractName] = useState(initialData?.contractName || '');
   const [analystName, setAnalystName] = useState(initialData?.analystName || '');
   const [score, setScore] = useState(initialData?.score || '');
   const [frequency, setFrequency] = useState<'mensual' | 'trimestral'>(initialData?.frequency || 'mensual');
   const [customFields, setCustomFields] = useState<CustomField[]>([]);
   const [saving, setSaving] = useState(false);
+  const [contractFile, setContractFile] = useState<{ file: File; base64?: string } | null>(null);
+  const [contractExtraction, setContractExtraction] = useState<ContractClientExtractionResult | null>(null);
+  const [extractingContract, setExtractingContract] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const contractInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (initialData) {
@@ -60,6 +81,56 @@ const ClientForm: React.FC<Props> = ({ session, initialData, onSave, onCancel })
 
   const removeCustomField = (id: string) => {
     setCustomFields(prev => prev.filter(f => f.id !== id));
+  };
+
+  const handleContractFile = async (file: File) => {
+    const supported = file.type === 'application/pdf'
+      || file.type === 'text/plain'
+      || file.type.startsWith('image/')
+      || /\.(pdf|txt|png|jpe?g|webp)$/i.test(file.name);
+    if (!supported) {
+      setErrors(prev => ({ ...prev, contract: 'Sube un PDF, TXT o imagen del contrato.' }));
+      return;
+    }
+    setExtractingContract(true);
+    setErrors(prev => ({ ...prev, contract: '' }));
+    try {
+      const mimeType = file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'text/plain');
+      const extractedPdfText = mimeType === 'application/pdf' ? await extractPdfText(file) : '';
+      const textBase64 = mimeType === 'text/plain' ? await toBase64(file) : '';
+      const text = mimeType === 'text/plain' ? decodeText(textBase64) : extractedPdfText;
+      const needsVisualUpload = mimeType !== 'text/plain' && !isUsefulExtractedText(text);
+      let media: AIMedia[] = [];
+      if (needsVisualUpload && mimeType === 'application/pdf') {
+        const previews = await renderPdfPreviewImages(file);
+        media = previews.map((base64, index) => ({
+          base64,
+          mimeType: 'image/jpeg',
+          fileName: `${file.name} · muestra ${index + 1}`,
+        }));
+      } else if (needsVisualUpload) {
+        media = [{ base64: await toBase64(file), mimeType, fileName: file.name }];
+      }
+      if (needsVisualUpload && media.length === 0) {
+        throw new Error('No pude leer el PDF escaneado. Intenta exportarlo nuevamente o subir imágenes de las páginas principales.');
+      }
+      const extraction = await extractClientFromContract(aiSettings, text, media.length ? media : undefined);
+      setContractFile({ file, base64: textBase64 || undefined });
+      setContractExtraction(extraction);
+      setName(extraction.client.legalName || name);
+      setTaxId(extraction.client.taxId || taxId);
+      setIndustry(INDUSTRIES.includes(extraction.client.industry) ? extraction.client.industry : 'Otro');
+      setContractName(extraction.transaction.contractName || file.name.replace(/\.[^.]+$/, ''));
+      setCreditType([CREDIT_TYPES.includes(extraction.transaction.creditType) ? extraction.transaction.creditType : 'Otro']);
+      setCurrency(extraction.transaction.currency);
+      setTotalCreditValue(extraction.transaction.originalAmount ? String(extraction.transaction.originalAmount) : totalCreditValue);
+      setFrequency(extraction.transaction.reviewFrequency);
+    } catch (err: any) {
+      setErrors(prev => ({ ...prev, contract: err.message || 'No se pudo analizar el contrato.' }));
+    } finally {
+      setExtractingContract(false);
+      if (contractInputRef.current) contractInputRef.current.value = '';
+    }
   };
 
   const validate = (): boolean => {
@@ -125,6 +196,57 @@ const ClientForm: React.FC<Props> = ({ session, initialData, onSave, onCancel })
         }));
       await db.setCustomFields(savedClient.id, fieldsWithClientId);
 
+      if (!initialData && contractExtraction) {
+        const transaction = await db.createTransaction({
+          clientId: savedClient.id,
+          name: contractName.trim() || contractExtraction.transaction.contractName || 'Contrato de crédito',
+          description: contractExtraction.transaction.description,
+          date: contractExtraction.transaction.signedAt || new Date().toISOString().slice(0, 10),
+          creditType: creditType[0] || contractExtraction.transaction.creditType,
+          originalAmount: parseFinancialNumber(totalCreditValue),
+          currency,
+          signedAt: contractExtraction.transaction.signedAt,
+          maturityAt: contractExtraction.transaction.maturityAt,
+          createdBy: session.userId,
+        });
+
+        if (contractFile) {
+          const storedBase64 = contractFile.base64 || await toBase64(contractFile.file);
+          await db.addContractFile({
+            transactionId: transaction.id,
+            clientId: savedClient.id,
+            originalName: contractFile.file.name,
+            mimeType: contractFile.file.type || 'application/octet-stream',
+            base64Data: storedBase64,
+            extractionStatus: 'done',
+            extractedCovenants: contractExtraction,
+          });
+        }
+
+        for (const item of contractExtraction.condicionesHacer.filter(Boolean)) {
+          await db.createCovenant({
+            clientId: savedClient.id, transactionId: transaction.id,
+            name: item.slice(0, 80), type: 'hacer', formula: '', threshold: '',
+            operator: 'none', description: item, isCustom: false, extractedFrom: contractFile?.file.name,
+          });
+        }
+        for (const item of contractExtraction.condicionesNoHacer.filter(Boolean)) {
+          await db.createCovenant({
+            clientId: savedClient.id, transactionId: transaction.id,
+            name: item.slice(0, 80), type: 'noHacer', formula: '', threshold: '',
+            operator: 'none', description: item, isCustom: false, extractedFrom: contractFile?.file.name,
+          });
+        }
+        for (const covenant of contractExtraction.covenants.filter(item => item.name)) {
+          await db.createCovenant({
+            clientId: savedClient.id, transactionId: transaction.id,
+            name: covenant.name, type: 'financial', formula: covenant.formula || '',
+            threshold: covenant.threshold || '', operator: covenant.operator || 'none',
+            description: covenant.description || '', isCustom: false, extractedFrom: contractFile?.file.name,
+          });
+        }
+      }
+
       onSave(savedClient, fieldsWithClientId);
     } catch (err: any) {
       setErrors({ form: err.message || 'Error al guardar el cliente' });
@@ -140,6 +262,11 @@ const ClientForm: React.FC<Props> = ({ session, initialData, onSave, onCancel })
 
   return (
     <div className="flex-1 bg-slate-50 min-h-screen p-8">
+      <WorkingOverlay
+        show={extractingContract}
+        title="Leyendo contrato"
+        messages={['Identificando al acreditado...', 'Extrayendo condiciones del crédito...', 'Leyendo fechas e importes...', 'Separando obligaciones...', 'Preparando covenants...', 'Precargando el cliente...']}
+      />
       {/* Header */}
       <div className="flex items-center gap-4 mb-8">
         <button onClick={onCancel} className="text-slate-500 hover:text-slate-900 transition-colors">
@@ -149,7 +276,7 @@ const ClientForm: React.FC<Props> = ({ session, initialData, onSave, onCancel })
           <h1 className="text-2xl font-black text-slate-900 tracking-tight">
             {initialData ? 'Editar Cliente' : 'Nuevo Cliente'}
           </h1>
-          <p className="text-slate-500 text-sm mt-0.5">{initialData ? 'Actualiza la información del cliente' : 'Crea el perfil del acreditado; contratos y facilities se agregan después'}</p>
+          <p className="text-slate-500 text-sm mt-0.5">{initialData ? 'Actualiza la información del cliente' : 'Crea manualmente o precarga desde un contrato opcional'}</p>
         </div>
       </div>
 
@@ -158,6 +285,66 @@ const ClientForm: React.FC<Props> = ({ session, initialData, onSave, onCancel })
         {errors.form && (
           <div className="bg-rose-50 border border-rose-200 rounded-xl p-4">
             <p className="text-rose-700 text-sm">{errors.form}</p>
+          </div>
+        )}
+
+        {!initialData && (
+          <div className="bg-gradient-to-br from-slate-950 to-indigo-950 text-white border border-indigo-900 rounded-2xl p-6 shadow-xl">
+            <input
+              ref={contractInputRef}
+              type="file"
+              accept=".pdf,.txt,image/png,image/jpeg,image/webp"
+              className="hidden"
+              onChange={e => e.target.files?.[0] && handleContractFile(e.target.files[0])}
+            />
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-5">
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 rounded-2xl bg-indigo-500/20 border border-indigo-300/20 flex items-center justify-center flex-shrink-0">
+                  <FileSignature className="w-6 h-6 text-indigo-200" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="font-black text-lg">Precargar desde contrato</h2>
+                    <Sparkles className="w-4 h-4 text-amber-300" />
+                  </div>
+                  <p className="text-sm text-slate-300 mt-1 max-w-xl">
+                    Opcional: sube un contrato para llenar acreditado, RFC y crear automáticamente la facility, contrato y covenants. También puedes llenar todo manualmente sin subir nada.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => contractInputRef.current?.click()}
+                disabled={extractingContract}
+                className="flex items-center justify-center gap-2 bg-white text-slate-950 hover:bg-indigo-50 disabled:opacity-60 font-black px-5 py-3 rounded-xl text-sm whitespace-nowrap"
+              >
+                <Upload className="w-4 h-4" />
+                {contractFile ? 'Cambiar contrato' : 'Subir contrato opcional'}
+              </button>
+            </div>
+            {errors.contract && <p className="mt-4 text-sm font-bold text-rose-300">{errors.contract}</p>}
+            {contractFile && contractExtraction && (
+              <div className="mt-5 bg-white/10 border border-white/10 rounded-2xl p-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <CheckCircle className="w-5 h-5 text-emerald-300 flex-shrink-0" />
+                    <div className="min-w-0">
+                      <p className="font-black text-sm truncate">{contractFile.file.name}</p>
+                      <p className="text-xs text-slate-300 mt-0.5">
+                        Se creará 1 transacción · {contractExtraction.covenants.length} covenants · {contractExtraction.condicionesHacer.length} obligaciones de hacer · {contractExtraction.condicionesNoHacer.length} de no hacer
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => { setContractFile(null); setContractExtraction(null); }}
+                    className="text-slate-300 hover:text-white"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
