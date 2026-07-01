@@ -72,13 +72,13 @@ body {
 
 .finmonitor-shell .bg-slate-900,
 .finmonitor-shell .bg-slate-950 {
-  background: linear-gradient(135deg, #0b0f3d 0%, var(--bluebonnet) 54%, var(--true-blue) 100%) !important;
+  background:
+    linear-gradient(135deg, #050827 0%, #090d3f 58%, #06285f 100%) !important;
 }
 
 .finmonitor-shell .bg-indigo-600,
 .finmonitor-shell .bg-indigo-500,
 .finmonitor-shell .bg-blue-600,
-.finmonitor-shell .bg-slate-900,
 .bluebonnet-auth .bg-indigo-600,
 .bluebonnet-auth .bg-indigo-500,
 .bluebonnet-auth .bg-slate-950 {
@@ -228,7 +228,23 @@ body {
 }
 
 .theme-night .text-slate-400 {
-  color: #82a8bf !important;
+  color: #9ccce3 !important;
+}
+
+.theme-night .text-indigo-300 {
+  color: #8eeeff !important;
+}
+
+.theme-night .bg-slate-900,
+.theme-night .bg-slate-950 {
+  background:
+    linear-gradient(135deg, #050720 0%, #090d3e 56%, #06316a 100%) !important;
+  border-color: rgba(0, 204, 238, 0.18) !important;
+}
+
+.theme-night .bg-slate-900 .text-slate-400,
+.theme-night .bg-slate-950 .text-slate-400 {
+  color: rgba(225, 247, 255, 0.74) !important;
 }
 
 .theme-night input,

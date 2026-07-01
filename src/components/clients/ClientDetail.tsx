@@ -2,7 +2,7 @@ import React, { lazy, Suspense, useState, useEffect, useRef } from 'react';
 import { db, Client, Transaction, FinancialStatement_DB, Covenant_DB, LoanTape_DB, CustomField } from '../../db/index';
 import { Session } from '../../services/auth';
 import { AISettings } from '../../services/ai';
-import { ChevronLeft, Building2, Download, FileText, Trash2 } from 'lucide-react';
+import { ChevronLeft, Building2, Download, FileText, Trash2, Pencil } from 'lucide-react';
 import TransactionPanel from '../transactions/TransactionPanel';
 import FinancialCovenantsPanel from '../covenants/FinancialCovenantsPanel';
 import HacerNoHacerPanel from '../covenants/HacerNoHacerPanel';
@@ -21,6 +21,7 @@ interface Props {
   aiSettings: AISettings;
   onBack: () => void;
   onDeleted?: () => void;
+  onEdit?: (client: Client) => void;
 }
 
 type Tab = 'monitor' | 'resumen' | 'company_overview' | 'transacciones' | 'estados' | 'auditoria' | 'loantape' | 'cov_financiero' | 'hacer_no_hacer' | 'reporte';
@@ -207,7 +208,7 @@ const ResumenTab: React.FC<{ client: Client; transactions: Transaction[]; covena
   );
 };
 
-const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, onDeleted }) => {
+const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, onDeleted, onEdit }) => {
   const [client, setClient] = useState<Client | null>(null);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [statements, setStatements] = useState<FinancialStatement_DB[]>([]);
@@ -321,14 +322,23 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
             <p className="text-slate-500 text-sm mt-0.5 font-mono">{client.taxId} · {client.industry}</p>
           </div>
           {session.role === 'manager' && (
-            <button
-              onClick={handleDeleteClient}
-              disabled={deleting}
-              className="flex items-center gap-2 bg-white border border-rose-200 text-rose-600 hover:bg-rose-50 font-bold px-4 py-2.5 rounded-xl text-sm transition-all disabled:opacity-50"
-            >
-              <Trash2 className="w-4 h-4" />
-              Eliminar
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => onEdit?.(client)}
+                className="flex items-center gap-2 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 font-bold px-4 py-2.5 rounded-xl text-sm transition-all"
+              >
+                <Pencil className="w-4 h-4" />
+                Editar cliente
+              </button>
+              <button
+                onClick={handleDeleteClient}
+                disabled={deleting}
+                className="flex items-center gap-2 bg-white border border-rose-200 text-rose-600 hover:bg-rose-50 font-bold px-4 py-2.5 rounded-xl text-sm transition-all disabled:opacity-50"
+              >
+                <Trash2 className="w-4 h-4" />
+                Eliminar
+              </button>
+            </div>
           )}
         </div>
 

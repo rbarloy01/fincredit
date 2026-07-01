@@ -5,6 +5,7 @@ import { AISettings, AIMedia, extractCovenants, ContractExtractionResult, Financ
 import {
   Plus, ChevronDown, ChevronRight, Upload, FileText, Trash2,
   Sparkles, Save, X, Calendar, DollarSign, FileSignature, Download,
+  Pencil,
 } from 'lucide-react';
 import WorkingOverlay from '../common/WorkingOverlay';
 import { parseFinancialNumber } from '../../lib/numberParsing';
@@ -82,6 +83,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
   const [exporting, setExporting] = useState<'excel' | 'pdf' | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const [showForm, setShowForm] = useState(false);
+  const [editingTxId, setEditingTxId] = useState<string | null>(null);
   const [form, setForm] = useState<TxFormData>(EMPTY_FORM);
   const [formSaving, setFormSaving] = useState(false);
   const [analyzing, setAnalyzing] = useState<string | null>(null);
@@ -117,12 +119,39 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
     setForm(prev => ({ ...prev, [key]: value }));
   };
 
+  const openCreateForm = () => {
+    setEditingTxId(null);
+    setForm(EMPTY_FORM);
+    setShowForm(true);
+  };
+
+  const openEditForm = (tx: Transaction) => {
+    setEditingTxId(tx.id);
+    setForm({
+      name: tx.name || '',
+      description: tx.description || '',
+      date: tx.date || '',
+      creditType: tx.creditType || 'Simple',
+      originalAmount: tx.originalAmount ? String(tx.originalAmount) : '',
+      currency: tx.currency || 'MXN',
+      signedAt: tx.signedAt || '',
+      maturityAt: tx.maturityAt || '',
+    });
+    setShowForm(true);
+  };
+
+  const closeForm = () => {
+    setShowForm(false);
+    setEditingTxId(null);
+    setForm(EMPTY_FORM);
+  };
+
   const handleSubmitTx = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.name.trim()) return;
     setFormSaving(true);
     try {
-      await db.createTransaction({
+      const payload = {
         clientId,
         name: form.name.trim(),
         description: form.description.trim(),
@@ -133,10 +162,15 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
         signedAt: form.signedAt,
         maturityAt: form.maturityAt,
         createdBy: session.userId,
-      });
-      setForm(EMPTY_FORM);
-      setShowForm(false);
+      };
+      if (editingTxId) {
+        await db.updateTransaction(editingTxId, payload);
+      } else {
+        await db.createTransaction(payload);
+      }
+      closeForm();
       await loadTransactions();
+      onCovenantsExtracted();
     } catch (err: any) {
       alert(`Error: ${err.message}`);
     } finally {
@@ -148,6 +182,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
     if (!confirm('¿Eliminar esta transacción?')) return;
     await db.deleteTransaction(id);
     await loadTransactions();
+    onCovenantsExtracted();
   };
 
   const handleUploadFiles = async (txId: string, fileList: FileList) => {
@@ -341,7 +376,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
             </>
           )}
           <button
-            onClick={() => setShowForm(true)}
+            onClick={openCreateForm}
             className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-4 py-2.5 rounded-xl text-sm transition-all"
           >
             <Plus className="w-4 h-4" />
@@ -354,8 +389,8 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg">
             <div className="flex items-center justify-between p-6 border-b border-slate-100">
-              <h3 className="font-black text-slate-900">Nueva Transacción</h3>
-              <button onClick={() => setShowForm(false)} className="text-slate-400 hover:text-slate-700">
+              <h3 className="font-black text-slate-900">{editingTxId ? 'Editar Transacción' : 'Nueva Transacción'}</h3>
+              <button onClick={closeForm} className="text-slate-400 hover:text-slate-700">
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -401,11 +436,11 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                 </div>
               </div>
               <div className="flex gap-3 pt-2">
-                <button type="button" onClick={() => setShowForm(false)} className="flex-1 py-2.5 rounded-xl border border-slate-200 text-slate-700 text-sm font-bold hover:bg-slate-50 transition-all">
+                <button type="button" onClick={closeForm} className="flex-1 py-2.5 rounded-xl border border-slate-200 text-slate-700 text-sm font-bold hover:bg-slate-50 transition-all">
                   Cancelar
                 </button>
                 <button type="submit" disabled={formSaving} className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-black transition-all disabled:opacity-60">
-                  {formSaving ? 'Guardando...' : 'Guardar'}
+                  {formSaving ? 'Guardando...' : editingTxId ? 'Guardar cambios' : 'Guardar'}
                 </button>
               </div>
             </form>
@@ -449,6 +484,13 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                       }
                     </div>
                   </div>
+                  <button
+                    onClick={e => { e.stopPropagation(); openEditForm(tx); }}
+                    className="text-slate-300 hover:text-indigo-500 transition-colors flex-shrink-0"
+                    title="Editar transacción"
+                  >
+                    <Pencil className="w-4 h-4" />
+                  </button>
                   <button
                     onClick={e => { e.stopPropagation(); handleDeleteTx(tx.id); }}
                     className="text-slate-300 hover:text-rose-500 transition-colors flex-shrink-0"

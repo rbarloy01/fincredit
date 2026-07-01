@@ -77,6 +77,12 @@ const App: React.FC = () => {
     setRoute('client_new');
   };
 
+  const handleEditClient = (client: Client) => {
+    setEditingClient(client);
+    setSelectedClientId(client.id);
+    setRoute('client_edit');
+  };
+
   const handleSaveClient = async (client: Client, _customFields: CustomField[]) => {
     setSelectedClientId(client.id);
     setEditingClient(undefined);
@@ -250,7 +256,14 @@ const App: React.FC = () => {
               aiSettings={aiSettings}
               initialData={editingClient}
               onSave={handleSaveClient}
-              onCancel={() => setRoute('clients')}
+              onCancel={() => {
+                if (route === 'client_edit' && selectedClientId) {
+                  setEditingClient(undefined);
+                  setRoute('client_detail');
+                } else {
+                  setRoute('clients');
+                }
+              }}
             />
           )}
 
@@ -264,6 +277,7 @@ const App: React.FC = () => {
                 setSelectedClientId(null);
                 setRoute('clients');
               }}
+              onEdit={handleEditClient}
             />
           )}
 
