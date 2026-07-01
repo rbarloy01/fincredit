@@ -263,7 +263,7 @@ interface ReportTemplate {
 const DEFAULT_BLOCKS: ReportBlockConfig[] = [
   { id: 'payment', label: 'Historial de Pagos', visible: true, order: 10 },
   { id: 'aforo', label: 'Aforo', visible: true, order: 20 },
-  { id: 'financialCovenants', label: 'Covenants Financieros', visible: true, order: 30 },
+  { id: 'financialCovenants', label: 'Covenants Financieros', visible: false, order: 30 },
   { id: 'loanTape', label: 'Loan Tape', visible: true, order: 40 },
   { id: 'documentation', label: 'Documentación', visible: true, order: 50 },
   { id: 'opinion', label: 'Opinión del Analista', visible: true, order: 60 },
@@ -391,8 +391,9 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
   }, [client.id, blocks, reportSettingsLoaded]);
 
   const orderedBlocks = [...blocks].sort((a, b) => a.order - b.order);
+  const reportCanvasBlocks = orderedBlocks.filter(b => b.id !== 'financialCovenants');
   const block = (id: ReportBlockId) => blocks.find(b => b.id === id) || DEFAULT_BLOCKS.find(b => b.id === id)!;
-  const blockVisible = (id: ReportBlockId) => block(id).visible;
+  const blockVisible = (id: ReportBlockId) => id === 'financialCovenants' ? false : block(id).visible;
   const blockStyle = (id: ReportBlockId): React.CSSProperties => ({ order: block(id).order, display: blockVisible(id) ? undefined : 'none' });
   const toggleBlock = (id: ReportBlockId) => setBlocks(prev => prev.map(b => b.id === id ? { ...b, visible: !b.visible } : b));
   const moveBlock = (id: ReportBlockId, dir: -1 | 1) => {
@@ -772,7 +773,6 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
           <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-2">Incluir:</span>
           {[
             { label: 'Aforo', id: 'aforo' as ReportBlockId },
-            { label: 'Covenants', id: 'financialCovenants' as ReportBlockId },
             { label: 'Doc.', id: 'documentation' as ReportBlockId },
             { label: 'Loan Tape', id: 'loanTape' as ReportBlockId },
           ].map(({ label, id }) => (
@@ -804,12 +804,12 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
           </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {orderedBlocks.map((b, idx) => (
+          {reportCanvasBlocks.map((b, idx) => (
             <div key={b.id} className="flex items-center gap-3 border border-slate-200 rounded-xl px-4 py-3 bg-slate-50">
               <input type="checkbox" checked={b.visible} onChange={() => toggleBlock(b.id)} />
               <span className="flex-1 text-sm font-black text-slate-800">{b.label}</span>
               <button onClick={() => moveBlock(b.id, -1)} disabled={idx === 0} className="p-1.5 rounded-lg bg-white border border-slate-200 disabled:opacity-30"><ArrowUp className="w-3.5 h-3.5" /></button>
-              <button onClick={() => moveBlock(b.id, 1)} disabled={idx === orderedBlocks.length - 1} className="p-1.5 rounded-lg bg-white border border-slate-200 disabled:opacity-30"><ArrowDown className="w-3.5 h-3.5" /></button>
+              <button onClick={() => moveBlock(b.id, 1)} disabled={idx === reportCanvasBlocks.length - 1} className="p-1.5 rounded-lg bg-white border border-slate-200 disabled:opacity-30"><ArrowDown className="w-3.5 h-3.5" /></button>
             </div>
           ))}
         </div>
