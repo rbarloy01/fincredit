@@ -26,5 +26,14 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "exclude": [
+    "dist",
+    "output",
+    "outputs",
+    "tmp",
+    "work",
+    ".codex_spreadsheet_work",
+    ".vercel"
+  ]
 }

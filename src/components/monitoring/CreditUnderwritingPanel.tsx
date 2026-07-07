@@ -194,30 +194,30 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
 
   return (
     <div className="space-y-6">
-      <div className="bg-slate-950 text-white rounded-2xl p-6">
+      <div className="underwriting-hero rounded-2xl p-6">
         <div className="flex flex-col xl:flex-row xl:items-end justify-between gap-5">
           <div>
-            <p className="text-[10px] font-black text-indigo-300 uppercase tracking-widest">Expediente de crédito</p>
+            <p className="text-[10px] font-black uppercase tracking-widest">Expediente de crédito</p>
             <h2 className="text-2xl font-black tracking-tight mt-1">{client.name}</h2>
-            <p className="text-sm text-slate-300 font-bold mt-2">
+            <p className="text-sm font-bold mt-2">
               Underwriting, covenants, estados financieros, contrato y soporte de cartera.
             </p>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 min-w-full xl:min-w-[680px]">
-            <div className="rounded-xl bg-white/10 border border-white/10 px-4 py-3">
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Acreditado</p>
+            <div className="underwriting-hero-metric rounded-xl px-4 py-3">
+              <p className="text-[10px] font-black uppercase tracking-widest">Acreditado</p>
               <p className="text-sm font-black truncate mt-1">{client.industry || 'Industria pendiente'}</p>
             </div>
-            <div className="rounded-xl bg-white/10 border border-white/10 px-4 py-3">
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Score</p>
+            <div className="underwriting-hero-metric rounded-xl px-4 py-3">
+              <p className="text-[10px] font-black uppercase tracking-widest">Score</p>
               <p className="text-sm font-black truncate mt-1">{client.score || 'N/A'}</p>
             </div>
-            <div className="rounded-xl bg-white/10 border border-white/10 px-4 py-3">
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Línea</p>
+            <div className="underwriting-hero-metric rounded-xl px-4 py-3">
+              <p className="text-[10px] font-black uppercase tracking-widest">Línea</p>
               <p className="text-sm font-black truncate mt-1">{facilityAmount ? money(facilityAmount, client.currency) : 'N/A'}</p>
             </div>
-            <div className="rounded-xl bg-white/10 border border-white/10 px-4 py-3">
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Último corte</p>
+            <div className="underwriting-hero-metric rounded-xl px-4 py-3">
+              <p className="text-[10px] font-black uppercase tracking-widest">Último corte</p>
               <p className="text-sm font-black truncate mt-1">{latestStatement?.period || client.lastPeriod || 'N/A'}</p>
             </div>
           </div>

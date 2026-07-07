@@ -71,6 +71,17 @@ interface TxFormData {
   maturityAt: string;
 }
 
+interface Disposition {
+  id: string;
+  date: string;
+  amount: string;
+  currency: string;
+  notes: string;
+}
+
+type DispositionMap = Record<string, Disposition[]>;
+const dispositionsKey = (clientId: string) => `finmonitor_transaction_dispositions_${clientId}`;
+
 const EMPTY_FORM: TxFormData = {
   name: '', description: '', date: '', creditType: 'Simple',
   originalAmount: '', currency: 'MXN', signedAt: '', maturityAt: '',
@@ -89,6 +100,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
   const [analyzing, setAnalyzing] = useState<string | null>(null);
   const [extractedMap, setExtractedMap] = useState<Record<string, ContractExtractionResult>>({});
   const [savingCovenants, setSavingCovenants] = useState<string | null>(null);
+  const [dispositions, setDispositions] = useState<DispositionMap>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadingFor, setUploadingFor] = useState<string | null>(null);
 
@@ -111,6 +123,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
       fileMap[tx.id] = await db.getContractFiles(tx.id);
     }
     setFiles(fileMap);
+    setDispositions(await db.getClientSetting<DispositionMap>(clientId, dispositionsKey(clientId), {}));
   };
 
   useEffect(() => { loadTransactions(); }, [clientId]);
@@ -183,6 +196,38 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
     await db.deleteTransaction(id);
     await loadTransactions();
     onCovenantsExtracted();
+  };
+
+  const saveDispositions = async (next: DispositionMap) => {
+    setDispositions(next);
+    await db.setClientSetting(clientId, dispositionsKey(clientId), next);
+  };
+
+  const addDisposition = async (tx: Transaction) => {
+    const next = {
+      ...dispositions,
+      [tx.id]: [
+        ...(dispositions[tx.id] || []),
+        { id: nanoid(), date: tx.date || '', amount: '', currency: tx.currency || 'MXN', notes: '' },
+      ],
+    };
+    await saveDispositions(next);
+  };
+
+  const updateDisposition = async (txId: string, dispositionId: string, updates: Partial<Disposition>) => {
+    const next = {
+      ...dispositions,
+      [txId]: (dispositions[txId] || []).map(item => item.id === dispositionId ? { ...item, ...updates } : item),
+    };
+    await saveDispositions(next);
+  };
+
+  const deleteDisposition = async (txId: string, dispositionId: string) => {
+    const next = {
+      ...dispositions,
+      [txId]: (dispositions[txId] || []).filter(item => item.id !== dispositionId),
+    };
+    await saveDispositions(next);
   };
 
   const handleUploadFiles = async (txId: string, fileList: FileList) => {
@@ -359,8 +404,8 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
       />
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-black text-slate-900">Transacciones y Contratos</h2>
-          <p className="text-slate-500 text-sm mt-0.5">{transactions.length} transacción{transactions.length !== 1 ? 'es' : ''}</p>
+          <h2 className="text-lg font-black text-slate-900">Facilities y Contratos</h2>
+          <p className="text-slate-500 text-sm mt-0.5">{transactions.length} facilit{transactions.length !== 1 ? 'ies' : 'y'}</p>
         </div>
         <div className="flex items-center gap-2">
           {transactions.length > 0 && (
@@ -380,7 +425,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
             className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-4 py-2.5 rounded-xl text-sm transition-all"
           >
             <Plus className="w-4 h-4" />
-            Nueva Transacción
+            Nueva Facility
           </button>
         </div>
       </div>
@@ -389,7 +434,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg">
             <div className="flex items-center justify-between p-6 border-b border-slate-100">
-              <h3 className="font-black text-slate-900">{editingTxId ? 'Editar Transacción' : 'Nueva Transacción'}</h3>
+              <h3 className="font-black text-slate-900">{editingTxId ? 'Editar Facility' : 'Nueva Facility'}</h3>
               <button onClick={closeForm} className="text-slate-400 hover:text-slate-700">
                 <X className="w-5 h-5" />
               </button>
@@ -397,15 +442,15 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
             <form onSubmit={handleSubmitTx} className="p-6 space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div className="col-span-2">
-                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Nombre *</label>
-                  <input className={inputClass} value={form.name} onChange={e => handleFormChange('name', e.target.value)} placeholder="Nombre de la transacción" required />
+                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Nombre de facility *</label>
+                  <input className={inputClass} value={form.name} onChange={e => handleFormChange('name', e.target.value)} placeholder="Nombre de la facility / contrato" required />
                 </div>
                 <div className="col-span-2">
                   <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Descripción</label>
                   <textarea className={inputClass} value={form.description} onChange={e => handleFormChange('description', e.target.value)} placeholder="Descripción opcional" rows={2} />
                 </div>
                 <div>
-                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Fecha</label>
+                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Fecha disposición inicial</label>
                   <input type="date" className={inputClass} value={form.date} onChange={e => handleFormChange('date', e.target.value)} />
                 </div>
                 <div>
@@ -417,7 +462,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                   </select>
                 </div>
                 <div>
-                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Monto Original</label>
+                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Monto autorizado</label>
                   <input type="text" inputMode="decimal" className={inputClass} value={form.originalAmount} onChange={e => handleFormChange('originalAmount', e.target.value)} placeholder="1,250,000.00" />
                 </div>
                 <div>
@@ -427,7 +472,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                   </select>
                 </div>
                 <div>
-                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Firma</label>
+                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Fecha firma</label>
                   <input type="date" className={inputClass} value={form.signedAt} onChange={e => handleFormChange('signedAt', e.target.value)} />
                 </div>
                 <div>
@@ -451,8 +496,8 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
       {transactions.length === 0 ? (
         <div className="bg-white border border-slate-200 rounded-2xl p-12 text-center">
           <FileSignature className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-          <p className="text-slate-500 font-semibold">Sin transacciones registradas</p>
-          <p className="text-slate-400 text-sm mt-1">Crea una transacción para gestionar contratos y covenants</p>
+          <p className="text-slate-500 font-semibold">Sin facilities registradas</p>
+          <p className="text-slate-400 text-sm mt-1">Crea una facility para gestionar contrato, disposiciones y covenants</p>
         </div>
       ) : (
         <div className="space-y-3">
@@ -460,6 +505,8 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
             const txFiles = files[tx.id] || [];
             const isExpanded = expanded === tx.id;
             const extraction = extractedMap[tx.id];
+            const txDispositions = dispositions[tx.id] || [];
+            const disposedTotal = txDispositions.reduce((sum, item) => sum + parseFinancialNumber(item.amount), 0);
 
             return (
               <div key={tx.id} className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
@@ -476,8 +523,9 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                       <span className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-md font-semibold flex-shrink-0">{tx.creditType}</span>
                     </div>
                     <div className="flex items-center gap-4 mt-1 text-xs text-slate-500">
-                      <span className="flex items-center gap-1"><Calendar className="w-3 h-3" />{fmtDate(tx.date)}</span>
-                      <span className="flex items-center gap-1"><DollarSign className="w-3 h-3" />{fmtAmount(tx.originalAmount, tx.currency)}</span>
+                      <span className="flex items-center gap-1"><Calendar className="w-3 h-3" />Disp. inicial {fmtDate(tx.date)}</span>
+                      <span className="flex items-center gap-1"><DollarSign className="w-3 h-3" />Autorizado {fmtAmount(tx.originalAmount, tx.currency)}</span>
+                      {txDispositions.length > 0 && <span className="flex items-center gap-1 text-emerald-600 font-semibold">{txDispositions.length} disposición{txDispositions.length !== 1 ? 'es' : ''}</span>}
                       {txFiles.length > 0
                         ? <span className="flex items-center gap-1"><FileText className="w-3 h-3" />{txFiles.length} archivo{txFiles.length !== 1 ? 's' : ''}</span>
                         : <span className="flex items-center gap-1 text-indigo-400 font-semibold"><Upload className="w-3 h-3" />Subir contrato / anexos</span>
@@ -509,13 +557,48 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                         <p className="text-slate-800 font-semibold mt-0.5">{fmtDate(tx.signedAt)}</p>
                       </div>
                       <div>
-                        <span className="text-slate-500 font-bold uppercase tracking-wide">Vencimiento</span>
-                        <p className="text-slate-800 font-semibold mt-0.5">{fmtDate(tx.maturityAt)}</p>
+                        <span className="text-slate-500 font-bold uppercase tracking-wide">Disposición inicial</span>
+                        <p className="text-slate-800 font-semibold mt-0.5">{fmtDate(tx.date)}</p>
                       </div>
                       <div>
-                        <span className="text-slate-500 font-bold uppercase tracking-wide">Monto</span>
-                        <p className="text-slate-800 font-semibold mt-0.5">{fmtAmount(tx.originalAmount, tx.currency)}</p>
+                        <span className="text-slate-500 font-bold uppercase tracking-wide">Autorizado / dispuesto</span>
+                        <p className="text-slate-800 font-semibold mt-0.5">{fmtAmount(tx.originalAmount, tx.currency)} / {fmtAmount(disposedTotal, tx.currency)}</p>
                       </div>
+                    </div>
+
+                    <div className="bg-white border border-slate-200 rounded-xl p-4">
+                      <div className="flex items-center justify-between mb-3">
+                        <div>
+                          <p className="text-xs font-black text-slate-700 uppercase tracking-widest">Disposiciones</p>
+                          <p className="text-xs text-slate-400 mt-0.5">Carga una o varias disposiciones cuando no se usa todo el monto autorizado de una sola vez.</p>
+                        </div>
+                        <button
+                          onClick={() => addDisposition(tx)}
+                          className="flex items-center gap-1.5 text-xs bg-indigo-600 text-white px-3 py-1.5 rounded-lg hover:bg-indigo-500 transition-all font-bold"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          Agregar disposición
+                        </button>
+                      </div>
+                      {txDispositions.length === 0 ? (
+                        <p className="text-slate-400 text-xs">Sin disposiciones adicionales registradas</p>
+                      ) : (
+                        <div className="space-y-2">
+                          {txDispositions.map(disposition => (
+                            <div key={disposition.id} className="grid grid-cols-1 md:grid-cols-[140px_1fr_110px_1fr_auto] gap-2 items-center">
+                              <input type="date" value={disposition.date} onChange={e => updateDisposition(tx.id, disposition.id, { date: e.target.value })} className={inputClass} />
+                              <input type="text" inputMode="decimal" value={disposition.amount} onChange={e => updateDisposition(tx.id, disposition.id, { amount: e.target.value })} placeholder="Monto dispuesto" className={inputClass} />
+                              <select value={disposition.currency} onChange={e => updateDisposition(tx.id, disposition.id, { currency: e.target.value })} className={inputClass}>
+                                {['MXN', 'USD', 'EUR'].map(c => <option key={c} value={c}>{c}</option>)}
+                              </select>
+                              <input value={disposition.notes} onChange={e => updateDisposition(tx.id, disposition.id, { notes: e.target.value })} placeholder="Nota opcional" className={inputClass} />
+                              <button onClick={() => deleteDisposition(tx.id, disposition.id)} className="text-slate-300 hover:text-rose-500 transition-colors justify-self-end">
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
 
                     <div>

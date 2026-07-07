@@ -2,14 +2,14 @@ import React, { useState, useEffect, useRef } from 'react';
 import { db, FinancialStatement_DB, Covenant_DB } from '../../db/index';
 import { Session } from '../../services/auth';
 import { AISettings, extractFinancials } from '../../services/ai';
-import { Upload, Trash2, Download, Plus, X, TrendingUp, Edit2, Check, FileText } from 'lucide-react';
-import * as XLSX from 'xlsx';
+import { Upload, Trash2, Download, Plus, X, TrendingUp, Edit2, Check, FileText, ImageDown } from 'lucide-react';
 import type { DefinedConcept, VerticalBaseConfig } from '../../lib/export';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { evaluateFormula, formulaLabel, standardRatios } from '../../lib/financialMetrics';
 import WorkingOverlay from '../common/WorkingOverlay';
 import { parseFinancialNumber } from '../../lib/numberParsing';
 import { classifyAccount, normalizeAccountName } from '../../lib/accountClassification';
+import { extractPdfText, isUsefulExtractedText, renderPdfPreviewImages } from '../../lib/documentParsing';
 
 interface Props {
   clientId: string;
@@ -51,10 +51,87 @@ function toBase64(file: File): Promise<string> {
 
 function fmtNum(n: number): string {
   if (n === 0) return '—';
-  return n.toLocaleString('es-MX', { maximumFractionDigits: 6 });
+  return n.toLocaleString('es-MX', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+}
+
+function fmtCompact(n: number): string {
+  return new Intl.NumberFormat('es-MX', {
+    notation: 'compact',
+    compactDisplay: 'short',
+    maximumFractionDigits: 1,
+  }).format(n);
+}
+
+function fmtMoney(n: number): string {
+  return `$${n.toLocaleString('es-MX', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+}
+
+function fmtPct(n: number): string {
+  return `${(n * 100).toLocaleString('es-MX', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
+}
+
+function fmtRatio(n: number): string {
+  return `${n.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}x`;
 }
 
 const normalizeName = normalizeAccountName;
+
+function mergeReviewStatements(statements: ReviewStatement[]): ReviewStatement[] {
+  const byPeriod = new Map<string, ReviewStatement>();
+
+  for (const statement of statements) {
+    const key = statement.periodDate || normalizeName(statement.period);
+    const existing = byPeriod.get(key);
+    if (!existing) {
+      byPeriod.set(key, { ...statement, items: [...statement.items] });
+      continue;
+    }
+
+    const fileNames = new Set([existing.fileName, statement.fileName].filter(Boolean));
+    byPeriod.set(key, {
+      ...existing,
+      period: existing.period || statement.period,
+      periodDate: existing.periodDate || statement.periodDate,
+      fileName: Array.from(fileNames).join(', '),
+      sourceDocumentId: existing.sourceDocumentId || statement.sourceDocumentId,
+      items: mergeRawItems([...existing.items, ...statement.items]),
+    });
+  }
+
+  return Array.from(byPeriod.values()).sort((a, b) => a.periodDate.localeCompare(b.periodDate));
+}
+
+function joinUnique(values: Array<string | undefined | null>): string {
+  return Array.from(new Set(values.flatMap(value => String(value || '').split(',').map(part => part.trim())).filter(Boolean))).join(', ');
+}
+
+function rawItemKey(item: RawItem): string {
+  return [
+    item.statementType || 'otro',
+    normalizeName(item.name),
+  ].join('||');
+}
+
+function mergeRawItems(items: RawItem[]): RawItem[] {
+  const byAccount = new Map<string, RawItem>();
+  for (const item of items) {
+    const key = rawItemKey(item);
+    const existing = byAccount.get(key);
+    if (!existing) {
+      byAccount.set(key, { ...item, value: Number(item.value) || 0 });
+      continue;
+    }
+    const existingValue = Number(existing.value) || 0;
+    const incomingValue = Number(item.value) || 0;
+    byAccount.set(key, {
+      ...existing,
+      value: existingValue === incomingValue ? existingValue : existingValue + incomingValue,
+      sectionPath: existing.sectionPath || item.sectionPath || null,
+      statementType: existing.statementType || item.statementType || 'otro',
+    });
+  }
+  return Array.from(byAccount.values());
+}
 
 const typeLabel: Record<StatementType, string> = {
   balance_general: 'Balance General',
@@ -93,7 +170,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   const [editingCell, setEditingCell] = useState<{ stmtId: string; itemIdx: number; field: 'name' | 'value' } | null>(null);
   const [editingRow, setEditingRow] = useState<{ key: string; name: string; statementType: StatementType } | null>(null);
   const [editValue, setEditValue] = useState('');
-  const [exporting, setExporting] = useState<'excel' | 'pdf' | null>(null);
+  const [exporting, setExporting] = useState<'excel' | 'pdf' | 'chart' | null>(null);
   const [sectionFilter, setSectionFilter] = useState<StatementType | 'all'>('all');
   const [accountMappings, setAccountMappings] = useState<Record<string, MappedField | ''>>({});
   const [verticalBaseOverrides, setVerticalBaseOverrides] = useState<VerticalBaseConfig>({});
@@ -111,6 +188,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const chartRef = useRef<HTMLDivElement>(null);
   const mappingStorageKey = `finmonitor_eff_mappings_${clientId}`;
   const verticalBaseStorageKey = `finmonitor_vertical_bases_${clientId}`;
   const conceptsStorageKey = `finmonitor_defined_concepts_${clientId}`;
@@ -168,6 +246,18 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
     return next;
   };
 
+  const mappedForItems = (items: RawItem[]) => mappedForStatement({
+    id: '',
+    clientId,
+    period: '',
+    periodDate: '',
+    uploadDate: '',
+    fileName: '',
+    rawLineItems: items,
+    mappedData: { ...EMPTY_MAPPED },
+    extraAccounts: [],
+  });
+
   const applyMappings = async () => {
     for (const stmt of statements) {
       await db.updateStatement(stmt.id, {
@@ -198,17 +288,27 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   };
 
   const extractFile = async (file: File) => {
-    const sourceDocument = await db.uploadClientDocument(clientId, file, 'financial_statement', {
-      clientName,
-      uploadSurface: 'financials_panel',
-    });
+    const sourceDocumentId = '';
     let result;
-    if (file.type.startsWith('image/') || file.type === 'application/pdf') {
+    if (file.type === 'application/pdf') {
+      const text = await extractPdfText(file);
+      const pages = await renderPdfPreviewImages(file, 24, 0.9, 0.42);
+      const media = pages.map((base64, index) => ({
+        base64,
+        mimeType: 'image/jpeg',
+        fileName: `${file.name} pagina ${index + 1}`,
+      }));
+      if (!isUsefulExtractedText(text) && !media.length) {
+        throw new Error('No pude leer ni renderizar el PDF escaneado para extraerlo. Intenta exportarlo nuevamente.');
+      }
+      result = await extractFinancials(aiSettings, { text: isUsefulExtractedText(text) ? text : '', media }, clientName);
+    } else if (file.type.startsWith('image/')) {
       const base64 = await toBase64(file);
       result = await extractFinancials(aiSettings, { base64, mimeType: file.type }, clientName);
     } else {
       let text = '';
       if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
+        const XLSX = await import('xlsx');
         const buffer = await file.arrayBuffer();
         const workbook = XLSX.read(buffer, { type: 'array' });
         text = workbook.SheetNames.map(sheetName => {
@@ -234,7 +334,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
         period: statement.period,
         periodDate: statement.periodDate,
         fileName: file.name,
-        sourceDocumentId: sourceDocument.id,
+        sourceDocumentId,
         items: statement.rawLineItems.map(i => ({
           name: i.name,
           value: parseFinancialNumber(i.value),
@@ -257,7 +357,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
         companyName: first.companyName,
         documentType: selected.length === 1 ? first.documentType : `${selected.length} archivos`,
         fileName: selected.length === 1 ? first.fileName : `${selected.length} archivos`,
-        statements: extracted.flatMap(item => item.statements),
+        statements: mergeReviewStatements(extracted.flatMap(item => item.statements)),
       });
     } catch (err: any) {
       alert(`Error al extraer datos: ${err.message}`);
@@ -269,8 +369,28 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   const handleSaveReview = async () => {
     if (!review) return;
     try {
+      const existingStatements = await db.getStatements(clientId);
       for (const statement of review.statements) {
-        await db.createStatement({
+        const existing = existingStatements.find(saved => saved.periodDate === statement.periodDate);
+        if (existing) {
+          const rawLineItems = mergeRawItems([...existing.rawLineItems, ...statement.items]);
+          await db.updateStatement(existing.id, {
+            sourceDocumentId: existing.sourceDocumentId || statement.sourceDocumentId,
+            sourceCompanyName: existing.sourceCompanyName || review.companyName,
+            documentType: joinUnique([existing.documentType, review.documentType]) || existing.documentType || review.documentType,
+            period: existing.period || statement.period,
+            periodDate: existing.periodDate || statement.periodDate,
+            fileName: joinUnique([existing.fileName, statement.fileName || review.fileName]),
+            rawLineItems,
+            mappedData: mappedForItems(rawLineItems),
+          });
+          const updatedExisting = { ...existing, rawLineItems, fileName: joinUnique([existing.fileName, statement.fileName || review.fileName]) };
+          const index = existingStatements.findIndex(saved => saved.id === existing.id);
+          if (index >= 0) existingStatements[index] = updatedExisting;
+          continue;
+        }
+        const rawLineItems = mergeRawItems(statement.items);
+        const created = await db.createStatement({
           clientId,
           sourceDocumentId: statement.sourceDocumentId,
           sourceCompanyName: review.companyName,
@@ -278,10 +398,11 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
           period: statement.period,
           periodDate: statement.periodDate,
           fileName: statement.fileName || review.fileName,
-          rawLineItems: statement.items,
-          mappedData: EMPTY_MAPPED,
+          rawLineItems,
+          mappedData: mappedForItems(rawLineItems),
           extraAccounts: [],
         });
+        existingStatements.push(created);
       }
       setReview(null);
       await loadStatements();
@@ -323,6 +444,21 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
         verticalBaseOverrides,
         concepts,
       );
+    } catch (err: any) {
+      console.error('Financial statements export error:', err);
+      alert(`Error al exportar estados financieros: ${err?.message || 'intenta de nuevo'}`);
+    } finally {
+      setExporting(null);
+    }
+  };
+
+  const handleExportChart = async () => {
+    if (!chartRef.current) return;
+    setExporting('chart');
+    try {
+      const { exportToPng } = await import('../../lib/export');
+      const safeClient = clientName.replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '') || 'Cliente';
+      await exportToPng(chartRef.current, `Grafica_EFF_${safeClient}`);
     } finally {
       setExporting(null);
     }
@@ -349,15 +485,31 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   });
   const conceptFormula = conceptTokens.length ? `expr:${JSON.stringify(conceptTokens)}` : '';
   const chartMetricDefs = [
-    ['revenue', 'Ingresos', '#2563eb'],
-    ['ebitda', 'EBITDA', '#059669'],
-    ['debt_ebitda', 'Deuda/EBITDA', '#dc2626'],
-    ['dscr', 'DSCR', '#7c3aed'],
-    ['current_ratio', 'Razón Corriente', '#d97706'],
-    ['leverage', 'Deuda/Capital', '#0f766e'],
-    ['roa', 'ROA', '#e11d48'],
-    ['roe', 'ROE', '#4338ca'],
+    ['revenue', 'Ingresos', '#2563eb', 'money'],
+    ['ebitda', 'EBITDA', '#059669', 'money'],
+    ['debt_ebitda', 'Deuda/EBITDA', '#dc2626', 'ratio'],
+    ['dscr', 'DSCR', '#7c3aed', 'ratio'],
+    ['current_ratio', 'Razón Corriente', '#d97706', 'ratio'],
+    ['leverage', 'Deuda/Activo', '#0f766e', 'pct'],
+    ['roa', 'ROA', '#e11d48', 'pct'],
+    ['roe', 'ROE', '#4338ca', 'pct'],
   ] as const;
+  const chartMetricFormat = Object.fromEntries(chartMetricDefs.map(([key, , , format]) => [key, format])) as Record<string, typeof chartMetricDefs[number][3]>;
+  const selectedChartFormats = chartMetricDefs.filter(([key]) => chartMetrics[key]).map(([, , , format]) => format);
+  const singleChartFormat = Array.from(new Set(selectedChartFormats)).length === 1 ? selectedChartFormats[0] : null;
+  const formatMetricValue = (key: string, value: number) => {
+    const format = chartMetricFormat[key];
+    if (format === 'money') return fmtMoney(value);
+    if (format === 'pct') return fmtPct(value);
+    if (format === 'ratio') return fmtRatio(value);
+    return fmtNum(value);
+  };
+  const formatAxisValue = (value: number) => {
+    if (singleChartFormat === 'money') return fmtCompact(value);
+    if (singleChartFormat === 'pct') return fmtPct(value);
+    if (singleChartFormat === 'ratio') return fmtRatio(value);
+    return fmtCompact(value);
+  };
   const chartData = visibleStatements.map(stmt => {
     const ratios = standardRatios(stmt);
     const row: Record<string, string | number | null> = { period: stmt.period };
@@ -367,14 +519,12 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   const previous = visibleStatements.length > 1 ? visibleStatements.at(-2) : undefined;
   const valueFor = (stmt: FinancialStatement_DB | undefined, key: string) => {
     if (!stmt) return null;
-    const item = stmt.rawLineItems.find(i => `${i.statementType || 'otro'}||${i.name}` === key);
-    return item?.value ?? null;
+    const matches = stmt.rawLineItems.filter(i => `${i.statementType || 'otro'}||${i.name}` === key);
+    if (matches.length === 0) return null;
+    return matches.reduce((sum, item) => sum + (Number(item.value) || 0), 0);
   };
-  const verticalBaseSegments = ['ACTIVO', 'PASIVO', 'CAPITAL', 'Estado de Resultados'] as const;
+  const verticalBaseSegments = ['Estado de Resultados'] as const;
   const verticalBaseDefaultLabel: Record<string, string> = {
-    ACTIVO: 'Auto: Total Activo',
-    PASIVO: 'Auto: Total Pasivo',
-    CAPITAL: 'Auto: Total Capital',
     'Estado de Resultados': 'Auto: Ingresos / Ventas',
   };
   const segmentForKey = (key: string) => {
@@ -384,6 +534,14 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   };
   const verticalBase = (stmt: FinancialStatement_DB | undefined, statementType: string, segment?: string) => {
     if (!stmt) return null;
+    const find = (names: string[]) => stmt.rawLineItems.find(i => {
+      const n = normalizeName(i.name);
+      return names.some(name => n.includes(normalizeName(name)));
+    })?.value ?? null;
+    if (statementType === 'balance_general' || segment === 'ACTIVO' || segment === 'PASIVO' || segment === 'CAPITAL' || segment === 'Balance General sin clasificar') {
+      return stmt.mappedData.totalAssets || find(['suma del activo', 'total activo', 'activos totales']);
+    }
+
     const customKey = segment ? verticalBaseOverrides[segment] : '';
     if (customKey) {
       const custom = customKey.startsWith('concept:')
@@ -391,15 +549,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
         : valueFor(stmt, customKey);
       if (custom !== null) return custom;
     }
-    const find = (names: string[]) => stmt.rawLineItems.find(i => {
-      const n = normalizeName(i.name);
-      return names.some(name => n.includes(normalizeName(name)));
-    })?.value ?? null;
-    if (segment === 'ACTIVO') return find(['suma del activo', 'total activo', 'activos totales']);
-    if (segment === 'PASIVO') return find(['suma del pasivo', 'total pasivo', 'pasivos totales']);
-    if (segment === 'CAPITAL') return find(['suma del capital', 'total capital', 'capital contable', 'patrimonio']);
     if (segment === 'Estado de Resultados') return find(['total ingresos', 'ingresos', 'ventas']);
-    if (statementType === 'balance_general') return find(['suma del activo', 'total activo', 'activos totales']);
     if (statementType === 'estado_resultados') return find(['total ingresos', 'ingresos', 'ventas']);
     return null;
   };
@@ -516,7 +666,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
             {latestRatios.map(r => (
               <div key={r.key} className="bg-slate-50 rounded-xl p-3 border border-slate-100">
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider">{r.label}</p>
-                <p className="text-lg font-black text-slate-900 font-mono mt-1">{r.value === null ? 'N/A' : r.value.toLocaleString('es-MX', { maximumFractionDigits: 4 })}</p>
+                <p className="text-lg font-black text-slate-900 font-mono mt-1">{r.value === null ? 'N/A' : formatMetricValue(r.key, r.value)}</p>
                 <p className="text-[10px] text-slate-400 mt-1">{r.formula}</p>
                 {r.missing.length > 0 && (
                   <p className="text-[10px] font-bold text-amber-700 mt-1">Falta: {r.missing.join(', ')}</p>
@@ -538,14 +688,30 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
                       {label}
                     </button>
                   ))}
+                  <button
+                    onClick={handleExportChart}
+                    disabled={!!exporting}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-black border bg-white text-slate-600 border-slate-200 hover:bg-slate-50 disabled:opacity-50"
+                    title="Exportar gráfica visible como imagen PNG"
+                  >
+                    {exporting === 'chart' ? <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg> : <ImageDown className="w-3.5 h-3.5" />}
+                    Imagen
+                  </button>
                 </div>
               </div>
-              <div className="h-64 mt-4">
+              <div ref={chartRef} className="h-72 mt-4 bg-white p-3 rounded-xl border border-slate-100">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={chartData}>
                     <XAxis dataKey="period" tick={{ fontSize: 11 }} />
-                    <YAxis tick={{ fontSize: 11 }} />
-                    <Tooltip />
+                    <YAxis tick={{ fontSize: 11 }} tickFormatter={(value) => formatAxisValue(Number(value))} width={72} />
+                    <Tooltip
+                      formatter={(value, name, entry) => {
+                        const key = String((entry as any)?.dataKey || '');
+                        const numeric = Number(value);
+                        return [Number.isFinite(numeric) ? formatMetricValue(key, numeric) : value, name];
+                      }}
+                      labelStyle={{ color: '#0f172a', fontWeight: 800 }}
+                    />
                     <Legend />
                     {chartMetricDefs.filter(([key]) => chartMetrics[key]).map(([key, label, color]) => (
                       <Line key={key} type="monotone" dataKey={key} name={label} stroke={color} dot={false} connectNulls />
@@ -583,7 +749,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
         <div className="bg-white border border-slate-200 rounded-2xl p-5">
           <div className="mb-4">
             <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest">Bases de análisis vertical</h3>
-            <p className="text-xs text-slate-400 mt-1">Recomendado automático; cambia la cuenta base si no te gusta.</p>
+            <p className="text-xs text-slate-400 mt-1">Balance General usa Total Activo para todas las cuentas; Estado de Resultados usa ingresos/ventas.</p>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {verticalBaseSegments.map(segment => {
@@ -1036,7 +1202,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
                             </td>
                             <td className="px-4 py-1.5">
                               <input
-                                type="number"
+                                inputMode="decimal"
                                 value={item.value}
                                 onChange={e => setReview(prev => {
                                   if (!prev) return null;

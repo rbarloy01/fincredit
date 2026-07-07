@@ -129,11 +129,15 @@ const covenantHeader = clientSheet.rows.findIndex(row => row[0] === 'Covenant');
 assertEqual(clientSheet.rows[covenantHeader + 1][3], 12.5, 'contract sheet threshold');
 
 const monitoringSheet = buildMonitoreo([covenant], [statement]);
-assertEqual(monitoringSheet.rows[4][3], 12.5, 'monitoring threshold');
-const complianceRow = monitoringSheet.rows[6];
+const monitoringHeader = monitoringSheet.rows.find(row => row[0] === 'COVENANT');
+const thresholdColumn = monitoringHeader?.findIndex(cell => cell === 'UMBRAL') ?? -1;
+assertEqual(thresholdColumn, 4, 'monitoring threshold column');
+const covenantRow = monitoringSheet.rows.find(row => row[0] === covenant.name);
+assertEqual(covenantRow?.[thresholdColumn], 12.5, 'monitoring threshold');
+const complianceRow = monitoringSheet.rows.find(row => row[2] === 'Cumplimiento');
 assertEqual(
-  complianceRow[4],
-  '=IFERROR(IF(E5>=12.5,"CUMPLE","INCUMPLE"),"")',
+  complianceRow?.[thresholdColumn + 1],
+  '=IFERROR(IF(F5>=12.5,"CUMPLE","INCUMPLE"),"")',
   'monitoring formula threshold',
 );
 

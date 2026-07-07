@@ -4,7 +4,7 @@ declare global {
   }
 }
 
-const MAX_CONTRACT_CHARS = 26000;
+const MAX_EXTRACTED_TEXT_CHARS = 60000;
 const MAX_PARSED_PAGES = 42;
 const PDF_PARSE_TIMEOUT_MS = 12000;
 
@@ -16,11 +16,11 @@ function compactText(value: string) {
     .trim();
 }
 
-function prioritizeContractText(pages: string[], maxChars = MAX_CONTRACT_CHARS) {
+function prioritizeDocumentText(pages: string[], maxChars = MAX_EXTRACTED_TEXT_CHARS) {
   const full = pages.join('\n\n');
   if (full.length <= maxChars) return full;
 
-  const keywords = /(acreditad|acreditante|monto|importe|línea|linea|moneda|vigencia|vencimiento|obligaciones|covenant|raz[oó]n financiera|aforo|garant[ií]a|incumplimiento|inter[eé]s)/i;
+  const keywords = /(balance general|estado de situaci[oó]n financiera|estado de resultados|resultados integral|p[eé]rdidas y ganancias|ingresos|costos|gastos|utilidad|resultado|margen financiero|activo|pasivo|capital|patrimonio|acreditad|acreditante|monto|importe|línea|linea|moneda|vigencia|vencimiento|obligaciones|covenant|raz[oó]n financiera|aforo|garant[ií]a|incumplimiento|inter[eé]s)/i;
   const selected = new Set<number>();
   pages.forEach((page, index) => {
     if (index < 4 || index >= pages.length - 3 || keywords.test(page)) selected.add(index);
@@ -63,7 +63,7 @@ async function parsePdfText(file: File): Promise<string> {
     page.cleanup?.();
   }
 
-  return prioritizeContractText(pages);
+  return prioritizeDocumentText(pages);
 }
 
 export async function extractPdfText(file: File): Promise<string> {
@@ -83,25 +83,34 @@ export function isUsefulExtractedText(text: string) {
   return text.length >= 600 && words >= 80;
 }
 
-export async function renderPdfPreviewImages(file: File): Promise<string[]> {
+function visualPageNumbers(totalPages: number, maxPages: number) {
+  if (totalPages <= maxPages) return Array.from({ length: totalPages }, (_, index) => index + 1);
+  const pages = new Set<number>([1, totalPages]);
+  const slots = Math.max(1, maxPages - pages.size);
+  for (let index = 1; index <= slots; index += 1) {
+    pages.add(Math.max(1, Math.min(totalPages, Math.round(index * totalPages / (slots + 1)))));
+  }
+  return Array.from(pages).sort((a, b) => a - b);
+}
+
+export async function renderPdfPreviewImages(file: File, maxPages = 3, scale = 0.85, quality = 0.45): Promise<string[]> {
   const pdfjs = window.pdfjsLib;
   if (!pdfjs?.getDocument) return [];
   const data = await file.arrayBuffer();
   const pdf = await pdfjs.getDocument({ data }).promise;
-  const candidates = [1, Math.ceil(pdf.numPages / 2), pdf.numPages];
-  const pages = Array.from(new Set(candidates.filter(page => page >= 1 && page <= pdf.numPages)));
+  const pages = visualPageNumbers(pdf.numPages, maxPages);
   const images: string[] = [];
 
   for (const pageNumber of pages) {
     const page = await pdf.getPage(pageNumber);
-    const viewport = page.getViewport({ scale: 1 });
+    const viewport = page.getViewport({ scale });
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(viewport.width);
     canvas.height = Math.round(viewport.height);
     const context = canvas.getContext('2d');
     if (!context) continue;
     await page.render({ canvasContext: context, viewport }).promise;
-    images.push(canvas.toDataURL('image/jpeg', 0.6).split(',')[1]);
+    images.push(canvas.toDataURL('image/jpeg', quality).split(',')[1]);
     page.cleanup?.();
   }
   return images;

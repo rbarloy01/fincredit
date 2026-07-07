@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { db, Covenant_DB, CovenantAnnotation } from '../../db/index';
+import { db, Covenant_DB, CovenantAnnotation, Transaction } from '../../db/index';
 import { Session } from '../../services/auth';
 import { Plus, ChevronDown, ChevronRight, MessageCircle, Send, CheckCircle, XCircle, Clock, X, Trash2, ListChecks, Download, FileText } from 'lucide-react';
 
@@ -8,6 +8,7 @@ const nanoid = () => Math.random().toString(36).slice(2) + Date.now().toString(3
 interface Props {
   clientId: string;
   clientName?: string;
+  transactions?: Transaction[];
   session: Session;
   onCovenantsChange: (covenants: Covenant_DB[]) => void;
 }
@@ -61,13 +62,14 @@ interface FormData {
   name: string;
   type: 'hacer' | 'noHacer';
   description: string;
+  transactionId: string;
 }
 
-const EMPTY: FormData = { name: '', type: 'hacer', description: '' };
+const EMPTY: FormData = { name: '', type: 'hacer', description: '', transactionId: '' };
 
 const inputClass = 'bg-slate-50 border border-slate-200 text-slate-900 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 transition-all w-full';
 
-const HacerNoHacerPanel: React.FC<Props> = ({ clientId, clientName = '', session, onCovenantsChange }) => {
+const HacerNoHacerPanel: React.FC<Props> = ({ clientId, clientName = '', transactions = [], session, onCovenantsChange }) => {
   const [covenants, setCovenants] = useState<Covenant_DB[]>([]);
   const [annotations, setAnnotations] = useState<Record<string, CovenantAnnotation[]>>({});
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -111,7 +113,7 @@ const HacerNoHacerPanel: React.FC<Props> = ({ clientId, clientName = '', session
     if (!form.name.trim()) return;
     setSaving(true);
     try {
-      await db.createCovenant({ clientId, name: form.name.trim(), type: form.type, formula: '', threshold: '', operator: 'none', description: form.description.trim(), isCustom: true });
+      await db.createCovenant({ clientId, transactionId: form.transactionId || undefined, name: form.name.trim(), type: form.type, formula: '', threshold: '', operator: 'none', description: form.description.trim(), isCustom: true });
       setForm(EMPTY);
       setShowForm(false);
       await loadData();
@@ -130,6 +132,11 @@ const HacerNoHacerPanel: React.FC<Props> = ({ clientId, clientName = '', session
     await loadData();
   };
 
+  const saveTransactionLink = async (cov: Covenant_DB, transactionId: string) => {
+    await db.updateCovenant(cov.id, { transactionId: transactionId || null } as Partial<Covenant_DB>);
+    await loadData();
+  };
+
   const handleSendNote = async (covenantId: string) => {
     const text = noteText[covenantId]?.trim();
     if (!text) return;
@@ -145,6 +152,7 @@ const HacerNoHacerPanel: React.FC<Props> = ({ clientId, clientName = '', session
 
   const hacer = covenants.filter(c => c.type === 'hacer');
   const noHacer = covenants.filter(c => c.type === 'noHacer');
+  const transactionName = (transactionId?: string) => transactions.find(tx => tx.id === transactionId)?.name || '';
 
   const renderGroup = (items: Covenant_DB[], label: string, accentColor: string) => (
     <div>
@@ -172,6 +180,7 @@ const HacerNoHacerPanel: React.FC<Props> = ({ clientId, clientName = '', session
                     <div className="flex items-center gap-3 flex-wrap">
                       <h4 className="font-black text-slate-900 text-sm">{cov.name}</h4>
                       <StatusBadge status={status} />
+                      {transactionName(cov.transactionId) && <span className="text-[10px] font-black bg-slate-100 text-slate-700 border border-slate-200 rounded-full px-2 py-0.5">{transactionName(cov.transactionId)}</span>}
                     </div>
                     {cov.description && <p className="text-xs text-slate-500 mt-1 line-clamp-1">{cov.description}</p>}
                   </div>
@@ -192,6 +201,15 @@ const HacerNoHacerPanel: React.FC<Props> = ({ clientId, clientName = '', session
                     <div className="px-6 py-4 border-b border-slate-100">
                       <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Estado de Cumplimiento</p>
                       <StatusToggle status={status} onChange={s => handleStatusChange(cov, s)} />
+                      {transactions.length > 0 && (
+                        <div className="mt-4">
+                          <label className="text-xs font-bold text-slate-500 uppercase tracking-wider block mb-2">Facility / Transacción</label>
+                          <select value={cov.transactionId || ''} onChange={e => saveTransactionLink(cov, e.target.value)} className={inputClass}>
+                            <option value="">General del cliente</option>
+                            {transactions.map(tx => <option key={tx.id} value={tx.id}>{tx.name}</option>)}
+                          </select>
+                        </div>
+                      )}
                       {cov.description && (
                         <div className="mt-4">
                           <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Descripción</p>
@@ -301,6 +319,15 @@ const HacerNoHacerPanel: React.FC<Props> = ({ clientId, clientName = '', session
                 <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Nombre *</label>
                 <input className={inputClass} value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} placeholder="ej: Mantener razón de liquidez mínima" required />
               </div>
+              {transactions.length > 0 && (
+                <div>
+                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Facility / Transacción</label>
+                  <select className={inputClass} value={form.transactionId} onChange={e => setForm(p => ({ ...p, transactionId: e.target.value }))}>
+                    <option value="">General del cliente</option>
+                    {transactions.map(tx => <option key={tx.id} value={tx.id}>{tx.name}</option>)}
+                  </select>
+                </div>
+              )}
               <div>
                 <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Descripción</label>
                 <textarea className={inputClass} value={form.description} onChange={e => setForm(p => ({ ...p, description: e.target.value }))} rows={3} placeholder="Detalle de la obligación según contrato" />

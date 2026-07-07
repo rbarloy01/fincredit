@@ -2,15 +2,31 @@ import { db, Covenant_DB, FinancialStatement_DB } from '../db/index';
 
 export type ConsolidationMetric =
   | 'revenue'
+  | 'interestIncome'
+  | 'feeIncome'
+  | 'coreBusinessIncome'
+  | 'adjustedFinancialMargin'
+  | 'adjustedOperatingIncome'
+  | 'adminSellingOperatingExpenses'
   | 'ebitda'
   | 'interestExpense'
   | 'netIncome'
   | 'currentAssets'
   | 'currentLiabilities'
   | 'totalDebt'
+  | 'banksFundsShortTerm'
+  | 'banksFundsLongTerm'
+  | 'totalLiabilities'
   | 'totalAssets'
   | 'equity'
   | 'cash'
+  | 'availableInvestments'
+  | 'loanPortfolio'
+  | 'netPortfolio'
+  | 'managedPortfolio'
+  | 'pastDuePortfolio'
+  | 'loanLossReserves'
+  | 'productiveAssets'
   | 'operatingCashFlow';
 
 export interface AccountConsolidationRule {
@@ -62,29 +78,61 @@ let accountCovenantMemoryHydrated = false;
 
 export const METRIC_LABELS: Record<ConsolidationMetric, string> = {
   revenue: 'Ingresos',
+  interestIncome: 'Ingresos por intereses',
+  feeIncome: 'Ingresos por comisiones',
+  coreBusinessIncome: 'Ingresos core del negocio',
+  adjustedFinancialMargin: 'Margen financiero ajustado',
+  adjustedOperatingIncome: 'Utilidad operativa ajustada',
+  adminSellingOperatingExpenses: 'Gastos de administración, venta y operación',
   ebitda: 'EBITDA',
   interestExpense: 'Gasto financiero / intereses',
   netIncome: 'Utilidad neta',
   currentAssets: 'Activo circulante',
   currentLiabilities: 'Pasivo circulante',
   totalDebt: 'Deuda / pasivo total',
+  banksFundsShortTerm: 'Bancos y fondos CP',
+  banksFundsLongTerm: 'Bancos y fondos LP',
+  totalLiabilities: 'Pasivo total',
   totalAssets: 'Activo total',
   equity: 'Capital contable',
   cash: 'Efectivo y equivalentes',
+  availableInvestments: 'Inversiones disponibles no comprometidas',
+  loanPortfolio: 'Cartera de crédito',
+  netPortfolio: 'Cartera neta',
+  managedPortfolio: 'Cartera administrada',
+  pastDuePortfolio: 'Cartera vencida',
+  loanLossReserves: 'Estimación preventiva / reservas',
+  productiveAssets: 'Activos productivos',
   operatingCashFlow: 'Flujo operativo',
 };
 
 export const BASE_CONSOLIDATION_RULES: AccountConsolidationRule[] = [
-  { id: 'sys-revenue', metric: 'revenue', label: METRIC_LABELS.revenue, aliases: ['ingresos', 'ventas', 'rentas', 'ingresos por renta'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
+  { id: 'sys-revenue', metric: 'revenue', label: METRIC_LABELS.revenue, aliases: ['ingresos', 'ventas', 'rentas', 'ingresos por renta', 'ingresos totales'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
+  { id: 'sys-interest-income', metric: 'interestIncome', label: METRIC_LABELS.interestIncome, aliases: ['ingresos por intereses', 'intereses cobrados', 'intereses de cartera', 'intereses ganados', 'ingreso por interes'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
+  { id: 'sys-fee-income', metric: 'feeIncome', label: METRIC_LABELS.feeIncome, aliases: ['ingresos por comisiones', 'comisiones cobradas', 'comisiones y tarifas', 'ingreso por comision', 'comision por apertura', 'comisiones por administracion'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
+  { id: 'sys-core-income', metric: 'coreBusinessIncome', label: METRIC_LABELS.coreBusinessIncome, aliases: ['ingresos core', 'ingresos del core', 'ingresos del negocio', 'ingresos de la operacion', 'ingresos financieros y comisiones'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
+  { id: 'sys-adjusted-financial-margin', metric: 'adjustedFinancialMargin', label: METRIC_LABELS.adjustedFinancialMargin, aliases: ['margen financiero ajustado', 'margen financiero aj', 'margen financiero ajust'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
+  { id: 'sys-adjusted-operating-income', metric: 'adjustedOperatingIncome', label: METRIC_LABELS.adjustedOperatingIncome, aliases: ['utilidad operativa ajustada', 'utilidad operacion ajustada', 'utilidad de operacion ajustada', 'utilidad operacional ajustada'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
+  { id: 'sys-admin-selling-opex', metric: 'adminSellingOperatingExpenses', label: METRIC_LABELS.adminSellingOperatingExpenses, aliases: ['gastos de administracion venta y operacion', 'gastos adm venta y opn', 'gastos de administracion y venta', 'gastos administrativos', 'gastos de operacion', 'gastos operativos'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
   { id: 'sys-ebitda', metric: 'ebitda', label: METRIC_LABELS.ebitda, aliases: ['ebitda', 'utilidad de operacion', 'resultado de operacion'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
   { id: 'sys-interest', metric: 'interestExpense', label: METRIC_LABELS.interestExpense, aliases: ['gasto financiero', 'intereses', 'resultado integral de financiamiento'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
   { id: 'sys-net-income', metric: 'netIncome', label: METRIC_LABELS.netIncome, aliases: ['utilidad neta', 'resultado neto', 'perdida del ejercicio'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
   { id: 'sys-current-assets', metric: 'currentAssets', label: METRIC_LABELS.currentAssets, aliases: ['activo circulante', 'activo corriente', 'activo a corto plazo'], statementType: 'balance_general', source: 'system', updatedAt: 'system' },
   { id: 'sys-current-liabilities', metric: 'currentLiabilities', label: METRIC_LABELS.currentLiabilities, aliases: ['pasivo circulante', 'pasivo corriente', 'pasivo a corto plazo'], statementType: 'balance_general', source: 'system', updatedAt: 'system' },
-  { id: 'sys-total-debt', metric: 'totalDebt', label: METRIC_LABELS.totalDebt, aliases: ['deuda total', 'pasivo con costo', 'suma del pasivo', 'total pasivo'], statementType: 'balance_general', source: 'system', updatedAt: 'system' },
+  { id: 'sys-total-debt', metric: 'totalDebt', label: METRIC_LABELS.totalDebt, aliases: ['deuda total', 'pasivo con costo', 'suma del pasivo', 'total pasivo', 'bancos y fondos'], statementType: 'balance_general', source: 'system', updatedAt: 'system' },
+  { id: 'sys-banks-funds-st', metric: 'banksFundsShortTerm', label: METRIC_LABELS.banksFundsShortTerm, aliases: ['bancos y fondos corto plazo', 'bancos y fondos cp', 'prestamos bancarios corto plazo', 'deuda bancaria corto plazo', 'fondeo corto plazo'], statementType: 'balance_general', source: 'system', updatedAt: 'system' },
+  { id: 'sys-banks-funds-lt', metric: 'banksFundsLongTerm', label: METRIC_LABELS.banksFundsLongTerm, aliases: ['bancos y fondos largo plazo', 'bancos y fondos lp', 'prestamos bancarios largo plazo', 'deuda bancaria largo plazo', 'fondeo largo plazo'], statementType: 'balance_general', source: 'system', updatedAt: 'system' },
+  { id: 'sys-total-liabilities', metric: 'totalLiabilities', label: METRIC_LABELS.totalLiabilities, aliases: ['total pasivo', 'suma del pasivo', 'pasivo total', 'pasivos totales'], statementType: 'balance_general', source: 'system', updatedAt: 'system' },
   { id: 'sys-total-assets', metric: 'totalAssets', label: METRIC_LABELS.totalAssets, aliases: ['total activo', 'activos totales', 'suma del activo'], statementType: 'balance_general', source: 'system', updatedAt: 'system' },
   { id: 'sys-equity', metric: 'equity', label: METRIC_LABELS.equity, aliases: ['capital contable', 'patrimonio', 'total capital', 'suma del capital'], statementType: 'balance_general', source: 'system', updatedAt: 'system' },
   { id: 'sys-cash', metric: 'cash', label: METRIC_LABELS.cash, aliases: ['efectivo', 'bancos', 'equivalentes de efectivo'], statementType: 'balance_general', source: 'system', updatedAt: 'system' },
+  { id: 'sys-available-investments', metric: 'availableInvestments', label: METRIC_LABELS.availableInvestments, aliases: ['inversiones disponibles', 'inversiones en valores', 'inversiones no comprometidas', 'valores disponibles', 'instrumentos financieros disponibles'], statementType: 'balance_general', source: 'system', updatedAt: 'system' },
+  { id: 'sys-loan-portfolio', metric: 'loanPortfolio', label: METRIC_LABELS.loanPortfolio, aliases: ['cartera de credito', 'cartera crediticia', 'cartera vigente', 'creditos vigentes', 'saldo insoluto cartera'], statementType: 'balance_general', source: 'system', updatedAt: 'system' },
+  { id: 'sys-net-portfolio', metric: 'netPortfolio', label: METRIC_LABELS.netPortfolio, aliases: ['cartera neta', 'cartera de credito neta', 'cartera neta de estimacion preventiva'], statementType: 'balance_general', source: 'system', updatedAt: 'system' },
+  { id: 'sys-managed-portfolio', metric: 'managedPortfolio', label: METRIC_LABELS.managedPortfolio, aliases: ['cartera administrada', 'cartera total administrada', 'portafolio administrado', 'saldo de cartera administrada'], statementType: 'balance_general', source: 'system', updatedAt: 'system' },
+  { id: 'sys-past-due-portfolio', metric: 'pastDuePortfolio', label: METRIC_LABELS.pastDuePortfolio, aliases: ['cartera vencida', 'creditos vencidos', 'saldo vencido', 'cartera en mora', 'cartera morosa'], statementType: 'balance_general', source: 'system', updatedAt: 'system' },
+  { id: 'sys-loan-loss-reserves', metric: 'loanLossReserves', label: METRIC_LABELS.loanLossReserves, aliases: ['estimacion preventiva', 'estimacion preventiva para riesgos crediticios', 'reservas crediticias', 'reserva para perdidas crediticias', 'deterioro de cartera'], statementType: 'balance_general', source: 'system', updatedAt: 'system' },
+  { id: 'sys-productive-assets', metric: 'productiveAssets', label: METRIC_LABELS.productiveAssets, aliases: ['activos productivos', 'activos generadores', 'activos productivos totales'], statementType: 'balance_general', source: 'system', updatedAt: 'system' },
 ];
 
 export function cleanText(value: string): string {
@@ -174,11 +222,25 @@ export function metricAliases(metric: ConsolidationMetric): string[] {
   return loadConsolidationRules().filter(r => r.metric === metric).flatMap(r => r.aliases);
 }
 
+function asRawLineItems(value: unknown): FinancialStatement_DB['rawLineItems'] {
+  if (Array.isArray(value)) return value as FinancialStatement_DB['rawLineItems'];
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed as FinancialStatement_DB['rawLineItems'] : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 export function findConsolidatedMetricValue(stmt: FinancialStatement_DB, metric: ConsolidationMetric): number | null {
   const rules = loadConsolidationRules().filter(r => r.metric === metric);
+  const items = asRawLineItems((stmt as any).rawLineItems);
   for (const rule of rules) {
     const aliases = rule.aliases.map(cleanText).filter(Boolean);
-    const found = stmt.rawLineItems.find(item => {
+    const found = items.find(item => {
       const typeOk = !rule.statementType || rule.statementType === 'any' || rule.statementType === item.statementType;
       const itemName = cleanText(item.name);
       return typeOk && aliases.some(alias => itemName.includes(alias) || alias.includes(itemName));

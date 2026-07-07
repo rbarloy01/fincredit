@@ -60,6 +60,7 @@ export interface AforoRecord {
   month: string;
   value: string;
   status: 'good' | 'warning' | 'bad';
+  transactionId?: string;
 }
 
 export interface DocumentationItem {

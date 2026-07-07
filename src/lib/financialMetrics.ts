@@ -44,16 +44,63 @@ export interface CovenantAnalystInsight {
 const norm = (v: string) => v.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
 const contractNameKey = (v: string) => v.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
 
+function asArray<T>(value: unknown): T[] {
+  if (Array.isArray(value)) return value as T[];
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed as T[] : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function asObject<T extends Record<string, any>>(value: unknown): T {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as T;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as T : {} as T;
+    } catch {
+      return {} as T;
+    }
+  }
+  return {} as T;
+}
+
+function rawLineItems(stmt: FinancialStatement_DB): FinancialStatement_DB['rawLineItems'] {
+  return asArray<FinancialStatement_DB['rawLineItems'][number]>((stmt as any).rawLineItems);
+}
+
 export const metricLabels: Record<string, string> = {
   revenue: 'Ingresos',
+  interestIncome: 'Ingresos por intereses',
+  feeIncome: 'Ingresos por comisiones',
+  coreBusinessIncome: 'Ingresos core del negocio',
+  adjustedFinancialMargin: 'Margen financiero ajustado',
+  adjustedOperatingIncome: 'Utilidad operativa ajustada',
+  adminSellingOperatingExpenses: 'Gastos adm., venta y operación',
   ebitda: 'EBITDA',
   interestExpense: 'Gasto financiero',
   netIncome: 'Utilidad neta',
   currentAssets: 'Activo corriente',
   currentLiabilities: 'Pasivo corriente',
   totalDebt: 'Deuda total',
+  banksFundsShortTerm: 'Bancos y fondos CP',
+  banksFundsLongTerm: 'Bancos y fondos LP',
+  totalLiabilities: 'Total pasivo',
   totalAssets: 'Total activo',
   equity: 'Capital contable',
+  cash: 'Bancos / efectivo',
+  availableInvestments: 'Inversiones disponibles no comprometidas',
+  loanPortfolio: 'Cartera de crédito',
+  netPortfolio: 'Cartera neta',
+  managedPortfolio: 'Cartera administrada',
+  pastDuePortfolio: 'Cartera vencida',
+  loanLossReserves: 'Estimación preventiva',
+  productiveAssets: 'Activos productivos',
 };
 
 interface LocalConcept {
@@ -78,7 +125,7 @@ export function accountOptions(statements: FinancialStatement_DB[]) {
   const seen = new Set<string>();
   const rows: Array<{ key: string; label: string }> = [];
   for (const stmt of statements) {
-    for (const item of stmt.rawLineItems) {
+    for (const item of rawLineItems(stmt)) {
       const key = rawAccountKey(item);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -89,7 +136,7 @@ export function accountOptions(statements: FinancialStatement_DB[]) {
 }
 
 function findRaw(stmt: FinancialStatement_DB, names: string[], types?: string[]): number | null {
-  const found = stmt.rawLineItems.find(item => {
+  const found = rawLineItems(stmt).find(item => {
     const n = norm(item.name);
     const typeOk = !types || types.includes(item.statementType || 'otro');
     return typeOk && names.some(name => n.includes(norm(name)));
@@ -97,19 +144,51 @@ function findRaw(stmt: FinancialStatement_DB, names: string[], types?: string[])
   return found?.value ?? null;
 }
 
+function firstValue(...values: Array<number | null | undefined>): number | null {
+  const found = values.find(value => value !== null && value !== undefined);
+  return found ?? null;
+}
+
+function addValues(...values: Array<number | null>): number | null {
+  const present = values.filter((value): value is number => value !== null);
+  return present.length ? present.reduce((sum, value) => sum + value, 0) : null;
+}
+
+function subtractValues(a: number | null, b: number | null): number | null {
+  if (a === null || b === null) return null;
+  return a - b;
+}
+
 export function getMetric(stmt: FinancialStatement_DB, key: string): number | null {
-  const m = (stmt.mappedData || {}) as FinancialStatement_DB['mappedData'];
+  const m = asObject<FinancialStatement_DB['mappedData']>((stmt as any).mappedData);
   const raw = (names: string[], types?: string[]) => findRaw(stmt, names, types);
   switch (key) {
-    case 'revenue': return m.revenue || findConsolidatedMetricValue(stmt, 'revenue') || raw(['ingresos', 'ventas', ...metricAliases('revenue')], ['estado_resultados']);
-    case 'ebitda': return m.ebitda || findConsolidatedMetricValue(stmt, 'ebitda') || raw(['ebitda', ...metricAliases('ebitda')], ['estado_resultados']) || raw(['utilidad operacion', 'utilidad de operacion', 'resultado de operacion', 'utilidad antes de intereses'], ['estado_resultados']);
-    case 'interestExpense': return m.interestExpense || findConsolidatedMetricValue(stmt, 'interestExpense') || raw(['gasto financiero', 'intereses pagados', 'intereses devengados', 'resultado integral de financiamiento', ...metricAliases('interestExpense')], ['estado_resultados']);
-    case 'netIncome': return m.netIncome || findConsolidatedMetricValue(stmt, 'netIncome') || raw(['utilidad neta', 'resultado neto', 'utilidad o perdida', 'utilidad (o perdida)', 'perdida del ejercicio', ...metricAliases('netIncome')], ['estado_resultados']);
-    case 'currentAssets': return m.currentAssets || findConsolidatedMetricValue(stmt, 'currentAssets') || raw(['activo circulante', 'activo corriente', 'total activo a corto plazo', 'activo a corto plazo', ...metricAliases('currentAssets')], ['balance_general']);
-    case 'currentLiabilities': return m.currentLiabilities || findConsolidatedMetricValue(stmt, 'currentLiabilities') || raw(['pasivo circulante', 'pasivo corriente', 'total pasivo a corto plazo', 'pasivo a corto plazo', ...metricAliases('currentLiabilities')], ['balance_general']);
-    case 'totalDebt': return m.totalDebt || findConsolidatedMetricValue(stmt, 'totalDebt') || raw(['deuda total', 'pasivo con costo', 'deuda', 'suma del pasivo', 'total pasivo', ...metricAliases('totalDebt')], ['balance_general']);
-    case 'totalAssets': return m.totalAssets || findConsolidatedMetricValue(stmt, 'totalAssets') || raw(['total activo', 'activos totales', 'suma del activo', ...metricAliases('totalAssets')], ['balance_general']);
-    case 'equity': return m.equity || findConsolidatedMetricValue(stmt, 'equity') || raw(['capital contable', 'patrimonio', 'suma del capital', 'total capital', ...metricAliases('equity')], ['balance_general']);
+    case 'revenue': return firstValue(m.revenue, findConsolidatedMetricValue(stmt, 'revenue'), raw(['ingresos', 'ventas', ...metricAliases('revenue')], ['estado_resultados']));
+    case 'interestIncome': return firstValue(findConsolidatedMetricValue(stmt, 'interestIncome'), raw(['ingresos por intereses', 'intereses cobrados', 'ingreso por interes', ...metricAliases('interestIncome')], ['estado_resultados']));
+    case 'feeIncome': return firstValue(findConsolidatedMetricValue(stmt, 'feeIncome'), raw(['ingresos por comisiones', 'comisiones cobradas', 'ingreso por comision', ...metricAliases('feeIncome')], ['estado_resultados']));
+    case 'coreBusinessIncome': return firstValue(findConsolidatedMetricValue(stmt, 'coreBusinessIncome'), addValues(getMetric(stmt, 'interestIncome'), getMetric(stmt, 'feeIncome')), getMetric(stmt, 'revenue'));
+    case 'adjustedFinancialMargin': return firstValue(findConsolidatedMetricValue(stmt, 'adjustedFinancialMargin'), raw(['margen financiero ajustado', 'margen financiero aj', ...metricAliases('adjustedFinancialMargin')], ['estado_resultados']));
+    case 'adjustedOperatingIncome': return firstValue(findConsolidatedMetricValue(stmt, 'adjustedOperatingIncome'), raw(['utilidad operativa ajustada', 'utilidad operacion ajustada', 'utilidad de operacion ajustada', ...metricAliases('adjustedOperatingIncome')], ['estado_resultados']));
+    case 'adminSellingOperatingExpenses': return firstValue(findConsolidatedMetricValue(stmt, 'adminSellingOperatingExpenses'), raw(['gastos de administracion venta y operacion', 'gastos adm venta opn', 'gastos administrativos', 'gastos de operacion', ...metricAliases('adminSellingOperatingExpenses')], ['estado_resultados']));
+    case 'ebitda': return firstValue(m.ebitda, findConsolidatedMetricValue(stmt, 'ebitda'), raw(['ebitda', ...metricAliases('ebitda')], ['estado_resultados']), raw(['utilidad operacion', 'utilidad de operacion', 'resultado de operacion', 'utilidad antes de intereses'], ['estado_resultados']));
+    case 'interestExpense': return firstValue(m.interestExpense, findConsolidatedMetricValue(stmt, 'interestExpense'), raw(['gasto financiero', 'intereses pagados', 'intereses devengados', 'resultado integral de financiamiento', ...metricAliases('interestExpense')], ['estado_resultados']));
+    case 'netIncome': return firstValue(m.netIncome, findConsolidatedMetricValue(stmt, 'netIncome'), raw(['utilidad neta', 'resultado neto', 'utilidad o perdida', 'utilidad (o perdida)', 'perdida del ejercicio', ...metricAliases('netIncome')], ['estado_resultados']));
+    case 'currentAssets': return firstValue(m.currentAssets, findConsolidatedMetricValue(stmt, 'currentAssets'), raw(['activo circulante', 'activo corriente', 'total activo a corto plazo', 'activo a corto plazo', ...metricAliases('currentAssets')], ['balance_general']));
+    case 'currentLiabilities': return firstValue(m.currentLiabilities, findConsolidatedMetricValue(stmt, 'currentLiabilities'), raw(['pasivo circulante', 'pasivo corriente', 'total pasivo a corto plazo', 'pasivo a corto plazo', ...metricAliases('currentLiabilities')], ['balance_general']));
+    case 'totalDebt': return firstValue(m.totalDebt, findConsolidatedMetricValue(stmt, 'totalDebt'), addValues(getMetric(stmt, 'banksFundsShortTerm'), getMetric(stmt, 'banksFundsLongTerm')), raw(['deuda total', 'pasivo con costo', 'deuda', 'suma del pasivo', 'total pasivo', ...metricAliases('totalDebt')], ['balance_general']));
+    case 'banksFundsShortTerm': return firstValue(findConsolidatedMetricValue(stmt, 'banksFundsShortTerm'), raw(['bancos y fondos corto plazo', 'bancos y fondos cp', 'fondeo corto plazo', ...metricAliases('banksFundsShortTerm')], ['balance_general']));
+    case 'banksFundsLongTerm': return firstValue(findConsolidatedMetricValue(stmt, 'banksFundsLongTerm'), raw(['bancos y fondos largo plazo', 'bancos y fondos lp', 'fondeo largo plazo', ...metricAliases('banksFundsLongTerm')], ['balance_general']));
+    case 'totalLiabilities': return firstValue(findConsolidatedMetricValue(stmt, 'totalLiabilities'), raw(['total pasivo', 'suma del pasivo', 'pasivo total', ...metricAliases('totalLiabilities')], ['balance_general']), getMetric(stmt, 'totalDebt'));
+    case 'totalAssets': return firstValue(m.totalAssets, findConsolidatedMetricValue(stmt, 'totalAssets'), raw(['total activo', 'activos totales', 'suma del activo', ...metricAliases('totalAssets')], ['balance_general']));
+    case 'equity': return firstValue(m.equity, findConsolidatedMetricValue(stmt, 'equity'), raw(['capital contable', 'patrimonio', 'suma del capital', 'total capital', ...metricAliases('equity')], ['balance_general']));
+    case 'cash': return firstValue(findConsolidatedMetricValue(stmt, 'cash'), raw(['efectivo', 'bancos', 'equivalentes de efectivo', ...metricAliases('cash')], ['balance_general']));
+    case 'availableInvestments': return firstValue(findConsolidatedMetricValue(stmt, 'availableInvestments'), raw(['inversiones disponibles', 'inversiones en valores', 'inversiones no comprometidas', ...metricAliases('availableInvestments')], ['balance_general']));
+    case 'loanPortfolio': return firstValue(findConsolidatedMetricValue(stmt, 'loanPortfolio'), raw(['cartera de credito', 'cartera vigente', 'creditos vigentes', ...metricAliases('loanPortfolio')], ['balance_general']));
+    case 'netPortfolio': return firstValue(findConsolidatedMetricValue(stmt, 'netPortfolio'), raw(['cartera neta', 'cartera de credito neta', ...metricAliases('netPortfolio')], ['balance_general']), subtractValues(getMetric(stmt, 'managedPortfolio'), getMetric(stmt, 'loanLossReserves')));
+    case 'managedPortfolio': return firstValue(findConsolidatedMetricValue(stmt, 'managedPortfolio'), raw(['cartera administrada', 'cartera total administrada', 'portafolio administrado', ...metricAliases('managedPortfolio')], ['balance_general']), getMetric(stmt, 'loanPortfolio'));
+    case 'pastDuePortfolio': return firstValue(findConsolidatedMetricValue(stmt, 'pastDuePortfolio'), raw(['cartera vencida', 'creditos vencidos', 'saldo vencido', ...metricAliases('pastDuePortfolio')], ['balance_general']));
+    case 'loanLossReserves': return firstValue(findConsolidatedMetricValue(stmt, 'loanLossReserves'), raw(['estimacion preventiva', 'reservas crediticias', 'reserva para perdidas crediticias', ...metricAliases('loanLossReserves')], ['balance_general']));
+    case 'productiveAssets': return firstValue(findConsolidatedMetricValue(stmt, 'productiveAssets'), addValues(getMetric(stmt, 'cash'), getMetric(stmt, 'availableInvestments'), getMetric(stmt, 'loanPortfolio')));
     default: {
       if (key.startsWith('concept:')) {
         const concept = localConcepts(stmt.clientId).find(c => c.id === key.slice('concept:'.length));
@@ -117,7 +196,7 @@ export function getMetric(stmt: FinancialStatement_DB, key: string): number | nu
       }
       if (key.startsWith('account:')) {
         const accountKey = key.slice('account:'.length);
-        const item = stmt.rawLineItems.find(i => rawAccountKey(i) === accountKey);
+        const item = rawLineItems(stmt).find(i => rawAccountKey(i) === accountKey);
         return item?.value ?? null;
       }
       return null;
@@ -131,26 +210,57 @@ function div(a: number | null, b: number | null): number | null {
 }
 
 export function standardRatios(stmt: FinancialStatement_DB): RatioResult[] {
+  const adjustedFinancialMargin = getMetric(stmt, 'adjustedFinancialMargin');
+  const adjustedOperatingIncome = getMetric(stmt, 'adjustedOperatingIncome');
+  const adminSellingOperatingExpenses = getMetric(stmt, 'adminSellingOperatingExpenses');
   const revenue = getMetric(stmt, 'revenue');
+  const coreBusinessIncome = getMetric(stmt, 'coreBusinessIncome');
+  const interestIncome = getMetric(stmt, 'interestIncome');
   const ebitda = getMetric(stmt, 'ebitda');
   const interest = getMetric(stmt, 'interestExpense');
   const netIncome = getMetric(stmt, 'netIncome');
   const currentAssets = getMetric(stmt, 'currentAssets');
   const currentLiabilities = getMetric(stmt, 'currentLiabilities');
   const totalDebt = getMetric(stmt, 'totalDebt');
+  const banksFundsShortTerm = getMetric(stmt, 'banksFundsShortTerm');
+  const banksFundsLongTerm = getMetric(stmt, 'banksFundsLongTerm');
+  const totalLiabilities = getMetric(stmt, 'totalLiabilities');
   const totalAssets = getMetric(stmt, 'totalAssets');
   const equity = getMetric(stmt, 'equity');
+  const managedPortfolio = getMetric(stmt, 'managedPortfolio');
+  const pastDuePortfolio = getMetric(stmt, 'pastDuePortfolio');
+  const loanLossReserves = getMetric(stmt, 'loanLossReserves');
+  const netPortfolio = getMetric(stmt, 'netPortfolio');
+  const productiveAssets = getMetric(stmt, 'productiveAssets');
+  const fundingDebt = addValues(banksFundsShortTerm, banksFundsLongTerm) ?? totalDebt;
+  const costOfFunding = div(interest, fundingDebt);
+  const portfolioYield = div(interestIncome, managedPortfolio);
   const miss = (items: Array<[string, number | null]>) => items.filter(([, value]) => value === null).map(([label]) => label);
   return [
     { key: 'revenue', label: 'Ingresos', value: revenue, formula: 'Cuenta extraída: ingresos/ventas', missing: miss([['Ingresos', revenue]]) },
     { key: 'ebitda', label: 'EBITDA', value: ebitda, formula: 'EBITDA o utilidad de operación', missing: miss([['EBITDA', ebitda]]) },
+    { key: 'ifnb_financial_margin', label: 'Margen Financiero', value: div(adjustedFinancialMargin, coreBusinessIncome), formula: 'Margen financiero ajustado / (ingresos por intereses + ingresos por comisiones)', missing: miss([['Margen financiero ajustado', adjustedFinancialMargin], ['Ingresos core', coreBusinessIncome]]) },
+    { key: 'ifnb_operating_profitability', label: 'Rentabilidad Operativa', value: div(adjustedOperatingIncome, coreBusinessIncome), formula: 'Utilidad operativa ajustada / ingresos core del negocio', missing: miss([['Utilidad operativa ajustada', adjustedOperatingIncome], ['Ingresos core', coreBusinessIncome]]) },
+    { key: 'ifnb_net_margin', label: 'Margen Neto', value: div(netIncome, coreBusinessIncome), formula: 'Utilidad neta / ingresos core del negocio', missing: miss([['Utilidad neta', netIncome], ['Ingresos core', coreBusinessIncome]]) },
+    { key: 'ifnb_operating_efficiency', label: 'Eficiencia Operativa', value: div(adminSellingOperatingExpenses, coreBusinessIncome), formula: 'Gastos de administración, venta y operación / ingresos core del negocio', missing: miss([['Gastos adm., venta y operación', adminSellingOperatingExpenses], ['Ingresos core', coreBusinessIncome]]) },
     { key: 'debt_ebitda', label: 'Deuda / EBITDA', value: div(totalDebt, ebitda), formula: 'Deuda total / EBITDA', missing: miss([['Deuda total', totalDebt], ['EBITDA', ebitda]]) },
     { key: 'dscr', label: 'DSCR', value: div(ebitda, interest), formula: 'EBITDA / gasto financiero', missing: miss([['EBITDA', ebitda], ['Gasto financiero', interest]]) },
     { key: 'current_ratio', label: 'Razón Corriente', value: div(currentAssets, currentLiabilities), formula: 'Activo corriente / Pasivo corriente', missing: miss([['Activo corriente', currentAssets], ['Pasivo corriente', currentLiabilities]]) },
-    { key: 'leverage', label: 'Deuda / Capital', value: div(totalDebt, equity), formula: 'Deuda total / capital contable', missing: miss([['Deuda total', totalDebt], ['Capital contable', equity]]) },
-    { key: 'capitalization', label: 'Capitalización', value: div(equity, totalAssets), formula: 'Capital contable / activos totales', missing: miss([['Capital contable', equity], ['Activos totales', totalAssets]]) },
+    { key: 'leverage', label: 'Apalancamiento', value: div(fundingDebt, totalAssets), formula: '(Bancos y fondos CP + LP) / total activo', missing: miss([['Bancos y fondos CP + LP', fundingDebt], ['Activos totales', totalAssets]]) },
+    { key: 'debt_equity', label: 'Deuda / Capital', value: div(totalDebt, equity), formula: 'Deuda total / capital contable', missing: miss([['Deuda total', totalDebt], ['Capital contable', equity]]) },
+    { key: 'capitalization', label: 'ICAP', value: div(equity, totalAssets), formula: 'Capital contable / activos totales', missing: miss([['Capital contable', equity], ['Activos totales', totalAssets]]) },
+    { key: 'adjusted_capitalization', label: 'ICAP Ajustado', value: div(equity, netPortfolio), formula: 'Capital contable / cartera neta', missing: miss([['Capital contable', equity], ['Cartera neta', netPortfolio]]) },
     { key: 'roa', label: 'ROA', value: div(netIncome, totalAssets), formula: 'Utilidad neta / activos totales', missing: miss([['Utilidad neta', netIncome], ['Activos totales', totalAssets]]) },
     { key: 'roe', label: 'ROE', value: div(netIncome, equity), formula: 'Utilidad neta / capital contable', missing: miss([['Utilidad neta', netIncome], ['Capital contable', equity]]) },
+    { key: 'past_due_portfolio', label: 'Cartera Vencida', value: div(pastDuePortfolio, managedPortfolio), formula: 'Cartera vencida / cartera administrada', missing: miss([['Cartera vencida', pastDuePortfolio], ['Cartera administrada', managedPortfolio]]) },
+    { key: 'net_past_due_portfolio', label: 'Cartera Vencida Neta', value: div(subtractValues(pastDuePortfolio, loanLossReserves), managedPortfolio), formula: '(Cartera vencida - estimación preventiva) / cartera administrada', missing: miss([['Cartera vencida', pastDuePortfolio], ['Estimación preventiva', loanLossReserves], ['Cartera administrada', managedPortfolio]]) },
+    { key: 'past_due_coverage', label: 'Índice de Cobertura de Cartera Vencida', value: div(loanLossReserves, pastDuePortfolio), formula: 'Estimación preventiva / cartera vencida', missing: miss([['Estimación preventiva', loanLossReserves], ['Cartera vencida', pastDuePortfolio]]) },
+    { key: 'debt_coverage_productive_assets', label: 'Cobertura de Deuda', value: div(productiveAssets, totalLiabilities), formula: 'Activos productivos / total pasivo', missing: miss([['Activos productivos', productiveAssets], ['Total pasivo', totalLiabilities]]) },
+    { key: 'funding_cost', label: 'Costo de Fondeo Aproximado', value: costOfFunding, formula: 'Gasto financiero / bancos y fondos CP + LP', missing: miss([['Gasto financiero', interest], ['Bancos y fondos CP + LP', fundingDebt]]) },
+    { key: 'portfolio_yield', label: 'Rendimiento de Cartera (Yield)', value: portfolioYield, formula: 'Ingresos por intereses / cartera administrada', missing: miss([['Ingresos por intereses', interestIncome], ['Cartera administrada', managedPortfolio]]) },
+    { key: 'financial_spread', label: 'Spread Financiero Aproximado', value: portfolioYield !== null && costOfFunding !== null ? portfolioYield - costOfFunding : null, formula: 'Rendimiento de cartera - costo de fondeo aproximado', missing: miss([['Rendimiento de cartera', portfolioYield], ['Costo de fondeo', costOfFunding]]) },
+    { key: 'immediate_liquidity', label: 'Liquidez Inmediata', value: div(addValues(getMetric(stmt, 'cash'), getMetric(stmt, 'availableInvestments')), currentLiabilities), formula: '(Bancos + inversiones disponibles no comprometidas) / pasivo corriente', missing: miss([['Bancos + inversiones disponibles', addValues(getMetric(stmt, 'cash'), getMetric(stmt, 'availableInvestments'))], ['Pasivo corriente', currentLiabilities]]) },
+    { key: 'past_due_to_equity', label: 'Cartera Vencida / Capital Contable', value: div(pastDuePortfolio, equity), formula: 'Cartera vencida / capital contable', missing: miss([['Cartera vencida', pastDuePortfolio], ['Capital contable', equity]]) },
   ];
 }
 
@@ -159,10 +269,25 @@ export function standardRatioFormula(key: string): string {
     key === 'debt_ebitda' ? 'ratio:totalDebt/ebitda' :
     key === 'dscr' ? 'ratio:ebitda/interestExpense' :
     key === 'current_ratio' ? 'ratio:currentAssets/currentLiabilities' :
-    key === 'leverage' ? 'ratio:totalDebt/equity' :
+    key === 'leverage' ? 'expr:["(","ref:banksFundsShortTerm","+","ref:banksFundsLongTerm",")","/","ref:totalAssets"]' :
+    key === 'debt_equity' ? 'ratio:totalDebt/equity' :
     key === 'capitalization' ? 'ratio:equity/totalAssets' :
+    key === 'adjusted_capitalization' ? 'ratio:equity/netPortfolio' :
     key === 'roa' ? 'ratio:netIncome/totalAssets' :
     key === 'roe' ? 'ratio:netIncome/equity' :
+    key === 'ifnb_financial_margin' ? 'ratio:adjustedFinancialMargin/coreBusinessIncome' :
+    key === 'ifnb_operating_profitability' ? 'ratio:adjustedOperatingIncome/coreBusinessIncome' :
+    key === 'ifnb_net_margin' ? 'ratio:netIncome/coreBusinessIncome' :
+    key === 'ifnb_operating_efficiency' ? 'ratio:adminSellingOperatingExpenses/coreBusinessIncome' :
+    key === 'past_due_portfolio' ? 'ratio:pastDuePortfolio/managedPortfolio' :
+    key === 'net_past_due_portfolio' ? 'expr:["(","ref:pastDuePortfolio","-","ref:loanLossReserves",")","/","ref:managedPortfolio"]' :
+    key === 'past_due_coverage' ? 'ratio:loanLossReserves/pastDuePortfolio' :
+    key === 'debt_coverage_productive_assets' ? 'ratio:productiveAssets/totalLiabilities' :
+    key === 'funding_cost' ? 'expr:["ref:interestExpense","/","(","ref:banksFundsShortTerm","+","ref:banksFundsLongTerm",")"]' :
+    key === 'portfolio_yield' ? 'ratio:interestIncome/managedPortfolio' :
+    key === 'financial_spread' ? 'expr:["ref:interestIncome","/","ref:managedPortfolio","-","ref:interestExpense","/","(","ref:banksFundsShortTerm","+","ref:banksFundsLongTerm",")"]' :
+    key === 'immediate_liquidity' ? 'expr:["(","ref:cash","+","ref:availableInvestments",")","/","ref:currentLiabilities"]' :
+    key === 'past_due_to_equity' ? 'ratio:pastDuePortfolio/equity' :
     key
   );
 }
@@ -295,7 +420,8 @@ export function evaluateCovenantForStatement(cov: Covenant_DB, stmt: FinancialSt
   const formula = cov.formulaByPeriod?.[stmt.period] || cov.formula || cov.name;
   const value = evaluateFormula(formula, stmt);
   if (value === null || cov.operator === 'none') return { value, status: 'cumple', formula };
-  const threshold = parseNullableFinancialNumber(cov.threshold);
+  const parsedThreshold = parseNullableFinancialNumber(cov.threshold);
+  const threshold = parsedThreshold !== null && /%/.test(cov.threshold) ? parsedThreshold / 100 : parsedThreshold;
   if (threshold === null) return { value, status: 'cumple', formula };
   let ok = true;
   if (cov.operator === 'gt') ok = value > threshold;

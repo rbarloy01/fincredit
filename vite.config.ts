@@ -349,6 +349,78 @@ export default defineConfig(({ mode }) => {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
         'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
       },
+      build: {
+        chunkSizeWarningLimit: 1000,
+        rollupOptions: {
+          output: {
+            manualChunks(id) {
+              if (!id.includes('node_modules')) return;
+
+              if (id.includes('/react/') || id.includes('/react-dom/') || id.includes('/scheduler/')) {
+                return 'vendor-react';
+              }
+              if (id.includes('/@supabase/')) {
+                return 'vendor-supabase';
+              }
+              if (id.includes('/@google/genai/') || id.includes('/googleapis/')) {
+                return 'vendor-ai';
+              }
+              if (id.includes('/recharts/') || id.includes('/d3-') || id.includes('/victory-vendor/')) {
+                return 'vendor-charts';
+              }
+              if (id.includes('/html2canvas/')) {
+                return 'vendor-html-canvas';
+              }
+              if (id.includes('/jspdf/')) {
+                return 'vendor-jspdf';
+              }
+              if (id.includes('/html2pdf.js/') || id.includes('/canvg/') || id.includes('/dompurify/') || id.includes('/core-js/')) {
+                return 'vendor-pdf-helpers';
+              }
+              if (
+                id.includes('/jszip/') ||
+                id.includes('/pako/') ||
+                id.includes('/archiver/') ||
+                id.includes('/archiver-utils/') ||
+                id.includes('/zip-stream/') ||
+                id.includes('/compress-commons/') ||
+                id.includes('/unzipper/') ||
+                id.includes('/tar-stream/')
+              ) {
+                return 'vendor-archive';
+              }
+              if (
+                id.includes('/fast-csv/') ||
+                id.includes('/@fast-csv/') ||
+                id.includes('/readable-stream/') ||
+                id.includes('/buffer/') ||
+                id.includes('/string_decoder/') ||
+                id.includes('/saxes/')
+              ) {
+                return 'vendor-excel-io';
+              }
+              if (id.includes('/xlsx/')) {
+                return 'vendor-spreadsheet';
+              }
+              if (id.includes('/exceljs/lib/xlsx/') || id.includes('/exceljs/dist/')) {
+                return 'vendor-excel-xlsx';
+              }
+              if (id.includes('/exceljs/lib/doc/')) {
+                return 'vendor-excel-doc';
+              }
+              if (id.includes('/exceljs/lib/utils/')) {
+                return 'vendor-excel-utils';
+              }
+              if (id.includes('/exceljs/lib/csv/')) {
+                return 'vendor-excel-csv';
+              }
+              if (id.includes('/exceljs/')) {
+                return 'vendor-excel-export';
+              }
+            },
+          },
+        },
+      },
       resolve: {
         alias: {
           '@': path.resolve(__dirname, '.'),

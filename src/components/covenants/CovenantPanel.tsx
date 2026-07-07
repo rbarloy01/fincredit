@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { db, Covenant_DB, CovenantAnnotation, FinancialStatement_DB } from '../../db/index';
+import { db, Covenant_DB, CovenantAnnotation, FinancialStatement_DB, Transaction } from '../../db/index';
 import { Session } from '../../services/auth';
 import {
   Plus, ChevronDown, ChevronRight, MessageCircle, Send,
@@ -96,14 +96,16 @@ interface CovenantFormData {
   threshold: string;
   operator: 'gt' | 'lt' | 'gte' | 'lte' | 'none';
   description: string;
+  transactionId: string;
 }
 
 const EMPTY_FORM: CovenantFormData = {
-  name: '', type: 'financial', formula: '', threshold: '', operator: 'lte', description: ''
+  name: '', type: 'financial', formula: '', threshold: '', operator: 'lte', description: '', transactionId: ''
 };
 
 const CovenantPanel: React.FC<Props> = ({ clientId, session, statements, onCovenantsChange }) => {
   const [covenants, setCovenants] = useState<Covenant_DB[]>([]);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [annotations, setAnnotations] = useState<Record<string, CovenantAnnotation[]>>({});
   const [expanded, setExpanded] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -115,7 +117,8 @@ const CovenantPanel: React.FC<Props> = ({ clientId, session, statements, onCoven
   const notesEndRef = useRef<HTMLDivElement>(null);
 
   const loadData = async () => {
-    const covs = await db.getCovenants(clientId);
+    const [covs, txs] = await Promise.all([db.getCovenants(clientId), db.getTransactions(clientId)]);
+    setTransactions(txs);
     setCovenants(covs);
     onCovenantsChange(covs);
     // Load annotations for expanded covenant
@@ -141,6 +144,7 @@ const CovenantPanel: React.FC<Props> = ({ clientId, session, statements, onCoven
     try {
       await db.createCovenant({
         clientId,
+        transactionId: form.transactionId || undefined,
         name: form.name.trim(),
         type: form.type,
         formula: form.formula.trim(),
@@ -162,6 +166,11 @@ const CovenantPanel: React.FC<Props> = ({ clientId, session, statements, onCoven
   const handleDeleteCovenant = async (id: string) => {
     if (!confirm('¿Eliminar este covenant?')) return;
     await db.deleteCovenant(id);
+    await loadData();
+  };
+
+  const saveTransactionLink = async (cov: Covenant_DB, transactionId: string) => {
+    await db.updateCovenant(cov.id, { transactionId: transactionId || null } as Partial<Covenant_DB>);
     await loadData();
   };
 
@@ -187,6 +196,7 @@ const CovenantPanel: React.FC<Props> = ({ clientId, session, statements, onCoven
   };
 
   const filtered = covenants.filter(c => filter === 'all' || c.type === filter);
+  const transactionName = (transactionId?: string) => transactions.find(tx => tx.id === transactionId)?.name || '';
   const grouped: Record<string, Covenant_DB[]> = {};
   for (const cov of filtered) {
     if (!grouped[cov.type]) grouped[cov.type] = [];
@@ -245,6 +255,15 @@ const CovenantPanel: React.FC<Props> = ({ clientId, session, statements, onCoven
                 <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Nombre *</label>
                 <input className={inputClass} value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} placeholder="Nombre del covenant" required />
               </div>
+              {transactions.length > 0 && (
+                <div>
+                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Facility / Transacción</label>
+                  <select className={inputClass} value={form.transactionId} onChange={e => setForm(p => ({ ...p, transactionId: e.target.value }))}>
+                    <option value="">General del cliente</option>
+                    {transactions.map(tx => <option key={tx.id} value={tx.id}>{tx.name}</option>)}
+                  </select>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Tipo</label>
@@ -333,6 +352,7 @@ const CovenantPanel: React.FC<Props> = ({ clientId, session, statements, onCoven
                             {TYPE_LABELS[cov.type]}
                           </span>
                           <StatusBadge status={status} />
+                          {transactionName(cov.transactionId) && <span className="text-[10px] font-black bg-slate-100 text-slate-700 border border-slate-200 rounded-full px-2 py-0.5">{transactionName(cov.transactionId)}</span>}
                         </div>
                         {cov.type === 'financial' && (
                           <div className="flex items-center gap-3 mt-1 text-xs text-slate-500">
@@ -366,6 +386,15 @@ const CovenantPanel: React.FC<Props> = ({ clientId, session, statements, onCoven
                     {/* Expanded detail + annotations */}
                     {isExpanded && (
                       <div className="border-t border-slate-100 bg-slate-50">
+                        {transactions.length > 0 && (
+                          <div className="px-6 py-4 border-b border-slate-100">
+                            <label className="text-xs font-bold text-slate-500 uppercase tracking-wider block mb-2">Facility / Transacción</label>
+                            <select value={cov.transactionId || ''} onChange={e => saveTransactionLink(cov, e.target.value)} className={inputClass}>
+                              <option value="">General del cliente</option>
+                              {transactions.map(tx => <option key={tx.id} value={tx.id}>{tx.name}</option>)}
+                            </select>
+                          </div>
+                        )}
                         {/* Description */}
                         {cov.description && (
                           <div className="px-6 py-4 border-b border-slate-100">

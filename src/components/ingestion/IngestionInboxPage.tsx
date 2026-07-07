@@ -268,6 +268,7 @@ const IngestionInboxPage: React.FC<Props> = ({ session }) => {
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'needs_review' | 'pending' | 'done' | 'error'>('needs_review');
   const [rootFolderId, setRootFolderId] = useState('');
+  const [autoCreateClients, setAutoCreateClients] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [apiState, setApiState] = useState<ApiState>({});
@@ -367,9 +368,13 @@ const IngestionInboxPage: React.FC<Props> = ({ session }) => {
     setMessage(null);
     setError(null);
     try {
-      const json = await postJson('/api/drive/sync', rootFolderId.trim() ? { rootFolderId: rootFolderId.trim() } : {});
+      const json = await postJson('/api/drive/sync', {
+        ...(rootFolderId.trim() ? { rootFolderId: rootFolderId.trim() } : {}),
+        autoCreateClients,
+      });
       setApiState(prev => ({ ...prev, sync: json }));
-      setMessage(`Drive sincronizado: ${json.insertedOrUpdated || 0} documentos actualizados.`);
+      const created = Array.isArray(json.createdClients) ? json.createdClients.length : 0;
+      setMessage(`Drive sincronizado: ${json.insertedOrUpdated || 0} documentos actualizados${created ? ` · ${created} acreditados creados` : ''}.`);
       await loadData();
     } catch (err: any) {
       setApiState(prev => ({ ...prev, sync: null }));
@@ -493,6 +498,15 @@ const IngestionInboxPage: React.FC<Props> = ({ session }) => {
                 Sync
               </button>
             </div>
+            <label className="mt-3 flex items-center gap-2 text-xs font-bold text-slate-600">
+              <input
+                type="checkbox"
+                checked={autoCreateClients}
+                onChange={event => setAutoCreateClients(event.target.checked)}
+                className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+              />
+              Crear acreditados faltantes desde carpetas
+            </label>
             <button
               onClick={() => processDocuments()}
               disabled={apiState.process?.loading}

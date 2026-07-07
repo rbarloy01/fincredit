@@ -34,6 +34,7 @@ export interface SheetDef {
 }
 
 export type VerticalBaseConfig = Record<string, string>;
+export type TransactionNameMap = Record<string, string>;
 export interface DefinedConcept {
   id: string;
   name: string;
@@ -58,6 +59,13 @@ function formulaLabelsFromStatements(statements: FinancialStatement_DB[], concep
 function todayStamp(): string {
   const d = new Date();
   return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function safeFilePart(value: string): string {
+  return (value || 'Cliente')
+    .replace(/[\\/:*?"<>|]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || 'Cliente';
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -126,8 +134,23 @@ export function applyPdfStyles(clonedDoc: Document) {
       transition: none !important;
       animation: none !important;
     }
-    body { margin: 0 !important; padding: 0 !important; background: #ffffff !important; }
+    html, body { margin: 0 !important; padding: 0 !important; background: #ffffff !important; }
+    .export-page {
+      width: 1120px !important;
+      max-width: 1120px !important;
+      min-width: 1120px !important;
+      background: #ffffff !important;
+      border-radius: 0 !important;
+      overflow: visible !important;
+    }
     .export-page, .export-page * { font-family: Arial, Helvetica, sans-serif !important; }
+    .export-page .recharts-wrapper,
+    .export-page .recharts-surface {
+      overflow: visible !important;
+    }
+    .export-page svg {
+      max-width: none !important;
+    }
     table td, table th { vertical-align: middle !important; line-height: 1.2 !important; }
     .shadow-2xl, .shadow-sm, .shadow-lg, .shadow-xl, .shadow-md { box-shadow: none !important; }
   `;
@@ -135,10 +158,27 @@ export function applyPdfStyles(clonedDoc: Document) {
 }
 
 function canvasOpts(el: HTMLElement) {
+  const minExportWidth = el.classList.contains('export-page') ? 1120 : 1;
+  const width = Math.max(el.scrollWidth, el.offsetWidth, el.getBoundingClientRect().width, minExportWidth);
+  const height = Math.max(el.scrollHeight, el.offsetHeight, el.getBoundingClientRect().height, 1);
   return {
     scale: 2, useCORS: true, logging: false, backgroundColor: '#ffffff',
-    imageTimeout: 0, windowWidth: el.scrollWidth, windowHeight: el.scrollHeight,
-    scrollX: 0, scrollY: 0, onclone: applyPdfStyles,
+    imageTimeout: 0,
+    width,
+    height,
+    windowWidth: width,
+    windowHeight: height,
+    scrollX: 0,
+    scrollY: 0,
+    onclone: (clonedDoc: Document) => {
+      applyPdfStyles(clonedDoc);
+      const clonedEl = el.id ? clonedDoc.getElementById(el.id) : null;
+      if (clonedEl) {
+        clonedEl.style.width = `${width}px`;
+        clonedEl.style.minWidth = `${width}px`;
+        clonedEl.style.maxWidth = `${width}px`;
+      }
+    },
   } as const;
 }
 
@@ -150,12 +190,31 @@ export async function exportToPng(el: HTMLElement, filename: string): Promise<vo
 async function renderPage(el: HTMLElement, pdf: jsPDF, addPage = false): Promise<void> {
   const PW = 210, PH = 297;
   const canvas = await html2canvas(el, canvasOpts(el));
-  const imgData = canvas.toDataURL('image/jpeg', 0.95);
-  const imgH = (canvas.height * PW) / canvas.width;
-  if (addPage) pdf.addPage();
-  let fW = PW, fH = imgH, x = 0, y = 0;
-  if (fH > PH) { fH = PH; fW = PH * (canvas.width / canvas.height); x = (PW - fW) / 2; }
-  pdf.addImage(imgData, 'JPEG', x, y, fW, fH);
+  const pagePxHeight = Math.floor((canvas.width * PH) / PW);
+  let sourceY = 0;
+  let firstSlice = true;
+
+  while (sourceY < canvas.height) {
+    const sliceHeight = Math.min(pagePxHeight, canvas.height - sourceY);
+    if (sliceHeight <= 0) break;
+    const pageCanvas = document.createElement('canvas');
+    pageCanvas.width = canvas.width;
+    pageCanvas.height = sliceHeight;
+    const ctx = pageCanvas.getContext('2d');
+    if (!ctx) break;
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
+    ctx.drawImage(canvas, 0, sourceY, canvas.width, sliceHeight, 0, 0, canvas.width, sliceHeight);
+
+    if (addPage || !firstSlice) pdf.addPage();
+    const imgData = pageCanvas.toDataURL('image/jpeg', 0.95);
+    const imgH = (sliceHeight * PW) / canvas.width;
+    pdf.addImage(imgData, 'JPEG', 0, 0, PW, imgH);
+
+    sourceY += sliceHeight;
+    firstSlice = false;
+  }
 }
 
 export async function exportToPdf(pages: HTMLElement[], filename: string): Promise<void> {
@@ -193,6 +252,7 @@ export async function exportToExcel(sheets: SheetDef[], filename: string): Promi
   const wb = new ExcelJS.Workbook();
   wb.creator = 'FinMonitor';
   wb.created = new Date();
+  wb.calcProperties.fullCalcOnLoad = true;
 
   for (const sheet of sheets) {
     const ws = wb.addWorksheet(sheet.name.slice(0, 31));
@@ -223,7 +283,7 @@ export async function exportToExcel(sheets: SheetDef[], filename: string): Promi
       }
 
       const exRow = ws.addRow(raw.map(c => {
-        if (typeof c === 'string' && c.startsWith('=')) return { formula: c.slice(1) } as any;
+        if (typeof c === 'string' && c.startsWith('=')) return { formula: c.slice(1), result: null } as any;
         return c ?? '';
       }));
       const wrappedLineCount = Math.max(1, ...(sheet.wrapColumns || []).map(col => {
@@ -276,7 +336,7 @@ export async function exportToExcel(sheets: SheetDef[], filename: string): Promi
   const buf = await wb.xlsx.writeBuffer();
   downloadBlob(
     new Blob([buf as ArrayBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
-    `${todayStamp()} - ${filename}.xlsx`,
+    `${todayStamp()} - ${safeFilePart(filename)}.xlsx`,
   );
 }
 
@@ -395,6 +455,93 @@ function formulaToExcel(formula: string, periodHeaderCell: string): string {
   return '=""';
 }
 
+function covenantDataRowMap(statements: FinancialStatement_DB[], concepts: DefinedConcept[] = []): Record<string, number> {
+  const rows: Record<string, number> = {};
+  let row = 2;
+  [
+    'revenue',
+    'ebitda',
+    'interestExpense',
+    'netIncome',
+    'currentAssets',
+    'currentLiabilities',
+    'totalDebt',
+    'totalAssets',
+    'equity',
+  ].forEach(key => { rows[key] = row++; });
+
+  const rawKeys = new Map<string, string>();
+  const periods = normalizedPeriods(statements);
+  periods.forEach(p => p.stmt.rawLineItems.forEach(item => rawKeys.set(`account:${rawAccountKey(item)}`, item.name)));
+  Array.from(rawKeys.keys()).forEach(key => { rows[key] = row++; });
+  concepts.forEach(concept => { rows[`concept:${concept.id}`] = row++; });
+  return rows;
+}
+
+function formulaToExcelCellRefs(formula: string, dataCol: string, rowMap: Record<string, number>): string {
+  const f = (formula || '').trim();
+  const ref = (key: string) => {
+    const row = rowMap[key];
+    return row ? `'Datos Covenant'!${dataCol}$${row}` : '0';
+  };
+  if (f.startsWith('expr:')) {
+    try {
+      const tokens = JSON.parse(f.slice('expr:'.length)) as string[];
+      const body = tokens.map(t => {
+        if (t.startsWith('ref:')) return ref(t.slice(4));
+        if (t.startsWith('num:')) return t.slice(4);
+        return t;
+      }).join('');
+      return `=IFERROR(${body},"")`;
+    } catch {
+      return '=""';
+    }
+  }
+  if (f.startsWith('ratio:')) {
+    const [num, den] = f.slice('ratio:'.length).split('/');
+    return num && den ? `=IFERROR(${ref(num)}/${ref(den)},"")` : '=""';
+  }
+  const low = f.toLowerCase();
+  if (low.includes('deuda') && low.includes('ebitda')) return `=IFERROR(${ref('totalDebt')}/${ref('ebitda')},"")`;
+  if (low.includes('dscr') || (low.includes('ebitda') && low.includes('interes'))) return `=IFERROR(${ref('ebitda')}/${ref('interestExpense')},"")`;
+  if (low.includes('corriente') || low.includes('liquidez')) return `=IFERROR(${ref('currentAssets')}/${ref('currentLiabilities')},"")`;
+  if (low.includes('roa')) return `=IFERROR(${ref('netIncome')}/${ref('totalAssets')},"")`;
+  if (low.includes('roe')) return `=IFERROR(${ref('netIncome')}/${ref('equity')},"")`;
+  if (low.includes('apalanc') || low.includes('equity') || low.includes('capital')) return `=IFERROR(${ref('totalDebt')}/${ref('equity')},"")`;
+  return '=""';
+}
+
+function textFormula(value: string) {
+  return value.startsWith('=') ? `'${value}` : value;
+}
+
+function covenantOperatorLabel(operator: Covenant_DB['operator']) {
+  if (operator === 'gt') return '>';
+  if (operator === 'gte') return '>=';
+  if (operator === 'lt') return '<';
+  if (operator === 'lte') return '<=';
+  return '';
+}
+
+function covenantIsMinimum(operator: Covenant_DB['operator']) {
+  return operator === 'gt' || operator === 'gte';
+}
+
+function covenantCompareFormula(actualCell: string, limitCell: string, operator: Covenant_DB['operator']) {
+  const compare =
+    operator === 'gt' ? `${actualCell}>${limitCell}` :
+    operator === 'gte' ? `${actualCell}>=${limitCell}` :
+    operator === 'lt' ? `${actualCell}<${limitCell}` :
+    operator === 'lte' ? `${actualCell}<=${limitCell}` :
+    'TRUE';
+  return `=IF(OR(NOT(ISNUMBER(${actualCell})),NOT(ISNUMBER(${limitCell}))),"",IF(${compare},"CUMPLE","INCUMPLE"))`;
+}
+
+function covenantCushionFormula(actualCell: string, limitCell: string, operator: Covenant_DB['operator']) {
+  const body = covenantIsMinimum(operator) ? `${actualCell}-${limitCell}` : `${limitCell}-${actualCell}`;
+  return `=IF(OR(NOT(ISNUMBER(${actualCell})),NOT(ISNUMBER(${limitCell}))),"",${body})`;
+}
+
 function nrm(v: string) {
   return v.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
 }
@@ -501,37 +648,161 @@ function rawValueByKey(stmt: FinancialStatement_DB, key: string) {
 }
 
 function verticalBaseValue(stmt: FinancialStatement_DB, segment: string, bases: VerticalBaseConfig = {}, concepts: DefinedConcept[] = []) {
+  const find = (names: string[]) => stmt.rawLineItems.find(i => {
+    const n = nkey(i.name);
+    return names.some(name => n.includes(nkey(name)));
+  })?.value ?? null;
+  const totalAssets = stmt.mappedData.totalAssets || find(['suma del activo', 'total activo', 'activos totales']);
+  if (segment === 'ACTIVO' || segment === 'PASIVO' || segment === 'CAPITAL' || segment === 'Balance General sin clasificar') {
+    return totalAssets;
+  }
+
   const customKey = bases[segment];
   if (customKey) {
     const concept = customKey.startsWith('concept:') ? concepts.find(c => c.id === customKey.slice('concept:'.length)) : undefined;
     const custom = concept ? evaluateFormula(`expr:${JSON.stringify(concept.tokens)}`, stmt) : rawValueByKey(stmt, customKey);
     if (custom !== null) return custom;
   }
-  const find = (names: string[]) => stmt.rawLineItems.find(i => {
-    const n = nkey(i.name);
-    return names.some(name => n.includes(nkey(name)));
-  })?.value ?? null;
-  if (segment === 'ACTIVO' || segment === 'Balance General sin clasificar') return stmt.mappedData.totalAssets || find(['suma del activo', 'total activo', 'activos totales']);
-  if (segment === 'PASIVO') return find(['suma del pasivo', 'total pasivo', 'pasivos totales']) || stmt.mappedData.totalDebt || null;
-  if (segment === 'CAPITAL') return stmt.mappedData.equity || find(['suma del capital', 'total capital', 'capital contable', 'patrimonio']);
   if (segment === 'Estado de Resultados') return stmt.mappedData.revenue || find(['total ingresos', 'ingresos', 'ventas']);
   return null;
 }
 
-function addAnalysisRow(rows: SheetDef['rows'], label: string, section: string, key: string, periods: Array<{ label: string; stmt: FinancialStatement_DB }>, bases: VerticalBaseConfig = {}, concepts: DefinedConcept[] = []) {
+function valueColForAnalysisPeriod(periodIndex: number) {
+  return 3 + periodIndex * 2;
+}
+
+function verticalColForAnalysisPeriod(periodIndex: number) {
+  return 4 + periodIndex * 2;
+}
+
+function horizontalDeltaCol(periodCount: number, priorPeriodIndex: number) {
+  return 3 + periodCount * 2 + priorPeriodIndex * 2;
+}
+
+function isBalanceTotalAccount(name: string, segment: string) {
+  if (segment === 'Estado de Resultados') return false;
+  return /(total|suma)/.test(nkey(name));
+}
+
+function totalLabelForSection(section: string) {
+  if (section === 'ACTIVO') return 'TOTAL ACTIVO';
+  if (section === 'PASIVO') return 'TOTAL PASIVO';
+  if (section === 'CAPITAL') return 'TOTAL CAPITAL CONTABLE';
+  if (section === 'Estado de Resultados') return 'INGRESOS TOTALES';
+  return `TOTAL ${section.toUpperCase()}`;
+}
+
+function sumFormulaForRows(rowNumbers: number[], valueCol: number) {
+  if (!rowNumbers.length) return null;
+  return `=SUM(${rowNumbers.map(row => `${colName(valueCol)}${row}`).join(',')})`;
+}
+
+function totalValueForSection(
+  stmt: FinancialStatement_DB,
+  section: string,
+  valueCol: number,
+  detailRows: number[],
+  bases: VerticalBaseConfig = {},
+  concepts: DefinedConcept[] = [],
+) {
+  const detailSum = sumFormulaForRows(detailRows, valueCol);
+  const base = verticalBaseValue(stmt, section, bases, concepts);
+
+  if (section === 'ACTIVO' || section === 'Estado de Resultados') return base ?? detailSum;
+  if (section === 'CAPITAL') return stmt.mappedData.equity || detailSum;
+  if (section === 'PASIVO') {
+    const totalAssets = verticalBaseValue(stmt, 'ACTIVO', bases, concepts);
+    const equity = stmt.mappedData.equity || null;
+    if (totalAssets !== null && equity !== null) return totalAssets - equity;
+    return detailSum;
+  }
+
+  return detailSum ?? base;
+}
+
+function addVerticalBaseRow(
+  rows: SheetDef['rows'],
+  section: string,
+  periods: Array<{ label: string; stmt: FinancialStatement_DB }>,
+  detailRows: number[],
+  denominatorRowNumber?: number,
+  bases: VerticalBaseConfig = {},
+  concepts: DefinedConcept[] = [],
+) {
+  const rowNumber = rows.length + 1;
+  const row: SheetDef['rows'][0] = [totalLabelForSection(section), section];
+  const denominatorRow = denominatorRowNumber || rowNumber;
+  periods.forEach((p, i) => {
+    const valueCol = valueColForAnalysisPeriod(i);
+    row.push(totalValueForSection(p.stmt, section, valueCol, detailRows, bases, concepts));
+    row.push(`=IFERROR(${colName(valueCol)}${rowNumber}/${colName(valueCol)}$${denominatorRow},"")`);
+  });
+  periods.slice(1).forEach((_, i) => {
+    const prevValueCol = valueColForAnalysisPeriod(i);
+    const valueCol = valueColForAnalysisPeriod(i + 1);
+    row.push(`=IFERROR(${colName(valueCol)}${rowNumber}-${colName(prevValueCol)}${rowNumber},"")`);
+    row.push(`=IFERROR((${colName(valueCol)}${rowNumber}-${colName(prevValueCol)}${rowNumber})/ABS(${colName(prevValueCol)}${rowNumber}),"")`);
+  });
+  rows.push(row);
+  return rowNumber;
+}
+
+function addAnalysisRow(rows: SheetDef['rows'], label: string, section: string, key: string, periods: Array<{ label: string; stmt: FinancialStatement_DB }>, baseRowNumber: number) {
+  const rowNumber = rows.length + 1;
   const row: SheetDef['rows'][0] = [label, section];
   const values = periods.map(p => rawValueByKey(p.stmt, key));
   values.forEach((value, i) => {
-    const base = verticalBaseValue(periods[i].stmt, section, bases, concepts);
+    const valueCol = valueColForAnalysisPeriod(i);
     row.push(value);
-    row.push(value !== null && base ? value / base : null);
+    row.push(`=IFERROR(IF(${colName(valueCol)}${rowNumber}="","",${colName(valueCol)}${rowNumber}/${colName(valueCol)}$${baseRowNumber}),"")`);
   });
-  values.slice(1).forEach((value, i) => {
-    const prev = values[i];
-    row.push(value !== null && prev !== null ? value - prev : null);
-    row.push(value !== null && prev !== null && prev !== 0 ? (value - prev) / Math.abs(prev) : null);
+  periods.slice(1).forEach((_, i) => {
+    const prevValueCol = valueColForAnalysisPeriod(i);
+    const valueCol = valueColForAnalysisPeriod(i + 1);
+    row.push(`=IFERROR(${colName(valueCol)}${rowNumber}-${colName(prevValueCol)}${rowNumber},"")`);
+    row.push(`=IFERROR((${colName(valueCol)}${rowNumber}-${colName(prevValueCol)}${rowNumber})/ABS(${colName(prevValueCol)}${rowNumber}),"")`);
   });
   rows.push(row);
+  return rowNumber;
+}
+
+function addBalanceCheckRows(rows: SheetDef['rows'], periods: Array<{ label: string; stmt: FinancialStatement_DB }>, totalRows: Record<string, number>) {
+  const assetRow = totalRows.ACTIVO;
+  const liabilityRow = totalRows.PASIVO;
+  const equityRow = totalRows.CAPITAL;
+  if (!assetRow || !liabilityRow || !equityRow) return;
+
+  rows.push([]);
+
+  const liabilityEquityRowNumber = rows.length + 1;
+  const liabilityEquityRow: SheetDef['rows'][0] = ['TOTAL PASIVO + CAPITAL', 'Balance General'];
+  periods.forEach((_, i) => {
+    const valueCol = valueColForAnalysisPeriod(i);
+    liabilityEquityRow.push(`=${colName(valueCol)}${liabilityRow}+${colName(valueCol)}${equityRow}`);
+    liabilityEquityRow.push(`=IFERROR(${colName(valueCol)}${liabilityEquityRowNumber}/${colName(valueCol)}$${assetRow},"")`);
+  });
+  periods.slice(1).forEach((_, i) => {
+    const prevValueCol = valueColForAnalysisPeriod(i);
+    const valueCol = valueColForAnalysisPeriod(i + 1);
+    liabilityEquityRow.push(`=IFERROR(${colName(valueCol)}${liabilityEquityRowNumber}-${colName(prevValueCol)}${liabilityEquityRowNumber},"")`);
+    liabilityEquityRow.push(`=IFERROR((${colName(valueCol)}${liabilityEquityRowNumber}-${colName(prevValueCol)}${liabilityEquityRowNumber})/ABS(${colName(prevValueCol)}${liabilityEquityRowNumber}),"")`);
+  });
+  rows.push(liabilityEquityRow);
+
+  const differenceRowNumber = rows.length + 1;
+  const differenceRow: SheetDef['rows'][0] = ['DIFERENCIA ACTIVO - PASIVO + CAPITAL', 'Balance General'];
+  periods.forEach((_, i) => {
+    const valueCol = valueColForAnalysisPeriod(i);
+    differenceRow.push(`=${colName(valueCol)}${assetRow}-${colName(valueCol)}${liabilityEquityRowNumber}`);
+    differenceRow.push(`=IFERROR(${colName(valueCol)}${differenceRowNumber}/${colName(valueCol)}$${assetRow},"")`);
+  });
+  periods.slice(1).forEach((_, i) => {
+    const prevValueCol = valueColForAnalysisPeriod(i);
+    const valueCol = valueColForAnalysisPeriod(i + 1);
+    differenceRow.push(`=IFERROR(${colName(valueCol)}${differenceRowNumber}-${colName(prevValueCol)}${differenceRowNumber},"")`);
+    differenceRow.push(`=IFERROR((${colName(valueCol)}${differenceRowNumber}-${colName(prevValueCol)}${differenceRowNumber})/ABS(${colName(prevValueCol)}${differenceRowNumber}),"")`);
+  });
+  rows.push(differenceRow);
 }
 
 function buildSegmentedAnalysisSheet(
@@ -552,17 +823,27 @@ function buildSegmentedAnalysisSheet(
     if (!keys.has(key)) keys.set(key, { name: item.name, segment, sourceOrder: sourceOrder++ });
   }));
   const rows: SheetDef['rows'] = [statementHeaders(periods)];
+  const totalRows: Record<string, number> = {};
   segments.forEach(segment => {
     const items = Array.from(keys.entries())
       .filter(([, meta]) => meta.segment === segment)
+      .filter(([, meta]) => !isBalanceTotalAccount(meta.name, segment))
       .sort((a, b) => segment === 'Estado de Resultados'
         ? a[1].sourceOrder - b[1].sourceOrder
         : accountSortRank(a[1].name, segment) - accountSortRank(b[1].name, segment)
           || a[1].sourceOrder - b[1].sourceOrder);
     if (!items.length) return;
     rows.push([segment]);
-    items.forEach(([key, meta]) => addAnalysisRow(rows, meta.name, segment, key, periods, bases, concepts));
+    const detailBaseRow = name === 'Balance General' && segment !== 'ACTIVO' && totalRows.ACTIVO
+      ? totalRows.ACTIVO
+      : rows.length + items.length + 1;
+    const detailRows = items.map(([key, meta]) => addAnalysisRow(rows, meta.name, segment, key, periods, detailBaseRow));
+    const denominatorRow = name === 'Balance General' && segment !== 'ACTIVO' && totalRows.ACTIVO
+      ? totalRows.ACTIVO
+      : undefined;
+    totalRows[segment] = addVerticalBaseRow(rows, segment, periods, detailRows, denominatorRow, bases, concepts);
   });
+  if (name === 'Balance General') addBalanceCheckRows(rows, periods, totalRows);
   if (footerRows.length > 0) {
     rows.push([], [], [], [], [], ...footerRows);
   }
@@ -815,10 +1096,12 @@ export function buildMonitoreo(
   covenants: Covenant_DB[],
   statements: FinancialStatement_DB[],
   concepts: DefinedConcept[] = [],
+  transactionNames: TransactionNameMap = {},
 ): SheetDef {
   const financial = covenants.filter(c => c.type === 'financial');
   const periods = normalizedPeriods(statements);
   const labels = formulaLabelsFromStatements(statements, concepts);
+  const rowMap = covenantDataRowMap(statements, concepts);
 
   if (financial.length === 0 || periods.length === 0) {
     return { name: 'Monitoreo', rows: [['Sin covenants financieros definidos']] };
@@ -827,25 +1110,27 @@ export function buildMonitoreo(
   const rows: SheetDef['rows'] = [
     ['MONITOREO DE COVENANTS — ' + new Date().getFullYear()],
     [],
-    ['COVENANT', 'FÓRMULA LEGIBLE', 'OPERADOR', 'UMBRAL', ...periods.map(p => p.label)],
+    ['COVENANT', 'FACILITY', 'FÓRMULA LEGIBLE', 'OPERADOR', 'UMBRAL', ...periods.map(p => p.label)],
     [],
   ];
 
   for (const cov of financial) {
     const valueRow = rows.length + 1;
     const formula = cov.formula || cov.name;
-    const values = periods.map((p, i) => formulaToExcel(cov.formulaByPeriod?.[p.stmt.period] || formula, `${colName(5 + i)}$3`));
+    const values = periods.map((p, i) => formulaToExcelCellRefs(cov.formulaByPeriod?.[p.stmt.period] || formula, colName(4 + i), rowMap));
     const threshold = parseNullableFinancialNumber(cov.threshold);
-    rows.push([cov.name, formulaLabel(formula, labels), cov.operator, threshold, ...values]);
-    rows.push(['', 'Cálculo automático con referencias internas; no editar las celdas de valor', '', 'UMBRAL', ...periods.map(() => threshold)]);
+    const facility = cov.transactionId ? transactionNames[cov.transactionId] || 'Facility sin nombre' : 'General / legacy';
+    rows.push([cov.name, facility, formulaLabel(formula, labels), cov.operator, threshold, ...values]);
+    rows.push(['', '', 'Cálculo automático con referencias internas; no editar las celdas de valor', '', 'UMBRAL', ...periods.map(() => threshold)]);
     if (cov.operator !== 'none' && threshold !== null) {
       rows.push([
+        '',
         '',
         'Cumplimiento',
         '',
         '',
         ...periods.map((_, i) => {
-          const cell = `${colName(5 + i)}${valueRow}`;
+          const cell = `${colName(6 + i)}${valueRow}`;
           const op =
             cov.operator === 'gt' ? '>' :
             cov.operator === 'gte' ? '>=' :
@@ -861,7 +1146,135 @@ export function buildMonitoreo(
   return {
     name: 'Monitoreo',
     rows,
-    colWidths: [30, 46, 10, 10, ...Array(periods.length).fill(14)],
+    colWidths: [30, 24, 46, 10, 10, ...Array(periods.length).fill(14)],
+  };
+}
+
+export function buildCovenantsCalculados(
+  covenants: Covenant_DB[],
+  statements: FinancialStatement_DB[],
+  concepts: DefinedConcept[] = [],
+  transactionNames: TransactionNameMap = {},
+): SheetDef {
+  const financial = covenants.filter(c => c.type === 'financial');
+  const periods = normalizedPeriods(statements);
+  const labels = formulaLabelsFromStatements(statements, concepts);
+  const rowMap = covenantDataRowMap(statements, concepts);
+
+  if (financial.length === 0 || periods.length === 0) {
+    return { name: 'Covenants Calculados', rows: [['Sin covenants financieros definidos']] };
+  }
+
+  const rows: SheetDef['rows'] = [
+    ['COVENANTS CALCULADOS'],
+    ['Cada covenant muestra Real, Límite, Holgura y Cumple. Las celdas de periodos son fórmulas auditables.'],
+    [],
+    ['Covenant', 'Facility', 'Línea', 'Fórmula / criterio', 'Fuente', ...periods.map(p => p.label)],
+  ];
+  const statusRowNumbers: number[] = [];
+
+  financial.forEach(cov => {
+    const formula = cov.formula || cov.name;
+    const threshold = parseNullableFinancialNumber(cov.threshold);
+    const facility = cov.transactionId ? transactionNames[cov.transactionId] || 'Facility sin nombre' : 'General / legacy';
+    const opLabel = covenantOperatorLabel(cov.operator);
+    const realRow = rows.length + 1;
+    const limitRow = realRow + 1;
+    const cushionRow = realRow + 2;
+    const statusRow = realRow + 3;
+    statusRowNumbers.push(statusRow);
+    const valueFormulas = periods.map((p, i) => formulaToExcelCellRefs(cov.formulaByPeriod?.[p.stmt.period] || formula, colName(4 + i), rowMap));
+    const cushionFormulas = periods.map((_, i) => {
+      const col = colName(6 + i);
+      return cov.operator === 'none' || threshold === null ? '=""' : covenantCushionFormula(`${col}${realRow}`, `${col}${limitRow}`, cov.operator);
+    });
+    const statusFormulas = periods.map((_, i) => {
+      const col = colName(6 + i);
+      return cov.operator === 'none' || threshold === null ? '=""' : covenantCompareFormula(`${col}${realRow}`, `${col}${limitRow}`, cov.operator);
+    });
+
+    rows.push([
+      cov.name,
+      facility,
+      'Real',
+      textFormula(formulaLabel(formula, labels)),
+      'Datos Covenant',
+      ...valueFormulas,
+    ]);
+    rows.push([
+      cov.name,
+      facility,
+      `Límite ${opLabel || 'N/A'}`,
+      textFormula(opLabel ? (covenantIsMinimum(cov.operator) ? '=Mínimo requerido' : '=Máximo permitido') : '=Sin límite contractual'),
+      'Umbral covenant',
+      ...periods.map(() => threshold),
+    ]);
+    rows.push([
+      cov.name,
+      facility,
+      'Holgura',
+      textFormula(covenantIsMinimum(cov.operator) ? '=Real - Límite' : '=Límite - Real'),
+      'Cálculo',
+      ...cushionFormulas,
+    ]);
+    rows.push([
+      cov.name,
+      facility,
+      'Cumple',
+      textFormula(opLabel ? `=IF(Real${opLabel}Límite,"CUMPLE","INCUMPLE")` : '=Sin prueba'),
+      'Cálculo',
+      ...statusFormulas,
+    ]);
+    rows.push([
+      cov.name,
+      facility,
+      'Fórmula Real visible',
+      'Texto visible',
+      'Auditoría',
+      ...valueFormulas.map(textFormula),
+    ]);
+    rows.push([
+      cov.name,
+      facility,
+      'Fórmula Holgura visible',
+      'Texto visible',
+      'Auditoría',
+      ...cushionFormulas.map(textFormula),
+    ]);
+    rows.push([
+      cov.name,
+      facility,
+      'Fórmula Cumple visible',
+      'Texto visible',
+      'Auditoría',
+      ...statusFormulas.map(textFormula),
+    ]);
+    rows.push([]);
+  });
+
+  rows.push(
+    [],
+    ['RESUMEN DE INCUMPLIMIENTOS POR PERIODO'],
+    ['Métrica', '', '', 'Fórmula', 'Notas', ...periods.map(p => p.label)],
+    [
+      'Incumplimientos',
+      '',
+      '',
+      textFormula('=COUNTIF(statuses,"INCUMPLE")'),
+      'Cuenta covenants incumplidos por fecha',
+      ...periods.map((_, i) => {
+        const col = colName(6 + i);
+        const statusCells = statusRowNumbers.map(rowNumber => `${col}${rowNumber}`);
+        return `=${statusCells.map(cell => `COUNTIF(${cell},"INCUMPLE")`).join('+')}`;
+      }),
+    ],
+  );
+
+  return {
+    name: 'Covenants Calculados',
+    rows,
+    colWidths: [32, 24, 16, 48, 22, ...Array(periods.length).fill(14)],
+    wrapColumns: [1, 2, 4, 5],
   };
 }
 
@@ -870,12 +1283,14 @@ export function buildCovenantTrendAnalysis(
   statements: FinancialStatement_DB[],
   clientName: string,
   contractCovenantKeys: string[] = [],
+  transactionNames: TransactionNameMap = {},
 ): SheetDef {
   const performance = prioritizedLatestCovenantPerformance(
     covenants.filter(c => c.type === 'financial'),
     statements,
     contractCovenantKeys,
   );
+  const covenantById = new Map(covenants.map(cov => [cov.id, cov]));
   const insight = buildCovenantAnalystInsight(performance);
   const rows: SheetDef['rows'] = [
     [`ANÁLISIS DE TENDENCIA DE COVENANTS — ${clientName.toUpperCase()}`],
@@ -884,10 +1299,13 @@ export function buildCovenantTrendAnalysis(
     [insight.headline],
     ...insight.bullets.map(bullet => [`• ${bullet}`]),
     [],
-    ['PRIORIDAD', 'CONTRATO', 'COVENANT', 'ÚLTIMO PERIODO', 'VALOR ACTUAL', 'VALOR ANTERIOR', 'CAMBIO', 'CAMBIO %', 'TENDENCIA', 'ESTADO', 'LÍMITE'],
+    ['PRIORIDAD', 'CONTRATO', 'FACILITY', 'COVENANT', 'ÚLTIMO PERIODO', 'VALOR ACTUAL', 'VALOR ANTERIOR', 'CAMBIO', 'CAMBIO %', 'TENDENCIA', 'ESTADO', 'LÍMITE'],
     ...performance.map((row, index) => [
       index + 1,
       row.isContractCovenant ? 'SÍ' : 'NO',
+      covenantById.get(row.covenantId)?.transactionId
+        ? transactionNames[covenantById.get(row.covenantId)!.transactionId!] || 'Facility sin nombre'
+        : 'General / legacy',
       row.covenantName,
       row.period,
       row.value,
@@ -902,7 +1320,7 @@ export function buildCovenantTrendAnalysis(
   return {
     name: 'Análisis Covenant',
     rows,
-    colWidths: [10, 11, 32, 16, 15, 15, 14, 12, 15, 14, 16],
+    colWidths: [10, 11, 24, 32, 16, 15, 15, 14, 12, 15, 14, 16],
   };
 }
 
@@ -1537,6 +1955,7 @@ export async function exportEstadosFinancieros(
       buildDefinedConcepts(statements, concepts),
       buildCovenantDataSheet(statements, concepts),
       buildMonitoreo(covenants, statements, concepts),
+      buildCovenantsCalculados(covenants, statements, concepts),
       buildVariacion(statements, clientName),
       ...buildBlankShells(),
     ], `EFF_${clientName}`);
@@ -1569,16 +1988,18 @@ export async function exportLoanTape(
 }
 
 export async function exportCovenantsFinancieros(
-  covenants: Covenant_DB[], statements: FinancialStatement_DB[], clientName: string, format: 'excel' | 'pdf', el?: HTMLElement, contractCovenantKeys: string[] = [],
+  covenants: Covenant_DB[], statements: FinancialStatement_DB[], clientName: string, format: 'excel' | 'pdf', el?: HTMLElement, contractCovenantKeys: string[] = [], transactions: Transaction[] = [],
 ): Promise<void> {
   if (format === 'excel') {
     let concepts: DefinedConcept[] = [];
     const clientId = statements[0]?.clientId || covenants[0]?.clientId || '';
     try { concepts = JSON.parse(localStorage.getItem(`finmonitor_defined_concepts_${clientId}`) || '[]'); } catch {}
+    const transactionNames = Object.fromEntries(transactions.map(tx => [tx.id, tx.name || tx.creditType || 'Facility sin nombre']));
     await exportToExcel([
-      buildCovenantTrendAnalysis(covenants, statements, clientName, contractCovenantKeys),
+      buildCovenantTrendAnalysis(covenants, statements, clientName, contractCovenantKeys, transactionNames),
       buildCovenantDataSheet(statements, concepts),
-      buildMonitoreo(covenants, statements, concepts),
+      buildMonitoreo(covenants, statements, concepts, transactionNames),
+      buildCovenantsCalculados(covenants, statements, concepts, transactionNames),
     ], `Monitoreo_${clientName}`);
   } else {
     if (el) await exportToPdf([el], `Monitoreo_${clientName}`);

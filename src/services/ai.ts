@@ -3,6 +3,7 @@
 
 import loanTapePrompt from '../prompts/loan-tape.md?raw';
 import financialsPrompt from '../prompts/financials.md?raw';
+import { parseFinancialNumber } from '../lib/numberParsing';
 
 export type AIProvider = 'gemini' | 'claude' | 'openai';
 
@@ -18,6 +19,11 @@ export interface AIMedia {
   base64: string;
   mimeType: string;
   fileName?: string;
+}
+
+export interface AIDocumentContent {
+  text?: string;
+  media?: AIMedia | AIMedia[];
 }
 
 export function loadAISettings(): AISettings {
@@ -115,6 +121,109 @@ export interface AccountConsolidationSuggestion {
 
 // ─── Core request dispatcher ──────────────────────────────────────────────────
 
+function normalizeFinancialLineItem(item: any): RawLineItem | null {
+  const statementType = item.statementType || item.type;
+  if (statementType !== 'balance_general' && statementType !== 'estado_resultados') return null;
+
+  const name = String(item.name || '').trim();
+  if (!name) return null;
+
+  const value = parseFinancialNumber(item.value, Number.NaN);
+  if (!Number.isFinite(value)) return null;
+
+  return {
+    name,
+    value,
+    source: item.source,
+    sectionPath: item.sectionPath || null,
+    statementType,
+  };
+}
+
+function normalizeFinancialExtraction(parsed: any): ExtractionResult {
+  const parsedStatements = Array.isArray(parsed.statements) && parsed.statements.length > 0
+    ? parsed.statements
+    : [{
+        period: parsed.period || 'Sin período',
+        periodDate: parsed.periodDate || new Date().toISOString().slice(0, 10),
+        rawLineItems: parsed.rawLineItems || [],
+      }];
+  const statements = parsedStatements.map((stmt: any) => ({
+    period: stmt.period || parsed.period || 'Sin período',
+    periodDate: stmt.periodDate || parsed.periodDate || new Date().toISOString().slice(0, 10),
+    rawLineItems: (stmt.rawLineItems || []).map(normalizeFinancialLineItem).filter((item: RawLineItem | null): item is RawLineItem => Boolean(item)),
+  }));
+  return {
+    companyName: parsed.companyName || undefined,
+    documentType: parsed.documentType || undefined,
+    period: statements[0]?.period || 'Sin período',
+    periodDate: statements[0]?.periodDate || new Date().toISOString().slice(0, 10),
+    rawLineItems: statements[0]?.rawLineItems || [],
+    statements,
+  };
+}
+
+function hasStatementType(result: ExtractionResult, statementType: StatementType) {
+  return (result.statements || [result]).some(statement =>
+    (statement.rawLineItems || []).some(item => item.statementType === statementType)
+  );
+}
+
+function lineItemKey(item: RawLineItem) {
+  return [
+    item.statementType || 'otro',
+    String(item.name || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, ''),
+  ].join('||');
+}
+
+function mergeFinancialLineItems(items: RawLineItem[]): RawLineItem[] {
+  const byAccount = new Map<string, RawLineItem>();
+  for (const item of items) {
+    const key = lineItemKey(item);
+    const existing = byAccount.get(key);
+    if (!existing) {
+      byAccount.set(key, { ...item });
+      continue;
+    }
+
+    const existingValue = Number(existing.value) || 0;
+    const incomingValue = Number(item.value) || 0;
+    byAccount.set(key, {
+      ...existing,
+      value: existingValue === incomingValue ? existingValue : existingValue + incomingValue,
+      sectionPath: existing.sectionPath || item.sectionPath || null,
+      source: existing.source || item.source,
+    });
+  }
+  return Array.from(byAccount.values());
+}
+
+function mergeFinancialExtractions(primary: ExtractionResult, rescue: ExtractionResult): ExtractionResult {
+  const byPeriod = new Map<string, ExtractedStatement>();
+  const addStatement = (statement: ExtractedStatement) => {
+    const key = statement.periodDate || statement.period;
+    const existing = byPeriod.get(key);
+    if (!existing) {
+      byPeriod.set(key, { ...statement, rawLineItems: mergeFinancialLineItems(statement.rawLineItems) });
+      return;
+    }
+
+    existing.rawLineItems = mergeFinancialLineItems([...existing.rawLineItems, ...statement.rawLineItems]);
+  };
+
+  (primary.statements || [primary]).forEach(addStatement);
+  (rescue.statements || [rescue]).forEach(addStatement);
+  const statements = Array.from(byPeriod.values()).sort((a, b) => a.periodDate.localeCompare(b.periodDate));
+
+  return {
+    ...primary,
+    period: statements[0]?.period || primary.period,
+    periodDate: statements[0]?.periodDate || primary.periodDate,
+    rawLineItems: statements[0]?.rawLineItems || primary.rawLineItems,
+    statements,
+  };
+}
+
 async function callAI(settings: AISettings, systemPrompt: string, userPrompt: string, media?: AIMedia | AIMedia[]): Promise<string> {
   const { provider, apiKey } = settings;
   const mediaItems = media ? (Array.isArray(media) ? media : [media]).filter(item => item.base64 && item.mimeType) : [];
@@ -129,7 +238,7 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
       generationConfig: { temperature: 0.0, maxOutputTokens: 16384, responseMimeType: 'application/json', thinkingConfig: { thinkingBudget: 0 } },
     };
     const res = await fetchAIWithRetry('/api/gemini', { apiKey, model: GEMINI_MODEL, payload });
-    const data = await res.json();
+    const data = await readAIResponseJson(res, 'Gemini');
     if (!res.ok) throw new Error(data.error?.message || data.error || 'Gemini error');
     return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
   }
@@ -157,7 +266,7 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
       messages: [{ role: 'user', content: userContent }],
     };
     const res = await fetchAIWithRetry('/api/claude', { apiKey, payload });
-    const data = await res.json();
+    const data = await readAIResponseJson(res, 'Claude');
     if (!res.ok) throw new Error(data.error?.message || data.error || 'Claude error');
     return data.content?.[0]?.text || '';
   }
@@ -179,7 +288,7 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
       input: [{ role: 'user', content: userContent }],
     };
     const res = await fetchAIWithRetry('/api/openai/responses', { apiKey, payload });
-    const data = await res.json();
+    const data = await readAIResponseJson(res, 'OpenAI');
     if (!res.ok) throw new Error(data.error?.message || data.error || 'OpenAI error');
     return data.output_text
       || data.output?.flatMap((item: any) => item.content || []).map((part: any) => part.text || '').join('')
@@ -188,6 +297,19 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
   }
 
   throw new Error(`Proveedor desconocido: ${provider}`);
+}
+
+async function readAIResponseJson(response: Response, provider: string) {
+  const text = await response.text();
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    const plain = text.replace(/\s+/g, ' ').trim().slice(0, 240);
+    if (response.status === 413 || /request entity too large|payload too large/i.test(plain)) {
+      throw new Error(`El archivo es demasiado grande para enviarlo a ${provider}. Divide el PDF por estado financiero, comprímelo o súbelo como Excel/CSV/texto.`);
+    }
+    throw new Error(`${provider} devolvió una respuesta no JSON (${response.status}): ${plain || 'sin contenido'}`);
+  }
 }
 
 async function fetchAIWithRetry(url: string, body: unknown): Promise<Response> {
@@ -267,52 +389,68 @@ ${text.slice(0, 14000)}`;
 
 export async function extractFinancials(
   settings: AISettings,
-  content: string | AIMedia,
+  content: string | AIMedia | AIMedia[] | AIDocumentContent,
   expectedClientName?: string
 ): Promise<ExtractionResult> {
   const system = financialsPrompt;
 
-  const prompt = typeof content === 'string'
+  const isTextContent = typeof content === 'string';
+  const documentText = isTextContent
+    ? content
+    : !Array.isArray(content) && 'text' in content
+      ? String(content.text || '')
+      : '';
+  const documentMedia: AIMedia | AIMedia[] | undefined = isTextContent
+    ? undefined
+    : !Array.isArray(content) && 'media' in content
+      ? content.media
+      : content as AIMedia | AIMedia[];
+  const prompt = documentText
     ? `Cliente esperado en la app (NO confundir con el emisor del documento): ${expectedClientName || 'no indicado'}.
 
 Aplica el proceso de extracción completo descrito en las instrucciones del sistema.
+${documentMedia ? 'Usa el texto OCR como guía y valida/completa contra las imágenes adjuntas cuando haya tablas escaneadas o jerarquía visual.' : ''}
 Devuelve únicamente JSON minificado con la estructura indicada.
 
 Documento:
-${content}`
+${documentText}`
     : `Cliente esperado en la app (NO confundir con el emisor del documento): ${expectedClientName || 'no indicado'}.
 
 Lee el documento adjunto y aplica el proceso de extracción completo descrito en las instrucciones del sistema.
 Devuelve únicamente JSON minificado con la estructura indicada.`;
 
-  const text = await callAI(settings, system, prompt, typeof content === 'string' ? undefined : content);
-  const parsed = extractJSON(text);
-  const parsedStatements = Array.isArray(parsed.statements) && parsed.statements.length > 0
-    ? parsed.statements
-    : [{
-        period: parsed.period || 'Sin período',
-        periodDate: parsed.periodDate || new Date().toISOString().slice(0, 10),
-        rawLineItems: parsed.rawLineItems || [],
-      }];
-  const statements = parsedStatements.map((stmt: any) => ({
-    period: stmt.period || parsed.period || 'Sin período',
-    periodDate: stmt.periodDate || parsed.periodDate || new Date().toISOString().slice(0, 10),
-    rawLineItems: (stmt.rawLineItems || []).map((item: any) => ({
-      name: String(item.name || ''),
-      value: Number(item.value) || 0,
-      source: item.source,
-      sectionPath: item.sectionPath || null,
-      statementType: item.statementType || item.type || 'otro',
-    })),
-  }));
-  return {
-    companyName: parsed.companyName || undefined,
-    documentType: parsed.documentType || undefined,
-    period: statements[0]?.period || 'Sin período',
-    periodDate: statements[0]?.periodDate || new Date().toISOString().slice(0, 10),
-    rawLineItems: statements[0]?.rawLineItems || [],
-    statements,
-  };
+  const text = await callAI(settings, system, prompt, documentMedia);
+  const result = normalizeFinancialExtraction(extractJSON(text));
+
+  if (hasStatementType(result, 'estado_resultados')) return result;
+
+  const rescuePrompt = documentText
+    ? `Cliente esperado en la app (NO confundir con el emisor del documento): ${expectedClientName || 'no indicado'}.
+
+La extracción anterior NO encontró Estado de Resultados. Relee el documento completo y extrae SOLO Estado de Resultados / PyG / Estado de Resultados Integral.
+Ignora Balance General, flujo de efectivo, covenants, razones financieras, notas y tablas auxiliares.
+Busca encabezados como INGRESOS, COSTOS, GASTOS, UTILIDAD, RESULTADO, MARGEN FINANCIERO, INTERESES, COMISIONES, IMPUESTOS.
+Devuelve únicamente JSON minificado con la misma estructura indicada; todos los rawLineItems deben tener statementType "estado_resultados".
+
+Documento:
+${documentText}`
+    : `Cliente esperado en la app (NO confundir con el emisor del documento): ${expectedClientName || 'no indicado'}.
+
+La extracción anterior NO encontró Estado de Resultados. Relee todos los adjuntos y extrae SOLO Estado de Resultados / PyG / Estado de Resultados Integral.
+Ignora Balance General, flujo de efectivo, covenants, razones financieras, notas y tablas auxiliares.
+Busca encabezados como INGRESOS, COSTOS, GASTOS, UTILIDAD, RESULTADO, MARGEN FINANCIERO, INTERESES, COMISIONES, IMPUESTOS.
+Devuelve únicamente JSON minificado con la misma estructura indicada; todos los rawLineItems deben tener statementType "estado_resultados".`;
+
+  try {
+    const rescueText = await callAI(settings, system, rescuePrompt, documentMedia);
+    const rescue = normalizeFinancialExtraction(extractJSON(rescueText));
+    return hasStatementType(rescue, 'estado_resultados')
+      ? mergeFinancialExtractions(result, rescue)
+      : result;
+  } catch (error) {
+    console.warn('No se pudo rescatar Estado de Resultados en segunda pasada.', error);
+    return result;
+  }
 }
 
 // ─── Contract covenant extraction ─────────────────────────────────────────────

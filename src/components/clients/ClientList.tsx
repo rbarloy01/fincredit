@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { db, Client } from '../../db/index';
 import { Session } from '../../services/auth';
 import { Plus, Search, Building2, Hash, Briefcase, TrendingUp, ChevronRight, AlertTriangle, FileClock, CalendarClock, Trash2 } from 'lucide-react';
@@ -37,32 +37,58 @@ const ClientList: React.FC<Props> = ({ session, onSelectClient, onNewClient }) =
 
   const loadClients = async () => {
     setLoading(true);
-    db.getClients().then(async list => {
+    try {
+      const list = await db.getClients();
       setClients(list);
-      const rows = await Promise.all(list.map(async client => {
-        const [statements, covenants, tapes] = await Promise.all([
-          db.getStatements(client.id),
-          db.getCovenants(client.id),
-          db.getLoanTapes(client.id),
-        ]);
-        const breaches = covenants.filter(c => evaluateCovenantAuto(c, statements).status === 'incumple').length;
-        const latestStmt = statements.sort((a, b) => a.periodDate.localeCompare(b.periodDate)).at(-1);
-        const daysNoFinancials = latestStmt ? (Date.now() - new Date(latestStmt.periodDate).getTime()) / 86400000 : Infinity;
-        const overdueDocs = daysNoFinancials > 45 ? 1 : 0;
-        const missingTapes = tapes.length === 0 ? 1 : 0;
-        return { breaches, overdueDocs, missingTapes };
-      }));
-      setWatch({
-        breaches: rows.reduce((s, r) => s + r.breaches, 0),
-        overdueDocs: rows.reduce((s, r) => s + r.overdueDocs, 0),
-        missingTapes: rows.reduce((s, r) => s + r.missingTapes, 0),
-        maturities: 0,
-      });
+    } catch (err) {
+      console.error('Error loading clients:', err);
+      setClients([]);
+      setWatch({ breaches: 0, overdueDocs: 0, missingTapes: 0, maturities: 0 });
+    } finally {
       setLoading(false);
-    });
+    }
   };
 
   useEffect(() => { loadClients(); }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (clients.length === 0) {
+      setWatch({ breaches: 0, overdueDocs: 0, missingTapes: 0, maturities: 0 });
+      return () => { cancelled = true; };
+    }
+
+    const loadWatch = async () => {
+      try {
+        const rows = await Promise.all(clients.map(async client => {
+          const [statements, covenants, tapes] = await Promise.all([
+            db.getStatements(client.id),
+            db.getCovenants(client.id),
+            db.getLoanTapes(client.id),
+          ]);
+          const breaches = covenants.filter(c => evaluateCovenantAuto(c, statements).status === 'incumple').length;
+          const latestStmt = [...statements].sort((a, b) => a.periodDate.localeCompare(b.periodDate)).at(-1);
+          const daysNoFinancials = latestStmt ? (Date.now() - new Date(latestStmt.periodDate).getTime()) / 86400000 : Infinity;
+          const overdueDocs = daysNoFinancials > 45 ? 1 : 0;
+          const missingTapes = tapes.length === 0 ? 1 : 0;
+          return { breaches, overdueDocs, missingTapes };
+        }));
+
+        if (cancelled) return;
+        setWatch({
+          breaches: rows.reduce((s, r) => s + r.breaches, 0),
+          overdueDocs: rows.reduce((s, r) => s + r.overdueDocs, 0),
+          missingTapes: rows.reduce((s, r) => s + r.missingTapes, 0),
+          maturities: 0,
+        });
+      } catch (err) {
+        if (!cancelled) console.error('Error loading portfolio indicators:', err);
+      }
+    };
+
+    void loadWatch();
+    return () => { cancelled = true; };
+  }, [clients]);
 
   const handleDeleteClient = async (client: Client) => {
     if (session.role !== 'manager') return;
@@ -78,56 +104,65 @@ const ClientList: React.FC<Props> = ({ session, onSelectClient, onNewClient }) =
     }
   };
 
-  const filtered = clients.filter(c => {
+  const filtered = useMemo(() => clients.filter(c => {
     const q = search.toLowerCase();
     return (
       c.name.toLowerCase().includes(q) ||
-      c.taxId.toLowerCase().includes(q) ||
+      (c.taxId || '').toLowerCase().includes(q) ||
       c.industry.toLowerCase().includes(q) ||
       c.analystName.toLowerCase().includes(q)
     );
-  });
+  }), [clients, search]);
+
+  const totalCredit = clients.reduce((s, c) => s + (c.totalCreditValue || 0), 0);
+  const hasAlerts = watch.breaches + watch.overdueDocs + watch.missingTapes > 0;
 
   return (
-    <div className="flex-1 bg-slate-50 min-h-screen p-8">
+    <div className="portfolio-page flex-1 min-h-screen px-5 py-6 sm:px-8 lg:px-10">
       <WorkingOverlay
         show={!!deletingId}
         title="Eliminando cliente"
         messages={['Almost there...', 'Working on it...', 'Borrando documentos ligados...', 'Limpiando covenants...', 'Actualizando portafolio...']}
       />
       {/* Header */}
-      <div className="flex items-center justify-between mb-8">
-        <div>
-          <h1 className="text-3xl font-black text-slate-900 tracking-tight">Portafolio de Clientes</h1>
-          <p className="text-slate-500 text-sm mt-1">
-            {clients.length} cliente{clients.length !== 1 ? 's' : ''} registrado{clients.length !== 1 ? 's' : ''}
-          </p>
+      <div className="portfolio-hero mb-7 overflow-hidden rounded-[1.75rem] border border-slate-200 bg-white p-6 shadow-sm sm:p-7">
+        <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-[10px] font-black uppercase tracking-widest text-indigo-700">
+              <span className={`h-2 w-2 rounded-full ${hasAlerts ? 'bg-amber-500' : 'bg-emerald-500'}`} />
+              {hasAlerts ? 'Revisión requerida' : 'Portafolio estable'}
+            </div>
+            <h1 className="text-3xl font-black tracking-tight text-slate-900 sm:text-4xl">Portafolio de Clientes</h1>
+            <p className="mt-2 max-w-2xl text-sm font-semibold leading-6 text-slate-500">
+              {clients.length} cliente{clients.length !== 1 ? 's' : ''} registrado{clients.length !== 1 ? 's' : ''}, con alertas, documentos y exposición listos para revisión.
+            </p>
+          </div>
+          {session.role === 'manager' && (
+            <button
+              onClick={onNewClient}
+              className="flex w-full items-center justify-center gap-2 rounded-2xl bg-indigo-600 px-5 py-3 text-sm font-black text-white shadow-lg shadow-indigo-200 transition-all hover:bg-indigo-500 sm:w-auto"
+            >
+              <Plus className="w-4 h-4" />
+              Nuevo Cliente
+            </button>
+          )}
         </div>
-        {session.role === 'manager' && (
-          <button
-            onClick={onNewClient}
-            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-5 py-3 rounded-xl shadow-lg shadow-indigo-200 transition-all text-sm"
-          >
-            <Plus className="w-4 h-4" />
-            Nuevo Cliente
-          </button>
-        )}
       </div>
 
-      <div className="grid grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
-        <div className="bg-white border border-slate-200 rounded-2xl p-4">
+      <div className="grid grid-cols-1 gap-4 mb-6 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="stat-card bg-white border border-slate-200 rounded-2xl p-4">
           <p className="text-xs font-black text-slate-400 uppercase tracking-wider">Portafolio monitoreado</p>
-          <p className="text-2xl font-black text-slate-900 mt-1">{fmtCurrency(clients.reduce((s, c) => s + (c.totalCreditValue || 0), 0), 'MXN')}</p>
+          <p className="text-2xl font-black text-slate-900 mt-1">{fmtCurrency(totalCredit, 'MXN')}</p>
         </div>
-        <div className="bg-white border border-rose-200 rounded-2xl p-4">
+        <div className="stat-card bg-white border border-rose-200 rounded-2xl p-4">
           <p className="text-xs font-black text-rose-500 uppercase tracking-wider flex items-center gap-1"><AlertTriangle className="w-3.5 h-3.5" />Breaches hoy</p>
           <p className="text-2xl font-black text-rose-700 mt-1">{watch.breaches}</p>
         </div>
-        <div className="bg-white border border-amber-200 rounded-2xl p-4">
+        <div className="stat-card bg-white border border-amber-200 rounded-2xl p-4">
           <p className="text-xs font-black text-amber-600 uppercase tracking-wider flex items-center gap-1"><FileClock className="w-3.5 h-3.5" />EFF vencidos</p>
           <p className="text-2xl font-black text-amber-700 mt-1">{watch.overdueDocs}</p>
         </div>
-        <div className="bg-white border border-indigo-200 rounded-2xl p-4">
+        <div className="stat-card bg-white border border-indigo-200 rounded-2xl p-4">
           <p className="text-xs font-black text-indigo-600 uppercase tracking-wider flex items-center gap-1"><CalendarClock className="w-3.5 h-3.5" />Loan tape faltante</p>
           <p className="text-2xl font-black text-indigo-700 mt-1">{watch.missingTapes}</p>
         </div>
@@ -141,7 +176,7 @@ const ClientList: React.FC<Props> = ({ session, onSelectClient, onNewClient }) =
           value={search}
           onChange={e => setSearch(e.target.value)}
           placeholder="Buscar por nombre, RFC, industria o analista..."
-          className="w-full bg-white border border-slate-200 text-slate-900 placeholder-slate-400 rounded-xl pl-11 pr-4 py-3.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 transition-all shadow-sm"
+          className="w-full bg-white border border-slate-200 text-slate-900 placeholder-slate-400 rounded-2xl pl-11 pr-4 py-3.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 transition-all shadow-sm"
         />
       </div>
 
@@ -183,16 +218,16 @@ const ClientList: React.FC<Props> = ({ session, onSelectClient, onNewClient }) =
 
       {/* Grid */}
       {!loading && filtered.length > 0 && (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+        <div className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-5">
           {filtered.map(client => (
             <div
               key={client.id}
               onClick={() => onSelectClient(client.id)}
-              className="bg-white border border-slate-200 rounded-2xl p-6 text-left hover:border-indigo-300 hover:shadow-lg hover:shadow-indigo-50 transition-all group cursor-pointer"
+              className="client-card bg-white border border-slate-200 rounded-2xl p-6 text-left hover:border-indigo-300 hover:shadow-lg hover:shadow-indigo-50 transition-all group cursor-pointer"
             >
               {/* Top row */}
               <div className="flex items-start justify-between mb-4">
-                <div className="w-10 h-10 bg-indigo-100 rounded-xl flex items-center justify-center">
+                <div className="w-11 h-11 bg-indigo-100 rounded-2xl flex items-center justify-center">
                   <Building2 className="w-5 h-5 text-indigo-600" />
                 </div>
                 <div className="flex items-center gap-2">
@@ -206,13 +241,13 @@ const ClientList: React.FC<Props> = ({ session, onSelectClient, onNewClient }) =
               </div>
 
               {/* Name */}
-              <h3 className="font-black text-slate-900 text-base leading-tight mb-1 truncate">{client.name}</h3>
+              <h3 className="font-black text-slate-900 text-lg leading-tight mb-1 truncate">{client.name}</h3>
 
               {/* Meta */}
               <div className="space-y-1.5 mt-3">
                 <div className="flex items-center gap-2 text-slate-500 text-xs">
                   <Hash className="w-3 h-3 flex-shrink-0" />
-                  <span className="font-mono">{client.taxId}</span>
+                  <span className="font-mono">{client.taxId || 'Sin RFC'}</span>
                 </div>
                 <div className="flex items-center gap-2 text-slate-500 text-xs">
                   <Briefcase className="w-3 h-3 flex-shrink-0" />
@@ -231,7 +266,7 @@ const ClientList: React.FC<Props> = ({ session, onSelectClient, onNewClient }) =
               <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-100">
                 <div className="flex gap-1">
                   {client.creditType?.slice(0, 3).map(ct => (
-                    <span key={ct} className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-md font-semibold">
+                    <span key={ct} className="text-[10px] bg-slate-100 text-slate-600 px-2 py-1 rounded-lg font-semibold">
                       {ct}
                     </span>
                   ))}

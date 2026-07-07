@@ -10,10 +10,12 @@ import CreditUnderwritingPanel from '../monitoring/CreditUnderwritingPanel';
 import AuditPanel from '../audit/AuditPanel';
 import WorkingOverlay from '../common/WorkingOverlay';
 import CompanyOverviewPanel from './CompanyOverviewPanel';
+import { ALL_FACILITIES, facilityDisplayName, matchesFacilityFilter } from '../../lib/facilityHistory';
 
 const FinancialPanel = lazy(() => import('../financials/FinancialPanel'));
 const LoanTapePanel = lazy(() => import('../loantape/LoanTapePanel'));
 const ClientReportView = lazy(() => import('../report/ReportView'));
+const CrmPanel = lazy(() => import('../crm/CrmPanel'));
 
 interface Props {
   clientId: string;
@@ -24,10 +26,11 @@ interface Props {
   onEdit?: (client: Client) => void;
 }
 
-type Tab = 'monitor' | 'resumen' | 'company_overview' | 'transacciones' | 'estados' | 'auditoria' | 'loantape' | 'cov_financiero' | 'hacer_no_hacer' | 'reporte';
+type Tab = 'monitor' | 'crm' | 'resumen' | 'company_overview' | 'transacciones' | 'estados' | 'auditoria' | 'loantape' | 'cov_financiero' | 'hacer_no_hacer' | 'reporte';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'monitor', label: 'Underwriting' },
+  { id: 'crm', label: 'CRM' },
   { id: 'resumen', label: 'Resumen' },
   { id: 'company_overview', label: 'Company Overview' },
   { id: 'transacciones', label: 'Transacciones' },
@@ -66,8 +69,13 @@ const TabFallback = () => (
 );
 
 const ResumenTab: React.FC<{ client: Client; transactions: Transaction[]; covenants: Covenant_DB[] }> = ({ client, transactions, covenants }) => {
-  const history = client.paymentHistory?.slice(0, 6) || [];
-  const aforo = client.aforoHistory?.slice(0, 6) || [];
+  const [selectedTransactionId, setSelectedTransactionId] = useState(ALL_FACILITIES);
+  const history = (client.paymentHistory || []).filter(item => matchesFacilityFilter(item, selectedTransactionId, transactions.length)).slice(0, 6);
+  const aforo = (client.aforoHistory || []).filter(item => matchesFacilityFilter(item, selectedTransactionId, transactions.length)).slice(0, 6);
+  const transactionName = (transactionId?: string) => transactions.find(tx => tx.id === transactionId)?.name || '';
+  const selectedFacilityLabel = selectedTransactionId === ALL_FACILITIES
+    ? 'Todas las facilities'
+    : transactionName(selectedTransactionId) || 'Facility seleccionada';
   const [exporting, setExporting] = useState<'excel' | 'pdf' | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -84,15 +92,30 @@ const ResumenTab: React.FC<{ client: Client; transactions: Transaction[]; covena
   return (
     <div ref={panelRef} className="space-y-6">
       {/* Export bar */}
-      <div className="flex justify-end gap-2">
-        <button onClick={() => handleExport('excel')} disabled={!!exporting} className="flex items-center gap-1.5 bg-white border border-slate-200 text-slate-600 font-bold px-3 py-2 rounded-xl text-xs hover:bg-slate-50 disabled:opacity-50 transition-all">
-          {exporting === 'excel' ? <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg> : <Download className="w-3.5 h-3.5" />}
-          Excel
-        </button>
-        <button onClick={() => handleExport('pdf')} disabled={!!exporting} className="flex items-center gap-1.5 bg-white border border-slate-200 text-slate-600 font-bold px-3 py-2 rounded-xl text-xs hover:bg-slate-50 disabled:opacity-50 transition-all">
-          {exporting === 'pdf' ? <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg> : <FileText className="w-3.5 h-3.5" />}
-          PDF
-        </button>
+      <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+        <label className="block w-full md:w-80">
+          <span className="mb-1 block text-[10px] font-black uppercase tracking-widest text-slate-400">Facility</span>
+          <select
+            value={selectedTransactionId}
+            onChange={event => setSelectedTransactionId(event.target.value)}
+            className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 outline-none focus:ring-2 focus:ring-indigo-300"
+          >
+            <option value={ALL_FACILITIES}>Todas las facilities</option>
+            {transactions.map(tx => (
+              <option key={tx.id} value={tx.id}>{tx.name || tx.creditType || 'Facility sin nombre'}</option>
+            ))}
+          </select>
+        </label>
+        <div className="flex justify-end gap-2">
+          <button onClick={() => handleExport('excel')} disabled={!!exporting} className="flex items-center gap-1.5 bg-white border border-slate-200 text-slate-600 font-bold px-3 py-2 rounded-xl text-xs hover:bg-slate-50 disabled:opacity-50 transition-all">
+            {exporting === 'excel' ? <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg> : <Download className="w-3.5 h-3.5" />}
+            Excel
+          </button>
+          <button onClick={() => handleExport('pdf')} disabled={!!exporting} className="flex items-center gap-1.5 bg-white border border-slate-200 text-slate-600 font-bold px-3 py-2 rounded-xl text-xs hover:bg-slate-50 disabled:opacity-50 transition-all">
+            {exporting === 'pdf' ? <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg> : <FileText className="w-3.5 h-3.5" />}
+            PDF
+          </button>
+        </div>
       </div>
 
       {/* Credit profile */}
@@ -138,6 +161,7 @@ const ResumenTab: React.FC<{ client: Client; transactions: Transaction[]; covena
       {history.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-2xl p-6">
           <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-5">Historial de Pagos</h3>
+          <p className="mb-4 text-xs font-semibold text-slate-500">{selectedFacilityLabel}</p>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -165,7 +189,7 @@ const ResumenTab: React.FC<{ client: Client; transactions: Transaction[]; covena
       {aforo.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-2xl p-6">
           <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-1">Historial de Aforo</h3>
-          <p className="text-xs text-slate-500 mb-5">Requerido: {client.aforoRequerido || 'N/D'}</p>
+          <p className="text-xs text-slate-500 mb-5">{selectedFacilityLabel} · Requerido: {client.aforoRequerido || 'N/D'}</p>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -173,6 +197,7 @@ const ResumenTab: React.FC<{ client: Client; transactions: Transaction[]; covena
                   <th className="text-left px-4 py-2 text-xs font-black text-slate-600 uppercase tracking-wider">Mes</th>
                   <th className="text-center px-4 py-2 text-xs font-black text-slate-600 uppercase tracking-wider">Valor</th>
                   <th className="text-center px-4 py-2 text-xs font-black text-slate-600 uppercase tracking-wider">Estado</th>
+                  {aforo.some(a => a.transactionId) && <th className="text-left px-4 py-2 text-xs font-black text-slate-600 uppercase tracking-wider">Facility</th>}
                 </tr>
               </thead>
               <tbody>
@@ -189,6 +214,9 @@ const ResumenTab: React.FC<{ client: Client; transactions: Transaction[]; covena
                         {a.status === 'good' ? 'CUMPLE' : a.status === 'warning' ? 'ALERTA' : 'INCUMPLE'}
                       </span>
                     </td>
+                    {aforo.some(item => item.transactionId) && (
+                      <td className="px-4 py-3 text-xs font-bold text-slate-500">{facilityDisplayName(transactionName(a.transactionId), a)}</td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -236,13 +264,13 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
       setCovenants(covs);
       setLoanTapes(tapes);
       setCustomFields(fields);
-      await Promise.all([
+      void Promise.all([
         db.getClientSetting(clientId, `finmonitor_defined_concepts_${clientId}`, []),
         db.getClientSetting(clientId, `finmonitor_vertical_bases_${clientId}`, {}),
         db.getClientSetting(clientId, `finmonitor_contract_covs_${clientId}`, []),
         db.getClientSetting(clientId, `finmonitor_hidden_standard_covs_${clientId}`, []),
         db.getClientSetting(clientId, `finmonitor_eff_mappings_${clientId}`, {}),
-      ]);
+      ]).catch(err => console.error('Error preloading client settings:', err));
     } catch (err) {
       console.error('Error loading client data:', err);
     } finally {
@@ -319,7 +347,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
                 </span>
               )}
             </div>
-            <p className="text-slate-500 text-sm mt-0.5 font-mono">{client.taxId} · {client.industry}</p>
+            <p className="text-slate-500 text-sm mt-0.5 font-mono">{client.taxId || 'Sin RFC'} · {client.industry}</p>
           </div>
           {session.role === 'manager' && (
             <div className="flex items-center gap-2">
@@ -373,6 +401,12 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
             />
           )}
           {activeTab === 'resumen' && <ResumenTab client={client} transactions={transactions} covenants={covenants} />}
+          {activeTab === 'crm' && (
+            <CrmPanel
+              clientId={clientId}
+              session={session}
+            />
+          )}
           {activeTab === 'company_overview' && (
             <CompanyOverviewPanel
               client={client}
@@ -421,6 +455,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
             <FinancialCovenantsPanel
               clientId={clientId}
               clientName={client.name}
+              transactions={transactions}
               session={session}
               statements={statements}
               onCovenantsChange={setCovenants}
@@ -430,6 +465,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
             <HacerNoHacerPanel
               clientId={clientId}
               clientName={client.name}
+              transactions={transactions}
               session={session}
               onCovenantsChange={setCovenants}
             />
@@ -440,6 +476,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
               statements={statements}
               covenants={covenants}
               loanTapes={loanTapes}
+              transactions={transactions}
               customFields={customFields}
               onCustomFieldsChange={setCustomFields}
               onClientUpdate={handleClientUpdate}

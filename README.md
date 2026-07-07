@@ -46,11 +46,17 @@ database/20260610_org_settings.sql
 database/20260610_organization_bootstrap.sql
 database/20260610_production_access_hardening.sql
 database/20260611_org_scoped_rls.sql
+database/20260622_loan_tape_analyst_state.sql
 database/20260626_document_ai_ingestion.sql
 database/20260630_private_financial_document_storage.sql
+database/20260701_facility_specific_aforo_history.sql
+database/20260706_crm_relationship_layer.sql
+database/20260706_crm_sheet_fields.sql
 ```
 
 `20260611_org_scoped_rls.sql` replaces broad approved-user RLS with organization-scoped policies. Approved users can only access data belonging to their own organization.
+
+`20260701_facility_specific_aforo_history.sql` tags legacy `aforo_history` rows with a `transactionId` only when the client has exactly one facility. Multi-facility clients keep untagged rows as a legacy fallback so facility filters do not hide historical aforo before it can be reviewed.
 
 ## Document AI Ingestion
 

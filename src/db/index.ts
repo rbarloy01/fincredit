@@ -27,14 +27,21 @@ export interface Client {
   analystName: string;
   createdBy: string;
   createdAt: string;
-  paymentHistory: Array<{ month: string; principalStatus: 'paid' | 'unpaid' | 'none'; interestStatus: 'paid' | 'unpaid' | 'none' }>;
+  paymentHistory: Array<{
+    month: string;
+    principalStatus: 'paid' | 'unpaid' | 'none';
+    interestStatus: 'paid' | 'unpaid' | 'none';
+    principalAmount?: string;
+    interestAmount?: string;
+    transactionId?: string;
+  }>;
   currentDue: number;
   maxDefaultDays: number;
   maxDefaultAmount: number;
   defaultFrequency12m: number;
   opinion: string;
   aforoRequerido: string;
-  aforoHistory: Array<{ month: string; value: string; status: 'good' | 'warning' | 'bad' }>;
+  aforoHistory: Array<{ month: string; value: string; status: 'good' | 'warning' | 'bad'; transactionId?: string }>;
   documentation: Array<{ id: string; name: string; date: string; periodicity: string; isCompliant: boolean; comments: string }>;
   reportDate: string;
   frequency: 'mensual' | 'trimestral';
@@ -49,6 +56,62 @@ export interface CustomField {
   label: string;
   value: string;
   fieldType: 'text' | 'number' | 'date';
+}
+
+export type CrmInfluence = 'low' | 'medium' | 'high' | 'decision_maker';
+export type CrmRelationship = 'champion' | 'neutral' | 'risk';
+export type CrmActivityType = 'call' | 'meeting' | 'email' | 'task' | 'note' | 'review';
+export type CrmActivityStatus = 'planned' | 'done' | 'canceled';
+export type CrmPriority = 'low' | 'normal' | 'high';
+
+export interface CrmContact {
+  id: string;
+  clientId: string;
+  name: string;
+  title: string;
+  department: string;
+  email: string;
+  phone: string;
+  influence: CrmInfluence;
+  relationship: CrmRelationship;
+  isPrimary: boolean;
+  notes: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CrmActivity {
+  id: string;
+  clientId: string;
+  contactId?: string;
+  type: CrmActivityType;
+  phase: string;
+  recordType: string;
+  nextStage: string;
+  contactName: string;
+  analystName: string;
+  subject: string;
+  quickNote: string;
+  nextStep: string;
+  detail: string;
+  status: CrmActivityStatus;
+  priority: CrmPriority;
+  dueAt?: string;
+  completedAt?: string;
+  ownerId?: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CrmTimelineItem {
+  id: string;
+  kind: 'contact' | 'activity';
+  title: string;
+  detail: string;
+  at: string;
+  status?: string;
 }
 
 export interface Transaction {
@@ -125,6 +188,20 @@ export interface FinancialStatement_DB {
   extraAccounts: Array<{ key: string; label: string; value: number }>;
 }
 
+const EMPTY_MAPPED_DATA: FinancialStatement_DB['mappedData'] = {
+  revenue: 0,
+  cogs: 0,
+  operatingExpenses: 0,
+  ebitda: 0,
+  interestExpense: 0,
+  netIncome: 0,
+  currentAssets: 0,
+  currentLiabilities: 0,
+  totalDebt: 0,
+  totalAssets: 0,
+  equity: 0,
+};
+
 export interface LoanTape_DB {
   id: string;
   clientId: string;
@@ -160,6 +237,18 @@ export interface SourceDocument {
   extractionStatus: string;
   uploadedBy?: string;
   createdAt: string;
+}
+
+export type RolloutGuardFeature = 'crm' | 'lifecycle';
+
+export interface RolloutMigrationStatus {
+  file: string;
+  reason: string;
+}
+
+export interface RolloutGuardResult {
+  missing: RolloutMigrationStatus[];
+  unverified: RolloutMigrationStatus[];
 }
 
 const FINANCIAL_DOCUMENT_BUCKET = 'financial-documents';
@@ -240,6 +329,30 @@ function normalizeKnownFinancialJson(value: any): any {
   );
 }
 
+function normalizeAforoHistory(value: any): Client['aforoHistory'] {
+  if (!Array.isArray(value)) return [];
+  return value.map(item => {
+    if (!item || typeof item !== 'object') return item;
+    const transactionId = item.transactionId || item.transaction_id || undefined;
+    const normalized = { ...item, transactionId };
+    delete normalized.transaction_id;
+    if (!normalized.transactionId) delete normalized.transactionId;
+    return normalized;
+  });
+}
+
+function normalizePaymentHistory(value: any): Client['paymentHistory'] {
+  if (!Array.isArray(value)) return [];
+  return value.map(item => {
+    if (!item || typeof item !== 'object') return item;
+    const transactionId = item.transactionId || item.transaction_id || undefined;
+    const normalized = { ...item, transactionId };
+    delete normalized.transaction_id;
+    if (!normalized.transactionId) delete normalized.transactionId;
+    return normalized;
+  });
+}
+
 function toClient(r: any): Client {
   return {
     id: r.id, orgId: r.org_id || '', name: r.name, taxId: r.tax_id || '', industry: r.industry || '',
@@ -247,10 +360,10 @@ function toClient(r: any): Client {
     totalCreditValue: normalizeFinancialWriteValue(r.total_credit_value), creditType: r.credit_type || [],
     contractName: r.contract_name || '', analystName: r.analyst_name || '',
     createdBy: r.created_by || '', createdAt: r.created_at,
-    paymentHistory: r.payment_history || [], currentDue: normalizeFinancialWriteValue(r.current_due),
+    paymentHistory: normalizePaymentHistory(r.payment_history), currentDue: normalizeFinancialWriteValue(r.current_due),
     maxDefaultDays: normalizeFinancialWriteValue(r.max_default_days), maxDefaultAmount: normalizeFinancialWriteValue(r.max_default_amount),
     defaultFrequency12m: normalizeFinancialWriteValue(r.default_frequency_12m), opinion: r.opinion || '',
-    aforoRequerido: r.aforo_requerido || '', aforoHistory: r.aforo_history || [],
+    aforoRequerido: r.aforo_requerido || '', aforoHistory: normalizeAforoHistory(r.aforo_history),
     documentation: r.documentation || [], reportDate: r.report_date || '',
     frequency: r.frequency || 'mensual', lastPeriod: r.last_period || '',
     logoLeft: r.logo_left, logoRight: r.logo_right,
@@ -311,15 +424,220 @@ function toAnnotation(r: any): CovenantAnnotation {
   };
 }
 
+function toCrmContact(r: any): CrmContact {
+  return {
+    id: r.id,
+    clientId: r.client_id,
+    name: r.name,
+    title: r.title || '',
+    department: r.department || '',
+    email: r.email || '',
+    phone: r.phone || '',
+    influence: r.influence || 'medium',
+    relationship: r.relationship || 'neutral',
+    isPrimary: Boolean(r.is_primary),
+    notes: r.notes || '',
+    createdBy: r.created_by || '',
+    createdAt: r.created_at,
+    updatedAt: r.updated_at || r.created_at,
+  };
+}
+
+function fromCrmContact(contact: Omit<CrmContact, 'id' | 'createdAt' | 'updatedAt'> | Partial<CrmContact>): any {
+  const row: any = {};
+  if (contact.clientId !== undefined) row.client_id = contact.clientId;
+  if (contact.name !== undefined) row.name = contact.name;
+  if (contact.title !== undefined) row.title = contact.title;
+  if (contact.department !== undefined) row.department = contact.department;
+  if (contact.email !== undefined) row.email = contact.email;
+  if (contact.phone !== undefined) row.phone = contact.phone;
+  if (contact.influence !== undefined) row.influence = contact.influence;
+  if (contact.relationship !== undefined) row.relationship = contact.relationship;
+  if (contact.isPrimary !== undefined) row.is_primary = contact.isPrimary;
+  if (contact.notes !== undefined) row.notes = contact.notes;
+  if (contact.createdBy !== undefined) row.created_by = contact.createdBy || null;
+  row.updated_at = new Date().toISOString();
+  return row;
+}
+
+function toCrmActivity(r: any): CrmActivity {
+  return {
+    id: r.id,
+    clientId: r.client_id,
+    contactId: r.contact_id || undefined,
+    type: r.type || 'task',
+    phase: r.phase || '',
+    recordType: r.record_type || '',
+    nextStage: r.next_stage || '',
+    contactName: r.contact_name || '',
+    analystName: r.analyst_name || '',
+    subject: r.subject,
+    quickNote: r.quick_note || '',
+    nextStep: r.next_step || '',
+    detail: r.detail || '',
+    status: r.status || 'planned',
+    priority: r.priority || 'normal',
+    dueAt: r.due_at || undefined,
+    completedAt: r.completed_at || undefined,
+    ownerId: r.owner_id || undefined,
+    createdBy: r.created_by || '',
+    createdAt: r.created_at,
+    updatedAt: r.updated_at || r.created_at,
+  };
+}
+
+function fromCrmActivity(activity: Omit<CrmActivity, 'id' | 'createdAt' | 'updatedAt'> | Partial<CrmActivity>): any {
+  const row: any = {};
+  if (activity.clientId !== undefined) row.client_id = activity.clientId;
+  if (activity.contactId !== undefined) row.contact_id = activity.contactId || null;
+  if (activity.type !== undefined) row.type = activity.type;
+  if (activity.phase !== undefined) row.phase = activity.phase;
+  if (activity.recordType !== undefined) row.record_type = activity.recordType;
+  if (activity.nextStage !== undefined) row.next_stage = activity.nextStage;
+  if (activity.contactName !== undefined) row.contact_name = activity.contactName;
+  if (activity.analystName !== undefined) row.analyst_name = activity.analystName;
+  if (activity.subject !== undefined) row.subject = activity.subject;
+  if (activity.quickNote !== undefined) row.quick_note = activity.quickNote;
+  if (activity.nextStep !== undefined) row.next_step = activity.nextStep;
+  if (activity.detail !== undefined) row.detail = activity.detail;
+  if (activity.status !== undefined) row.status = activity.status;
+  if (activity.priority !== undefined) row.priority = activity.priority;
+  if (activity.dueAt !== undefined) row.due_at = activity.dueAt || null;
+  if (activity.completedAt !== undefined) row.completed_at = activity.completedAt || null;
+  if (activity.ownerId !== undefined) row.owner_id = activity.ownerId || null;
+  if (activity.createdBy !== undefined) row.created_by = activity.createdBy || null;
+  row.updated_at = new Date().toISOString();
+  return row;
+}
+
+function jsonArray(value: any) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function jsonObject(value: any) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
 function toStatement(r: any): FinancialStatement_DB {
   return {
     id: r.id, clientId: r.client_id, sourceDocumentId: r.source_document_id || undefined,
     sourceCompanyName: r.source_company_name,
     documentType: r.document_type, period: r.period, periodDate: r.period_date,
     uploadDate: r.upload_date, fileName: r.file_name || '',
-    rawLineItems: r.raw_line_items || [], mappedData: r.mapped_data || {},
-    extraAccounts: r.extra_accounts || [],
+    rawLineItems: jsonArray(r.raw_line_items), mappedData: jsonObject(r.mapped_data) as FinancialStatement_DB['mappedData'],
+    extraAccounts: jsonArray(r.extra_accounts),
   };
+}
+
+function joinStatementValues(values: Array<string | null | undefined>) {
+  return Array.from(new Set(values.flatMap(value => String(value || '').split(',')).map(value => value.trim()).filter(Boolean))).join(', ');
+}
+
+function normalizedStatementAccountName(value: unknown) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '');
+}
+
+function rawLineItemMergeKey(item: FinancialStatement_DB['rawLineItems'][number] & { sourceKey?: string; metric?: string }) {
+  return [
+    item.metric || '',
+    item.statementType || 'otro',
+    normalizedStatementAccountName(item.name),
+  ].join('|');
+}
+
+function mergeRawLineItems(items: FinancialStatement_DB['rawLineItems']) {
+  const grouped = new Map<string, FinancialStatement_DB['rawLineItems'][number]>();
+  for (const item of items || []) {
+    const key = rawLineItemMergeKey(item);
+    const existing = grouped.get(key);
+    if (!existing) {
+      grouped.set(key, { ...item, value: normalizeFinancialWriteValue(item.value), sectionPath: item.sectionPath ?? null });
+      continue;
+    }
+
+    const existingValue = normalizeFinancialWriteValue(existing.value);
+    const incomingValue = normalizeFinancialWriteValue(item.value);
+    grouped.set(key, {
+      ...existing,
+      value: existingValue === incomingValue ? existingValue : existingValue + incomingValue,
+      sectionPath: existing.sectionPath || item.sectionPath || null,
+      source: existing.source || item.source,
+      statementType: existing.statementType || item.statementType || 'otro',
+    });
+  }
+  return Array.from(grouped.values());
+}
+
+function mergeMappedMetric(current: unknown, incoming: unknown) {
+  const a = normalizeFinancialWriteValue(current);
+  const b = normalizeFinancialWriteValue(incoming);
+  if (!a) return b;
+  if (!b) return a;
+  if (a === b) return a;
+  return a + b;
+}
+
+function mergeStatementRows(statements: FinancialStatement_DB[]) {
+  const grouped = new Map<string, FinancialStatement_DB>();
+  for (const statement of statements) {
+    const key = `${statement.clientId}|${statement.periodDate || statement.period}`;
+    const existing = grouped.get(key);
+    if (!existing) {
+      grouped.set(key, {
+        ...statement,
+        rawLineItems: mergeRawLineItems(statement.rawLineItems || []),
+        mappedData: { ...EMPTY_MAPPED_DATA, ...(statement.mappedData || {}) },
+        extraAccounts: [...(statement.extraAccounts || [])],
+      });
+      continue;
+    }
+
+    existing.rawLineItems = mergeRawLineItems([...existing.rawLineItems, ...(statement.rawLineItems || [])]);
+
+    const allMetrics = new Set([...Object.keys(existing.mappedData || {}), ...Object.keys(statement.mappedData || {})]);
+    for (const metric of allMetrics) {
+      existing.mappedData[metric] = mergeMappedMetric(existing.mappedData?.[metric], statement.mappedData?.[metric]);
+    }
+
+    const extraKeys = new Set(existing.extraAccounts.map(account => `${account.key}|${account.label}|${normalizeFinancialWriteValue(account.value)}`));
+    for (const account of statement.extraAccounts || []) {
+      const accountKey = `${account.key}|${account.label}|${normalizeFinancialWriteValue(account.value)}`;
+      if (!extraKeys.has(accountKey)) {
+        existing.extraAccounts.push(account);
+        extraKeys.add(accountKey);
+      }
+    }
+
+    existing.sourceDocumentId = existing.sourceDocumentId || statement.sourceDocumentId;
+    existing.sourceCompanyName = existing.sourceCompanyName || statement.sourceCompanyName;
+    existing.documentType = joinStatementValues([existing.documentType, statement.documentType]) || existing.documentType || statement.documentType;
+    existing.fileName = joinStatementValues([existing.fileName, statement.fileName]);
+    existing.period = existing.period || statement.period;
+  }
+  return Array.from(grouped.values());
 }
 
 function toLoanTape(r: any): LoanTape_DB {
@@ -352,6 +670,117 @@ function toSourceDocument(r: any): SourceDocument {
 
 function err(label: string, e: any): never {
   throw new Error(`${label}: ${e?.message || e}`);
+}
+
+function isMissingSchemaError(error: any, name?: string) {
+  const message = String(error?.message || error || '');
+  return /schema cache|could not find|does not exist|column .* does not exist/i.test(message)
+    && (!name || message.includes(name));
+}
+
+function uniqueMigrationStatuses(items: RolloutMigrationStatus[]) {
+  const seen = new Set<string>();
+  return items.filter(item => {
+    if (seen.has(item.file)) return false;
+    seen.add(item.file);
+    return true;
+  });
+}
+
+const ROLLOUT_MIGRATIONS = {
+  crmRelationship: {
+    version: '20260706',
+    file: 'database/20260706_crm_relationship_layer.sql',
+    reason: 'Crea crm_contacts, crm_activities y sus políticas RLS.',
+  },
+  crmSheetFields: {
+    version: '20260706',
+    file: 'database/20260706_crm_sheet_fields.sql',
+    reason: 'Agrega phase, record_type, next_stage, contact_name, analyst_name, quick_note y next_step a crm_activities.',
+  },
+  facilityAforoHistory: {
+    version: '20260701',
+    file: 'database/20260701_facility_specific_aforo_history.sql',
+    reason: 'Etiqueta el aforo histórico legacy con transactionId cuando el cliente tiene una sola facility.',
+  },
+} as const;
+
+async function readAppliedMigrationVersions(): Promise<Set<string> | null> {
+  try {
+    const client = (supabase as any).schema?.('supabase_migrations') || supabase;
+    const { data, error } = await client
+      .from('schema_migrations')
+      .select('version')
+      .in('version', [ROLLOUT_MIGRATIONS.facilityAforoHistory.version]);
+    if (error) return null;
+    return new Set((data || []).map((row: any) => String(row.version || '')));
+  } catch {
+    return null;
+  }
+}
+
+async function probeSelect(table: string, columns: string) {
+  return supabase.from(table).select(columns).limit(1);
+}
+
+async function findMissingLifecycleDataMigration(): Promise<RolloutMigrationStatus[]> {
+  const [clients, transactions] = await Promise.all([
+    supabase.from('clients').select('id,aforo_history'),
+    supabase.from('transactions').select('id,client_id'),
+  ]);
+  if (clients.error || transactions.error) return [];
+
+  const transactionCountByClient = new Map<string, number>();
+  for (const transaction of transactions.data || []) {
+    const clientId = String((transaction as any).client_id || '');
+    if (!clientId) continue;
+    transactionCountByClient.set(clientId, (transactionCountByClient.get(clientId) || 0) + 1);
+  }
+
+  const hasUntaggedSingleFacilityAforo = (clients.data || []).some((client: any) => {
+    if ((transactionCountByClient.get(client.id) || 0) !== 1) return false;
+    const history = Array.isArray(client.aforo_history) ? client.aforo_history : [];
+    return history.some((item: any) => item && typeof item === 'object' && !item.transactionId && !item.transaction_id);
+  });
+
+  return hasUntaggedSingleFacilityAforo ? [ROLLOUT_MIGRATIONS.facilityAforoHistory] : [];
+}
+
+async function findMissingRolloutSchema(feature: RolloutGuardFeature): Promise<RolloutMigrationStatus[]> {
+  const missing: RolloutMigrationStatus[] = [];
+
+  if (feature === 'crm') {
+    const [contacts, activities] = await Promise.all([
+      probeSelect('crm_contacts', 'id'),
+      probeSelect('crm_activities', 'id,client_id,subject,status,due_at,created_at'),
+    ]);
+    if (contacts.error && isMissingSchemaError(contacts.error, 'crm_contacts')) {
+      missing.push(ROLLOUT_MIGRATIONS.crmRelationship);
+    }
+    if (activities.error && isMissingSchemaError(activities.error, 'crm_activities')) {
+      missing.push(ROLLOUT_MIGRATIONS.crmRelationship);
+    }
+    if (!activities.error) {
+      const sheetFields = await probeSelect('crm_activities', 'phase,record_type,next_stage,contact_name,analyst_name,quick_note,next_step');
+      if (sheetFields.error && isMissingSchemaError(sheetFields.error)) {
+        missing.push(ROLLOUT_MIGRATIONS.crmSheetFields);
+      }
+    }
+  }
+
+  const transactions = await probeSelect('transactions', 'id,client_id,name,signed_at,maturity_at');
+  if (transactions.error && isMissingSchemaError(transactions.error)) {
+    missing.push({
+      file: 'database/schema.sql',
+      reason: 'La vista necesita la tabla transactions con signed_at y maturity_at.',
+    });
+  }
+
+  if (feature === 'lifecycle') {
+    missing.push(...await findMissingLifecycleDataMigration());
+  }
+
+  return uniqueMigrationStatuses(missing);
 }
 
 async function currentAuthUser() {
@@ -412,6 +841,29 @@ function documentStoragePath(orgId: string, clientId: string, documentType: Sour
 
 // ── DB object ────────────────────────────────────────────────────────────────
 export const db = {
+  async checkRolloutMigrations(feature: RolloutGuardFeature): Promise<RolloutGuardResult> {
+    const [appliedVersions, missingSchema] = await Promise.all([
+      readAppliedMigrationVersions(),
+      findMissingRolloutSchema(feature),
+    ]);
+    const missing = [...missingSchema];
+    const unverified: RolloutMigrationStatus[] = [];
+
+    if (feature === 'lifecycle') {
+      const migration = ROLLOUT_MIGRATIONS.facilityAforoHistory;
+      if (appliedVersions?.has(migration.version) === false) {
+        missing.push(migration);
+      } else if (appliedVersions === null) {
+        unverified.push(migration);
+      }
+    }
+
+    return {
+      missing: uniqueMigrationStatuses(missing),
+      unverified: uniqueMigrationStatuses(unverified),
+    };
+  },
+
   // ── Users ──────────────────────────────────────────────────────────────────
   async getUsers(): Promise<User[]> {
     const { data, error } = await supabase.from('profiles').select('*').order('created_at');
@@ -647,6 +1099,138 @@ export const db = {
       .map(r => ({ id: r.id, clientId: r.client_id, label: r.label, value: r.value || '', fieldType: r.field_type as any }));
   },
 
+  async getCustomFieldsForClients(clientIds: string[]): Promise<Record<string, CustomField[]>> {
+    if (!clientIds.length) return {};
+    const { data, error } = await supabase.from('custom_fields').select('*').in('client_id', clientIds);
+    if (error) err('getCustomFieldsForClients', error);
+    return (data || [])
+      .filter(r => !String(r.label || '').startsWith('__setting:'))
+      .reduce((acc, r) => {
+        const clientId = r.client_id;
+        (acc[clientId] ||= []).push({ id: r.id, clientId, label: r.label, value: r.value || '', fieldType: r.field_type as any });
+        return acc;
+      }, {} as Record<string, CustomField[]>);
+  },
+
+  // ── CRM ────────────────────────────────────────────────────────────────────
+  async createCrmContact(data: Omit<CrmContact, 'id' | 'createdAt' | 'updatedAt'>): Promise<CrmContact> {
+    const { data: row, error } = await supabase.from('crm_contacts').insert(fromCrmContact(data)).select().single();
+    if (error && isMissingSchemaError(error, 'crm_contacts')) {
+      throw new Error('Falta aplicar la migración CRM en Supabase: database/20260706_crm_relationship_layer.sql');
+    }
+    if (error) err('createCrmContact', error);
+    return toCrmContact(row);
+  },
+
+  async getCrmContacts(clientId: string): Promise<CrmContact[]> {
+    const { data, error } = await supabase
+      .from('crm_contacts')
+      .select('*')
+      .eq('client_id', clientId)
+      .order('is_primary', { ascending: false })
+      .order('created_at', { ascending: false });
+    if (error && isMissingSchemaError(error, 'crm_contacts')) return [];
+    if (error) err('getCrmContacts', error);
+    return (data || []).map(toCrmContact);
+  },
+
+  async updateCrmContact(id: string, updates: Partial<CrmContact>): Promise<void> {
+    const { error } = await supabase.from('crm_contacts').update(fromCrmContact(updates)).eq('id', id);
+    if (error && isMissingSchemaError(error, 'crm_contacts')) {
+      throw new Error('Falta aplicar la migración CRM en Supabase: database/20260706_crm_relationship_layer.sql');
+    }
+    if (error) err('updateCrmContact', error);
+  },
+
+  async deleteCrmContact(id: string): Promise<void> {
+    const { error } = await supabase.from('crm_contacts').delete().eq('id', id);
+    if (error && isMissingSchemaError(error, 'crm_contacts')) {
+      throw new Error('Falta aplicar la migración CRM en Supabase: database/20260706_crm_relationship_layer.sql');
+    }
+    if (error) err('deleteCrmContact', error);
+  },
+
+  async createCrmActivity(data: Omit<CrmActivity, 'id' | 'createdAt' | 'updatedAt'>): Promise<CrmActivity> {
+    const { data: row, error } = await supabase.from('crm_activities').insert(fromCrmActivity(data)).select().single();
+    if (error && isMissingSchemaError(error, 'crm_activities')) {
+      throw new Error('Falta aplicar la migración CRM en Supabase: database/20260706_crm_relationship_layer.sql');
+    }
+    if (error && isMissingSchemaError(error)) {
+      throw new Error('Falta aplicar la migración de campos del tracker: database/20260706_crm_sheet_fields.sql');
+    }
+    if (error) err('createCrmActivity', error);
+    return toCrmActivity(row);
+  },
+
+  async getCrmActivities(clientId: string): Promise<CrmActivity[]> {
+    const { data, error } = await supabase
+      .from('crm_activities')
+      .select('*')
+      .eq('client_id', clientId)
+      .order('due_at', { ascending: true, nullsFirst: false })
+      .order('created_at', { ascending: false });
+    if (error && isMissingSchemaError(error, 'crm_activities')) return [];
+    if (error) err('getCrmActivities', error);
+    return (data || []).map(toCrmActivity);
+  },
+
+  async getCrmActivitiesForClients(clientIds: string[]): Promise<Record<string, CrmActivity[]>> {
+    if (!clientIds.length) return {};
+    const { data, error } = await supabase
+      .from('crm_activities')
+      .select('*')
+      .in('client_id', clientIds)
+      .order('due_at', { ascending: false, nullsFirst: false })
+      .order('created_at', { ascending: false });
+    if (error && isMissingSchemaError(error, 'crm_activities')) return {};
+    if (error) err('getCrmActivitiesForClients', error);
+    return (data || []).map(toCrmActivity).reduce((acc, activity) => {
+      (acc[activity.clientId] ||= []).push(activity);
+      return acc;
+    }, {} as Record<string, CrmActivity[]>);
+  },
+
+  async updateCrmActivity(id: string, updates: Partial<CrmActivity>): Promise<void> {
+    const { error } = await supabase.from('crm_activities').update(fromCrmActivity(updates)).eq('id', id);
+    if (error && isMissingSchemaError(error, 'crm_activities')) {
+      throw new Error('Falta aplicar la migración CRM en Supabase: database/20260706_crm_relationship_layer.sql');
+    }
+    if (error) err('updateCrmActivity', error);
+  },
+
+  async deleteCrmActivity(id: string): Promise<void> {
+    const { error } = await supabase.from('crm_activities').delete().eq('id', id);
+    if (error && isMissingSchemaError(error, 'crm_activities')) {
+      throw new Error('Falta aplicar la migración CRM en Supabase: database/20260706_crm_relationship_layer.sql');
+    }
+    if (error) err('deleteCrmActivity', error);
+  },
+
+  async getCrmTimeline(clientId: string): Promise<CrmTimelineItem[]> {
+    const [contacts, activities] = await Promise.all([
+      this.getCrmContacts(clientId),
+      this.getCrmActivities(clientId),
+    ]);
+    return [
+      ...contacts.map(contact => ({
+        id: contact.id,
+        kind: 'contact' as const,
+        title: `Contacto agregado: ${contact.name}`,
+        detail: [contact.title, contact.department, contact.email].filter(Boolean).join(' · '),
+        at: contact.createdAt,
+        status: contact.relationship,
+      })),
+      ...activities.map(activity => ({
+        id: activity.id,
+        kind: 'activity' as const,
+        title: activity.subject,
+        detail: [activity.phase, activity.recordType, activity.quickNote || activity.detail, activity.nextStep].filter(Boolean).join(' · ') || activity.type,
+        at: activity.completedAt || activity.dueAt || activity.createdAt,
+        status: activity.status,
+      })),
+    ].sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
+  },
+
   // ── Transactions ───────────────────────────────────────────────────────────
   async createTransaction(data: Omit<Transaction, 'id' | 'createdAt'>): Promise<Transaction> {
     const { data: row, error } = await supabase.from('transactions').insert({
@@ -663,6 +1247,16 @@ export const db = {
     const { data, error } = await supabase.from('transactions').select('*').eq('client_id', clientId).order('created_at', { ascending: false });
     if (error) err('getTransactions', error);
     return (data || []).map(toTransaction);
+  },
+
+  async getTransactionsForClients(clientIds: string[]): Promise<Record<string, Transaction[]>> {
+    if (!clientIds.length) return {};
+    const { data, error } = await supabase.from('transactions').select('*').in('client_id', clientIds).order('created_at', { ascending: false });
+    if (error) err('getTransactionsForClients', error);
+    return (data || []).map(toTransaction).reduce((acc, transaction) => {
+      (acc[transaction.clientId] ||= []).push(transaction);
+      return acc;
+    }, {} as Record<string, Transaction[]>);
   },
 
   async getTransactionById(id: string): Promise<Transaction | undefined> {
@@ -691,13 +1285,20 @@ export const db = {
 
   // ── Contract Files ─────────────────────────────────────────────────────────
   async addContractFile(data: Omit<ContractFile, 'id' | 'uploadedAt'>): Promise<ContractFile> {
-    const { data: row, error } = await supabase.from('contract_files').insert({
+    const payload = {
       transaction_id: data.transactionId, client_id: data.clientId,
       source_document_id: data.sourceDocumentId || null,
       original_name: data.originalName, mime_type: data.mimeType,
       base64_data: data.base64Data, extraction_status: data.extractionStatus,
       extracted_covenants: data.extractedCovenants || null,
-    }).select().single();
+    };
+    let { data: row, error } = await supabase.from('contract_files').insert(payload).select().single();
+    if (error && isMissingSchemaError(error, 'source_document_id')) {
+      const { source_document_id, ...fallbackPayload } = payload;
+      const retry = await supabase.from('contract_files').insert(fallbackPayload).select().single();
+      row = retry.data;
+      error = retry.error;
+    }
     if (error) err('addContractFile', error);
     return toContractFile(row);
   },
@@ -706,6 +1307,20 @@ export const db = {
     const { data, error } = await supabase.from('contract_files').select('*').eq('transaction_id', transactionId).order('uploaded_at');
     if (error) err('getContractFiles', error);
     return (data || []).map(toContractFile);
+  },
+
+  async getContractFilesForTransactions(transactionIds: string[]): Promise<Record<string, ContractFile[]>> {
+    if (!transactionIds.length) return {};
+    const { data, error } = await supabase
+      .from('contract_files')
+      .select('*')
+      .in('transaction_id', transactionIds)
+      .order('uploaded_at', { ascending: false });
+    if (error) err('getContractFilesForTransactions', error);
+    return (data || []).map(toContractFile).reduce((acc, file) => {
+      (acc[file.transactionId] ||= []).push(file);
+      return acc;
+    }, {} as Record<string, ContractFile[]>);
   },
 
   async updateContractFile(id: string, updates: Partial<ContractFile>): Promise<void> {
@@ -755,6 +1370,7 @@ export const db = {
 
   async updateCovenant(id: string, updates: Partial<Covenant_DB>): Promise<void> {
     const row: any = {};
+    if (updates.transactionId !== undefined) row.transaction_id = updates.transactionId || null;
     if (updates.name !== undefined) row.name = updates.name;
     if (updates.formula !== undefined) row.formula = updates.formula;
     if (updates.threshold !== undefined) row.threshold = normalizeFinancialNumberString(updates.threshold);
@@ -808,7 +1424,9 @@ export const db = {
     const orgId = await resolveOrgId(authUser.id);
     if (!orgId) throw new Error('No se pudo resolver la organización para guardar el archivo.');
 
-    const storagePath = documentStoragePath(orgId, clientId, documentType, file.name);
+    let storagePath = documentStoragePath(orgId, clientId, documentType, file.name);
+    let storageBucket: string | null = FINANCIAL_DOCUMENT_BUCKET;
+    let storageWarning = '';
     const mimeType = file.type || 'application/octet-stream';
     const uploaded = await supabase.storage
       .from(FINANCIAL_DOCUMENT_BUCKET)
@@ -817,26 +1435,45 @@ export const db = {
         cacheControl: '3600',
         upsert: false,
       });
-    if (uploaded.error) err('uploadClientDocument.storage', uploaded.error);
+    if (uploaded.error) {
+      storageWarning = `No se guardó el original en Supabase Storage: ${uploaded.error.message || 'error de almacenamiento'}.`;
+      storagePath = '';
+      storageBucket = null;
+    }
 
     const { data: row, error } = await supabase.from('documents').insert({
       org_id: orgId,
       client_id: clientId,
       source_kind: 'upload',
-      source_uri: `supabase://${FINANCIAL_DOCUMENT_BUCKET}/${storagePath}`,
-      storage_bucket: FINANCIAL_DOCUMENT_BUCKET,
-      storage_path: storagePath,
+      source_uri: storageBucket ? `supabase://${storageBucket}/${storagePath}` : `upload://${safeFileName(file.name)}`,
+      storage_bucket: storageBucket,
+      storage_path: storagePath || null,
       file_name: file.name,
       mime_type: mimeType,
       size_bytes: file.size,
       document_type: documentType,
       extraction_status: 'uploaded',
-      raw_metadata: metadata,
+      raw_metadata: storageWarning ? { ...metadata, storageWarning } : metadata,
       uploaded_by: authUser.id,
     }).select().single();
 
     if (error) {
-      await supabase.storage.from(FINANCIAL_DOCUMENT_BUCKET).remove([storagePath]);
+      if (storageBucket && storagePath) await supabase.storage.from(FINANCIAL_DOCUMENT_BUCKET).remove([storagePath]);
+      if (isMissingSchemaError(error, 'documents')) {
+        return {
+          id: '',
+          orgId,
+          clientId,
+          sourceKind: 'upload',
+          fileName: file.name,
+          mimeType,
+          sizeBytes: file.size,
+          documentType,
+          extractionStatus: 'uploaded',
+          uploadedBy: authUser.id,
+          createdAt: new Date().toISOString(),
+        };
+      }
       err('uploadClientDocument.record', error);
     }
     return toSourceDocument(row);
@@ -857,13 +1494,20 @@ export const db = {
 
   // ── Financial Statements ───────────────────────────────────────────────────
   async createStatement(data: Omit<FinancialStatement_DB, 'id' | 'uploadDate'>): Promise<FinancialStatement_DB> {
-    const { data: row, error } = await supabase.from('financial_statements').insert({
+    const payload = {
       client_id: data.clientId, source_document_id: data.sourceDocumentId || null,
       source_company_name: data.sourceCompanyName || null,
       document_type: data.documentType || null, period: data.period, period_date: data.periodDate,
       file_name: data.fileName, raw_line_items: normalizeRawLineItems(data.rawLineItems),
       mapped_data: normalizeMappedData(data.mappedData), extra_accounts: normalizeExtraAccounts(data.extraAccounts),
-    }).select().single();
+    };
+    let { data: row, error } = await supabase.from('financial_statements').insert(payload).select().single();
+    if (error && isMissingSchemaError(error, 'source_document_id')) {
+      const { source_document_id, ...fallbackPayload } = payload;
+      const retry = await supabase.from('financial_statements').insert(fallbackPayload).select().single();
+      row = retry.data;
+      error = retry.error;
+    }
     if (error) err('createStatement', error);
     return toStatement(row);
   },
@@ -871,7 +1515,17 @@ export const db = {
   async getStatements(clientId: string): Promise<FinancialStatement_DB[]> {
     const { data, error } = await supabase.from('financial_statements').select('*').eq('client_id', clientId).order('period_date');
     if (error) err('getStatements', error);
-    return (data || []).map(toStatement);
+    return mergeStatementRows((data || []).map(toStatement));
+  },
+
+  async getStatementsForClients(clientIds: string[]): Promise<Record<string, FinancialStatement_DB[]>> {
+    if (!clientIds.length) return {};
+    const { data, error } = await supabase.from('financial_statements').select('*').in('client_id', clientIds).order('period_date');
+    if (error) err('getStatementsForClients', error);
+    return mergeStatementRows((data || []).map(toStatement)).reduce((acc, statement) => {
+      (acc[statement.clientId] ||= []).push(statement);
+      return acc;
+    }, {} as Record<string, FinancialStatement_DB[]>);
   },
 
   async getStatementById(id: string): Promise<FinancialStatement_DB | undefined> {
@@ -884,6 +1538,10 @@ export const db = {
     if (updates.mappedData !== undefined) row.mapped_data = normalizeMappedData(updates.mappedData);
     if (updates.rawLineItems !== undefined) row.raw_line_items = normalizeRawLineItems(updates.rawLineItems);
     if (updates.extraAccounts !== undefined) row.extra_accounts = normalizeExtraAccounts(updates.extraAccounts);
+    if (updates.sourceDocumentId !== undefined) row.source_document_id = updates.sourceDocumentId || null;
+    if (updates.sourceCompanyName !== undefined) row.source_company_name = updates.sourceCompanyName || null;
+    if (updates.documentType !== undefined) row.document_type = updates.documentType || null;
+    if (updates.fileName !== undefined) row.file_name = updates.fileName;
     if (updates.period !== undefined) row.period = updates.period;
     if (updates.periodDate !== undefined) row.period_date = updates.periodDate;
     const { error } = await supabase.from('financial_statements').update(row).eq('id', id);
@@ -897,12 +1555,19 @@ export const db = {
 
   // ── Loan Tapes ─────────────────────────────────────────────────────────────
   async createLoanTape(data: Omit<LoanTape_DB, 'id' | 'uploadDate'>): Promise<LoanTape_DB> {
-    const { data: row, error } = await supabase.from('loan_tapes').insert({
+    const payload = {
       client_id: data.clientId, source_document_id: data.sourceDocumentId || null,
       name: data.name, file_name: data.fileName,
       tape_type: data.tapeType, extracted_data: normalizeLoanTapeData(data.extractedData),
       analyst_state: data.analystState || {},
-    }).select().single();
+    };
+    let { data: row, error } = await supabase.from('loan_tapes').insert(payload).select().single();
+    if (error && isMissingSchemaError(error, 'source_document_id')) {
+      const { source_document_id, ...fallbackPayload } = payload;
+      const retry = await supabase.from('loan_tapes').insert(fallbackPayload).select().single();
+      row = retry.data;
+      error = retry.error;
+    }
     if (error) err('createLoanTape', error);
     return toLoanTape(row);
   },
@@ -911,6 +1576,20 @@ export const db = {
     const { data, error } = await supabase.from('loan_tapes').select('*').eq('client_id', clientId).order('upload_date', { ascending: false });
     if (error) err('getLoanTapes', error);
     return (data || []).map(toLoanTape);
+  },
+
+  async getLoanTapesForClients(clientIds: string[]): Promise<Record<string, LoanTape_DB[]>> {
+    if (!clientIds.length) return {};
+    const { data, error } = await supabase
+      .from('loan_tapes')
+      .select('*')
+      .in('client_id', clientIds)
+      .order('upload_date', { ascending: false });
+    if (error) err('getLoanTapesForClients', error);
+    return (data || []).map(toLoanTape).reduce((acc, tape) => {
+      (acc[tape.clientId] ||= []).push(tape);
+      return acc;
+    }, {} as Record<string, LoanTape_DB[]>);
   },
 
   async getLoanTapeById(id: string): Promise<LoanTape_DB | undefined> {

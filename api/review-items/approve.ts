@@ -70,6 +70,50 @@ function eqOrNull(column: string, value: any) {
     : `${column}=eq.${encodeURIComponent(String(value))}`;
 }
 
+function joinUnique(values: Array<string | null | undefined>) {
+  return Array.from(new Set(values.flatMap(value => String(value || '').split(',')).map(value => value.trim()).filter(Boolean))).join(', ');
+}
+
+function normalizeLineName(value: string) {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function normalizeValue(value: unknown) {
+  return Number(value ?? 0) || 0;
+}
+
+function lineItemKey(args: { accountName: string; value: number; metric: string; statementType?: string | null }) {
+  return [
+    args.metric || 'extraAccounts',
+    args.statementType || 'otro',
+    normalizeLineName(args.accountName),
+    normalizeValue(args.value),
+  ].join('|');
+}
+
+function hasExistingLineItem(statement: any, args: { accountName: string; value: number; metric: string; statementType?: string | null }) {
+  const targetWithMetric = lineItemKey(args);
+  const targetWithoutMetric = [
+    args.statementType || 'otro',
+    normalizeLineName(args.accountName),
+    normalizeValue(args.value),
+  ].join('|');
+  return (statement.raw_line_items || []).some((item: any) => {
+    const itemWithMetric = lineItemKey({
+      accountName: item.name,
+      value: item.value,
+      metric: item.metric || args.metric || 'extraAccounts',
+      statementType: item.statementType || 'otro',
+    });
+    const itemWithoutMetric = [
+      item.statementType || 'otro',
+      normalizeLineName(item.name),
+      normalizeValue(item.value),
+    ].join('|');
+    return itemWithMetric === targetWithMetric || itemWithoutMetric === targetWithoutMetric;
+  });
+}
+
 async function findOrCreateStatement(admin: any, item: any) {
   const suggested = item.suggested_value || {};
   const fileName = item.documents?.file_name || '';
@@ -80,14 +124,14 @@ async function findOrCreateStatement(admin: any, item: any) {
     [
       'financial_statements?select=*',
       `client_id=eq.${encodeURIComponent(item.client_id)}`,
-      `period=eq.${encodeURIComponent(period)}`,
-      `file_name=eq.${encodeURIComponent(fileName)}`,
-      'limit=1',
+      `period_date=eq.${encodeURIComponent(periodDate)}`,
+      'order=upload_date.asc',
     ].join('&'),
     {},
     [],
   );
-  if (existing[0]) return existing[0];
+  const statement = existing.find(row => row.period === period) || existing[0];
+  if (statement) return statement;
 
   const rows = await supabaseJson<any[]>(
     admin,
@@ -119,7 +163,9 @@ async function approveFinancialLineItem(admin: any, item: any) {
   const value = Number(suggested.value ?? raw.value ?? 0) || 0;
   const metric = suggested.metric || 'extraAccounts';
   const accountName = suggested.accountName || raw.accountName || 'Rubro sin nombre';
+  const statementType = suggested.statementType || raw.statementType || 'otro';
   const sourceKey = itemSourceKey(item);
+  const fileName = item.documents?.file_name || '';
 
   const existingSources = await supabaseJson<any[]>(
     admin,
@@ -172,18 +218,25 @@ async function approveFinancialLineItem(admin: any, item: any) {
   );
   if (!sourceRows.length) return { financialStatementId: statement.id, metric, value, duplicate: true };
 
-  const rawLineItems = [...(statement.raw_line_items || []), {
-    name: accountName,
-    value,
-    sourceKey,
-    source: statement.file_name || '',
-    sectionPath: raw.sheetName || raw.pageNumber ? [raw.sheetName, raw.pageNumber ? `Página ${raw.pageNumber}` : ''].filter(Boolean).join(' / ') : null,
-    statementType: 'otro',
-  }];
+  const nextFileName = joinUnique([statement.file_name, fileName]);
+  const lineAlreadyPresent = hasExistingLineItem(statement, { accountName, value, metric, statementType });
+  const rawLineItems = lineAlreadyPresent
+    ? [...(statement.raw_line_items || [])]
+    : [...(statement.raw_line_items || []), {
+      name: accountName,
+      value,
+      metric,
+      sourceKey,
+      source: fileName || statement.file_name || '',
+      sectionPath: raw.sheetName || raw.pageNumber ? [raw.sheetName, raw.pageNumber ? `Página ${raw.pageNumber}` : ''].filter(Boolean).join(' / ') : null,
+      statementType,
+    }];
   const mappedData = { ...DEFAULT_MAPPED, ...(statement.mapped_data || {}) };
   const extraAccounts = [...(statement.extra_accounts || [])];
 
-  if (metric === 'extraAccounts') {
+  if (lineAlreadyPresent) {
+    // Keep the additional source row, but do not double-count a line already present for this period.
+  } else if (metric === 'extraAccounts') {
     extraAccounts.push({
       key: accountName.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, ''),
       label: accountName,
@@ -197,10 +250,16 @@ async function approveFinancialLineItem(admin: any, item: any) {
   await supabaseFetch(admin, `financial_statements?id=eq.${encodeURIComponent(statement.id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-    body: JSON.stringify({ raw_line_items: rawLineItems, mapped_data: mappedData, extra_accounts: extraAccounts }),
+    body: JSON.stringify({
+      file_name: nextFileName || statement.file_name || fileName,
+      source_document_id: statement.source_document_id || item.document_id || null,
+      raw_line_items: rawLineItems,
+      mapped_data: mappedData,
+      extra_accounts: extraAccounts,
+    }),
   });
 
-  return { financialStatementId: statement.id, metric, value };
+  return { financialStatementId: statement.id, metric, value, duplicateLineItem: lineAlreadyPresent };
 }
 
 async function approveQualitativeItem(admin: any, item: any) {

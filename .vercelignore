@@ -1,0 +1,16 @@
+.env
+.env.*
+.git
+.vercel
+node_modules
+dist
+dist-ssr
+outputs
+output
+tmp
+work
+.codex_spreadsheet_work
+.pnpm-store
+finmonitor-base-local.zip
+*.log
+.DS_Store

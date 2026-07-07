@@ -32,15 +32,17 @@ const extractionSchema = {
     },
     rawLineItems: {
       type: Type.ARRAY,
-      description: "Todas las líneas contables encontradas literalmente en el estado financiero. No omitir por no saber mapear.",
+      description: "Solo líneas contables explícitas de Balance General o Estado de Resultados. Omitir flujo de efectivo, covenants, razones, notas e indicadores auxiliares.",
       items: {
         type: Type.OBJECT,
         properties: {
           name: { type: Type.STRING },
           value: { type: Type.NUMBER },
-          source: { type: Type.STRING }
+          source: { type: Type.STRING },
+          statementType: { type: Type.STRING, enum: ["balance_general", "estado_resultados"] },
+          sectionPath: { type: Type.STRING }
         },
-        required: ["name", "value"]
+        required: ["name", "value", "statementType"]
       }
     },
     mappingSuggestions: {
@@ -382,31 +384,49 @@ export class GeminiService {
     return JSON.stringify(json);
   }
 
+  private sanitizeFinancialExtraction(parsed: any): ExtractionResult {
+    const allowed = new Set(['balance_general', 'estado_resultados']);
+    const rawLineItems = (parsed.rawLineItems || [])
+      .filter((item: any) => allowed.has(item.statementType || item.type))
+      .map((item: any) => ({
+        ...item,
+        name: String(item.name || '').trim(),
+        value: Number(item.value),
+        statementType: item.statementType || item.type,
+        sectionPath: item.sectionPath || null,
+      }))
+      .filter((item: any) => item.name && Number.isFinite(item.value));
+
+    return {
+      ...parsed,
+      rawLineItems,
+      mappingSuggestions: [],
+      covenantValues: [],
+    } as ExtractionResult;
+  }
+
   // ── Financial / PDF extraction ────────────────────────────────────────────
 
   async extractFromImage(base64Data: string, mimeType: string, covenantsToMatch?: string[]): Promise<ExtractionResult> {
-    const covSection = covenantsToMatch && covenantsToMatch.length > 0
-      ? `\n\nCOVENANTS A MAPEAR: Busca y extrae valores para: ${covenantsToMatch.join(', ')}. Usa coincidencia aproximada.`
-      : "";
-
     const response = await this.generateContent({
       model: 'gemini-3-flash-preview',
       contents: {
         parts: [
           { inlineData: { data: base64Data, mimeType } },
           {
-            text: `Eres un analista financiero experto en estados financieros mexicanos (PCGA y NIIF).
+            text: `Eres un extractor financiero experto en estados financieros mexicanos (PCGA y NIIF).
 
-TAREA: Extrae con MÁXIMA PRECISIÓN todos los datos financieros.
+TAREA: Extrae con MÁXIMA PRECISIÓN solo Balance General y Estado de Resultados.
 
 INSTRUCCIONES:
 1. Identifica el período: usa "MMM-YY" para meses (ej. "Nov-24"), "QN YYYY" para trimestres, "FY YYYY" para años.
 2. Extrae valores numéricos en su unidad original. Infiere la escala (pesos, miles, millones) del encabezado del documento.
 3. Si un valor no aparece, devuelve 0. NO estimes.
-4. EBITDA: si no aparece directamente, calcula como Utilidad Operativa + Depreciación + Amortización.
-5. Devuelve rawLineItems con TODAS las cuentas/líneas tal como aparecen.
-6. Devuelve mappingSuggestions hacia estas claves cuando aplique: revenue, cogs, operatingExpenses, ebitda, interestExpense, netIncome, currentAssets, currentLiabilities, totalDebt, totalAssets, equity. Usa "ignore" si no aplica.
-7. Busca en TODAS las páginas y tablas del documento.${covSection}
+4. Devuelve rawLineItems únicamente con cuentas explícitas de Balance General o Estado de Resultados, tal como aparecen.
+5. Cada rawLineItem debe tener statementType: "balance_general" o "estado_resultados".
+6. Omite flujo de efectivo, covenants, razones financieras, KPIs, notas, comentarios, contratos, aging operativo, reportes de monitoreo y cualquier tabla auxiliar.
+7. No generes mappingSuggestions ni covenantValues.
+8. Busca en TODAS las páginas y tablas del documento, pero solo conserva Balance General y Estado de Resultados.
 
 Devuelve JSON válido.`
           }
@@ -414,20 +434,16 @@ Devuelve JSON válido.`
       },
       config: { responseMimeType: "application/json", responseSchema: extractionSchema },
     });
-    return JSON.parse(response.text || '{}') as ExtractionResult;
+    return this.sanitizeFinancialExtraction(JSON.parse(response.text || '{}'));
   }
 
   async extractFromText(text: string, covenantsToMatch?: string[]): Promise<ExtractionResult> {
-    const covSection = covenantsToMatch && covenantsToMatch.length > 0
-      ? `\n\nCOVENANTS A MAPEAR: ${covenantsToMatch.join(', ')}. Usa coincidencia aproximada.`
-      : "";
-
     const response = await this.generateContent({
       model: 'gemini-3-flash-preview',
-      contents: `Eres un analista financiero experto. Extrae todos los datos financieros con máxima precisión. No inventes valores. Devuelve rawLineItems con todas las líneas encontradas y mappingSuggestions para aprobación humana. Si una clave estándar no aparece usa 0.${covSection}\n\nTEXTO:\n${text}`,
+      contents: `Eres un extractor financiero experto. Extrae solo cuentas explícitas de Balance General y Estado de Resultados con máxima precisión. No inventes valores. Omite flujo de efectivo, covenants, razones financieras, KPIs, notas, contratos, reportes de monitoreo y tablas auxiliares. Devuelve rawLineItems solo con statementType "balance_general" o "estado_resultados". No generes mappingSuggestions ni covenantValues. Si una clave estándar no aparece usa 0.\n\nTEXTO:\n${text}`,
       config: { responseMimeType: "application/json", responseSchema: extractionSchema },
     });
-    return JSON.parse(response.text || '{}') as ExtractionResult;
+    return this.sanitizeFinancialExtraction(JSON.parse(response.text || '{}'));
   }
 
   // ── Contract extraction ───────────────────────────────────────────────────

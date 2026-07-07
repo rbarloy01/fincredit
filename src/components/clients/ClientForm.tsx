@@ -136,7 +136,6 @@ const ClientForm: React.FC<Props> = ({ session, aiSettings, initialData, onSave,
   const validate = (): boolean => {
     const newErrors: Record<string, string> = {};
     if (!name.trim()) newErrors.name = 'El nombre es requerido';
-    if (!taxId.trim()) newErrors.taxId = 'El RFC es requerido';
     if (score.trim()) {
       const numericScore = Number(score);
       if (!Number.isFinite(numericScore) || numericScore < 0 || numericScore > 100) {
@@ -367,7 +366,7 @@ const ClientForm: React.FC<Props> = ({ session, aiSettings, initialData, onSave,
 
             {/* RFC */}
             <div>
-              <label className={labelClass}>RFC / ID Fiscal *</label>
+              <label className={labelClass}>RFC / ID Fiscal</label>
               <input
                 type="text"
                 value={taxId}

@@ -1,6 +1,7 @@
 import { readJson, sendJson } from '../_helpers.js';
 import {
   classifyDocument,
+  compactKey,
   inferPeriod,
   matchClientId,
   requireIngestionManager,
@@ -15,6 +16,46 @@ type QueueItem = {
   folderId: string;
   path: string;
 };
+
+function firstPathSegment(path: string) {
+  return path.split('/').map(part => part.trim()).find(Boolean) || '';
+}
+
+function isLikelyDocumentBucket(name: string) {
+  const key = compactKey(name);
+  return /^(eeff|estadosfinancieros|financials|contratos|contracts|loantapes|cartera|corporativo|legal|covenants|reportes)$/.test(key);
+}
+
+function clientNameFromPath(path: string) {
+  const name = firstPathSegment(path);
+  if (!name || isLikelyDocumentBucket(name)) return '';
+  return name;
+}
+
+async function createClientFromPath(admin: any, orgId: string, userId: string, name: string) {
+  const rows = await supabaseJson<any[]>(
+    admin,
+    'clients',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Prefer: 'return=representation' },
+      body: JSON.stringify({
+        org_id: orgId,
+        name,
+        tax_id: '',
+        industry: 'Otro',
+        currency: 'MXN',
+        total_credit_value: 0,
+        credit_type: [],
+        contract_name: '',
+        analyst_name: '',
+        created_by: userId,
+      }),
+    },
+    [],
+  );
+  return rows[0] || null;
+}
 
 async function listFolder(folderId: string) {
   const drive = await getDriveClient();
@@ -39,10 +80,11 @@ export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' });
 
   try {
-    const { orgId, supabase } = await requireIngestionManager(req);
+    const { orgId, user, supabase } = await requireIngestionManager(req);
     const body = await readJson(req);
     const rootFolderId = body.rootFolderId || process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID;
     const dryRun = Boolean(body.dryRun);
+    const autoCreateClients = Boolean(body.autoCreateClients);
     const maxFiles = Math.min(Number(body.maxFiles || 500), 5000);
     if (!rootFolderId) return sendJson(res, 400, { error: 'rootFolderId or GOOGLE_DRIVE_ROOT_FOLDER_ID required' });
 
@@ -56,6 +98,7 @@ export default async function handler(req: any, res: any) {
     const queue: QueueItem[] = [{ folderId: rootFolderId, path: '' }];
     const rows: any[] = [];
     const folders: Array<{ id: string; path: string }> = [];
+    const createdClients: Array<{ id: string; name: string }> = [];
 
     while (queue.length && rows.length < maxFiles) {
       const current = queue.shift() as QueueItem;
@@ -69,9 +112,24 @@ export default async function handler(req: any, res: any) {
         }
         const docType = classifyDocument(file.name, file.mimeType, current.path);
         const inferred = inferPeriod(`${current.path} ${file.name}`);
+        let clientId = matchClientId(current.path, file.name, clients);
+        const derivedClientName = clientNameFromPath(current.path);
+        if (!clientId && derivedClientName) {
+          const existing = clients.find(client => compactKey(client.name) === compactKey(derivedClientName));
+          if (existing) {
+            clientId = existing.id;
+          } else if (autoCreateClients && !dryRun) {
+            const created = await createClientFromPath(supabase, orgId, user.id, derivedClientName);
+            if (created?.id) {
+              clients.push(created);
+              createdClients.push({ id: created.id, name: created.name });
+              clientId = created.id;
+            }
+          }
+        }
         rows.push({
           org_id: orgId,
-          client_id: matchClientId(current.path, file.name, clients),
+          client_id: clientId,
           drive_file_id: file.id,
           drive_parent_id: current.folderId,
           drive_path: current.path,
@@ -116,6 +174,7 @@ export default async function handler(req: any, res: any) {
       rootFolderId,
       foldersSeen: folders.length,
       filesSeen: rows.length,
+      createdClients,
       insertedOrUpdated: dryRun ? 0 : rows.length,
       samples: rows.slice(0, 12).map(row => ({
         fileName: row.file_name,

@@ -25,4 +25,19 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Generated local artifacts
 .vercel
+.codex_spreadsheet_work/
+.pnpm-store/
+dist/
+dist-ssr/
+output/
+outputs/
+tmp/
+work/
+finmonitor-base-local.zip
+
+# Generated reports and spreadsheet inspection outputs
+*.inspect.ndjson
+*.tmp
