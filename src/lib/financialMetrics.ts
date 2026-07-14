@@ -136,12 +136,27 @@ export function accountOptions(statements: FinancialStatement_DB[]) {
 }
 
 function findRaw(stmt: FinancialStatement_DB, names: string[], types?: string[]): number | null {
-  const found = rawLineItems(stmt).find(item => {
+  const aliases = names.map((name, index) => ({ value: norm(name), index })).filter(alias => alias.value);
+  let best: { value: number; score: number } | null = null;
+  rawLineItems(stmt).forEach((item, itemIndex) => {
     const n = norm(item.name);
+    const section = norm(item.sectionPath || '');
     const typeOk = !types || types.includes(item.statementType || 'otro');
-    return typeOk && names.some(name => n.includes(norm(name)));
+    if (!typeOk) return;
+    aliases.forEach(alias => {
+      const exact = n === alias.value;
+      const contains = n.includes(alias.value);
+      const reverseContains = alias.value.includes(n);
+      if (!exact && !contains && !reverseContains) return;
+      let score = exact ? 1000 : contains ? 700 : 450;
+      score += Math.max(0, 120 - alias.index);
+      if (n.includes('total') || n.includes('subtotal') || section.includes('total')) score += 80;
+      if (n.includes('neto') || n.includes('neta')) score += 35;
+      score -= itemIndex / 1000;
+      if (!best || score > best.score) best = { value: item.value, score };
+    });
   });
-  return found?.value ?? null;
+  return best?.value ?? null;
 }
 
 function firstValue(...values: Array<number | null | undefined>): number | null {
@@ -159,6 +174,10 @@ function subtractValues(a: number | null, b: number | null): number | null {
   return a - b;
 }
 
+function absoluteValue(value: number | null): number | null {
+  return value === null ? null : Math.abs(value);
+}
+
 export function getMetric(stmt: FinancialStatement_DB, key: string): number | null {
   const m = asObject<FinancialStatement_DB['mappedData']>((stmt as any).mappedData);
   const raw = (names: string[], types?: string[]) => findRaw(stmt, names, types);
@@ -167,27 +186,27 @@ export function getMetric(stmt: FinancialStatement_DB, key: string): number | nu
     case 'interestIncome': return firstValue(findConsolidatedMetricValue(stmt, 'interestIncome'), raw(['ingresos por intereses', 'intereses cobrados', 'ingreso por interes', ...metricAliases('interestIncome')], ['estado_resultados']));
     case 'feeIncome': return firstValue(findConsolidatedMetricValue(stmt, 'feeIncome'), raw(['ingresos por comisiones', 'comisiones cobradas', 'ingreso por comision', ...metricAliases('feeIncome')], ['estado_resultados']));
     case 'coreBusinessIncome': return firstValue(findConsolidatedMetricValue(stmt, 'coreBusinessIncome'), addValues(getMetric(stmt, 'interestIncome'), getMetric(stmt, 'feeIncome')), getMetric(stmt, 'revenue'));
-    case 'adjustedFinancialMargin': return firstValue(findConsolidatedMetricValue(stmt, 'adjustedFinancialMargin'), raw(['margen financiero ajustado', 'margen financiero aj', ...metricAliases('adjustedFinancialMargin')], ['estado_resultados']));
-    case 'adjustedOperatingIncome': return firstValue(findConsolidatedMetricValue(stmt, 'adjustedOperatingIncome'), raw(['utilidad operativa ajustada', 'utilidad operacion ajustada', 'utilidad de operacion ajustada', ...metricAliases('adjustedOperatingIncome')], ['estado_resultados']));
-    case 'adminSellingOperatingExpenses': return firstValue(findConsolidatedMetricValue(stmt, 'adminSellingOperatingExpenses'), raw(['gastos de administracion venta y operacion', 'gastos adm venta opn', 'gastos administrativos', 'gastos de operacion', ...metricAliases('adminSellingOperatingExpenses')], ['estado_resultados']));
+    case 'adjustedFinancialMargin': return firstValue(raw(['margen financiero ajustado por riesgos crediticios', 'margen financiero ajustado', 'margen financiero aj', ...metricAliases('adjustedFinancialMargin')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'adjustedFinancialMargin'));
+    case 'adjustedOperatingIncome': return firstValue(raw(['utilidad o perdida de operacion', 'utilidad o pérdida de operación', 'utilidad de operacion', 'utilidad operativa ajustada', 'utilidad operacion ajustada', 'utilidad de operacion ajustada', 'resultado de operacion', ...metricAliases('adjustedOperatingIncome')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'adjustedOperatingIncome'));
+    case 'adminSellingOperatingExpenses': return absoluteValue(firstValue(raw(['gastos de operacion total', 'gastos de operación total', 'gastos de operacion (total)', 'gastos de administracion venta y operacion', 'gastos adm venta opn', 'gastos administrativos', 'gastos de operacion', ...metricAliases('adminSellingOperatingExpenses')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'adminSellingOperatingExpenses')));
     case 'ebitda': return firstValue(m.ebitda, findConsolidatedMetricValue(stmt, 'ebitda'), raw(['ebitda', ...metricAliases('ebitda')], ['estado_resultados']), raw(['utilidad operacion', 'utilidad de operacion', 'resultado de operacion', 'utilidad antes de intereses'], ['estado_resultados']));
-    case 'interestExpense': return firstValue(m.interestExpense, findConsolidatedMetricValue(stmt, 'interestExpense'), raw(['gasto financiero', 'intereses pagados', 'intereses devengados', 'resultado integral de financiamiento', ...metricAliases('interestExpense')], ['estado_resultados']));
+    case 'interestExpense': return absoluteValue(firstValue(m.interestExpense, raw(['gastos por intereses', 'gasto por intereses', 'gasto financiero', 'intereses pagados', 'intereses devengados', 'resultado integral de financiamiento', ...metricAliases('interestExpense')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'interestExpense')));
     case 'netIncome': return firstValue(m.netIncome, findConsolidatedMetricValue(stmt, 'netIncome'), raw(['utilidad neta', 'resultado neto', 'utilidad o perdida', 'utilidad (o perdida)', 'perdida del ejercicio', ...metricAliases('netIncome')], ['estado_resultados']));
     case 'currentAssets': return firstValue(m.currentAssets, findConsolidatedMetricValue(stmt, 'currentAssets'), raw(['activo circulante', 'activo corriente', 'total activo a corto plazo', 'activo a corto plazo', ...metricAliases('currentAssets')], ['balance_general']));
     case 'currentLiabilities': return firstValue(m.currentLiabilities, findConsolidatedMetricValue(stmt, 'currentLiabilities'), raw(['pasivo circulante', 'pasivo corriente', 'total pasivo a corto plazo', 'pasivo a corto plazo', ...metricAliases('currentLiabilities')], ['balance_general']));
-    case 'totalDebt': return firstValue(m.totalDebt, findConsolidatedMetricValue(stmt, 'totalDebt'), addValues(getMetric(stmt, 'banksFundsShortTerm'), getMetric(stmt, 'banksFundsLongTerm')), raw(['deuda total', 'pasivo con costo', 'deuda', 'suma del pasivo', 'total pasivo', ...metricAliases('totalDebt')], ['balance_general']));
-    case 'banksFundsShortTerm': return firstValue(findConsolidatedMetricValue(stmt, 'banksFundsShortTerm'), raw(['bancos y fondos corto plazo', 'bancos y fondos cp', 'fondeo corto plazo', ...metricAliases('banksFundsShortTerm')], ['balance_general']));
-    case 'banksFundsLongTerm': return firstValue(findConsolidatedMetricValue(stmt, 'banksFundsLongTerm'), raw(['bancos y fondos largo plazo', 'bancos y fondos lp', 'fondeo largo plazo', ...metricAliases('banksFundsLongTerm')], ['balance_general']));
-    case 'totalLiabilities': return firstValue(findConsolidatedMetricValue(stmt, 'totalLiabilities'), raw(['total pasivo', 'suma del pasivo', 'pasivo total', ...metricAliases('totalLiabilities')], ['balance_general']), getMetric(stmt, 'totalDebt'));
+    case 'totalDebt': return firstValue(m.totalDebt, addValues(getMetric(stmt, 'banksFundsShortTerm'), getMetric(stmt, 'banksFundsLongTerm')), raw(['deuda total', 'prestamos total', 'préstamos total', 'pasivo con costo', 'deuda', ...metricAliases('totalDebt')], ['balance_general']), findConsolidatedMetricValue(stmt, 'totalDebt'));
+    case 'banksFundsShortTerm': return firstValue(raw(['prestamos total corto plazo', 'préstamos total corto plazo', 'prestamos (total corto plazo)', 'prestamos corto plazo', 'préstamos corto plazo', 'bancos y fondos corto plazo', 'bancos y fondos cp', 'fondeo corto plazo', ...metricAliases('banksFundsShortTerm')], ['balance_general']), findConsolidatedMetricValue(stmt, 'banksFundsShortTerm'));
+    case 'banksFundsLongTerm': return firstValue(raw(['prestamos total largo plazo', 'préstamos total largo plazo', 'prestamos (total largo plazo)', 'prestamos largo plazo', 'préstamos largo plazo', 'bancos y fondos largo plazo', 'bancos y fondos lp', 'fondeo largo plazo', ...metricAliases('banksFundsLongTerm')], ['balance_general']), findConsolidatedMetricValue(stmt, 'banksFundsLongTerm'));
+    case 'totalLiabilities': return firstValue(raw(['total de pasivo', 'total, de pasivo', 'total pasivo', 'suma del pasivo', 'pasivo total', ...metricAliases('totalLiabilities')], ['balance_general']), findConsolidatedMetricValue(stmt, 'totalLiabilities'), getMetric(stmt, 'totalDebt'));
     case 'totalAssets': return firstValue(m.totalAssets, findConsolidatedMetricValue(stmt, 'totalAssets'), raw(['total activo', 'activos totales', 'suma del activo', ...metricAliases('totalAssets')], ['balance_general']));
     case 'equity': return firstValue(m.equity, findConsolidatedMetricValue(stmt, 'equity'), raw(['capital contable', 'patrimonio', 'suma del capital', 'total capital', ...metricAliases('equity')], ['balance_general']));
     case 'cash': return firstValue(findConsolidatedMetricValue(stmt, 'cash'), raw(['efectivo', 'bancos', 'equivalentes de efectivo', ...metricAliases('cash')], ['balance_general']));
-    case 'availableInvestments': return firstValue(findConsolidatedMetricValue(stmt, 'availableInvestments'), raw(['inversiones disponibles', 'inversiones en valores', 'inversiones no comprometidas', ...metricAliases('availableInvestments')], ['balance_general']));
-    case 'loanPortfolio': return firstValue(findConsolidatedMetricValue(stmt, 'loanPortfolio'), raw(['cartera de credito', 'cartera vigente', 'creditos vigentes', ...metricAliases('loanPortfolio')], ['balance_general']));
-    case 'netPortfolio': return firstValue(findConsolidatedMetricValue(stmt, 'netPortfolio'), raw(['cartera neta', 'cartera de credito neta', ...metricAliases('netPortfolio')], ['balance_general']), subtractValues(getMetric(stmt, 'managedPortfolio'), getMetric(stmt, 'loanLossReserves')));
-    case 'managedPortfolio': return firstValue(findConsolidatedMetricValue(stmt, 'managedPortfolio'), raw(['cartera administrada', 'cartera total administrada', 'portafolio administrado', ...metricAliases('managedPortfolio')], ['balance_general']), getMetric(stmt, 'loanPortfolio'));
-    case 'pastDuePortfolio': return firstValue(findConsolidatedMetricValue(stmt, 'pastDuePortfolio'), raw(['cartera vencida', 'creditos vencidos', 'saldo vencido', ...metricAliases('pastDuePortfolio')], ['balance_general']));
-    case 'loanLossReserves': return firstValue(findConsolidatedMetricValue(stmt, 'loanLossReserves'), raw(['estimacion preventiva', 'reservas crediticias', 'reserva para perdidas crediticias', ...metricAliases('loanLossReserves')], ['balance_general']));
+    case 'availableInvestments': return firstValue(raw(['inversiones temporales', 'inversiones disponibles', 'inversiones en valores', 'inversiones no comprometidas', ...metricAliases('availableInvestments')], ['balance_general']), findConsolidatedMetricValue(stmt, 'availableInvestments'));
+    case 'loanPortfolio': return firstValue(raw(['cartera de credito subtotal', 'cartera de credito (subtotal)', 'cartera de credito total', 'cartera de credito', 'cartera vigente', 'creditos vigentes', ...metricAliases('loanPortfolio')], ['balance_general']), findConsolidatedMetricValue(stmt, 'loanPortfolio'));
+    case 'netPortfolio': return firstValue(raw(['cartera de credito neto', 'cartera de credito, neto', 'cartera neta', 'cartera de credito neta', ...metricAliases('netPortfolio')], ['balance_general']), findConsolidatedMetricValue(stmt, 'netPortfolio'), subtractValues(getMetric(stmt, 'managedPortfolio'), getMetric(stmt, 'loanLossReserves')));
+    case 'managedPortfolio': return firstValue(raw(['cartera administrada', 'cartera total administrada', 'portafolio administrado', ...metricAliases('managedPortfolio')], ['balance_general']), getMetric(stmt, 'loanPortfolio'), findConsolidatedMetricValue(stmt, 'managedPortfolio'));
+    case 'pastDuePortfolio': return firstValue(raw(['cartera de credito etapa 3', 'cartera etapa 3', 'creditos etapa 3', 'cartera vencida', 'creditos vencidos', 'saldo vencido', ...metricAliases('pastDuePortfolio')], ['balance_general']), findConsolidatedMetricValue(stmt, 'pastDuePortfolio'));
+    case 'loanLossReserves': return absoluteValue(firstValue(raw(['estimacion de cuentas incobrables', 'estimacion preventiva para riesgos crediticios', 'estimacion preventiva', 'reservas crediticias', 'reserva para perdidas crediticias', ...metricAliases('loanLossReserves')], ['balance_general']), findConsolidatedMetricValue(stmt, 'loanLossReserves')));
     case 'productiveAssets': return firstValue(findConsolidatedMetricValue(stmt, 'productiveAssets'), addValues(getMetric(stmt, 'cash'), getMetric(stmt, 'availableInvestments'), getMetric(stmt, 'loanPortfolio')));
     default: {
       if (key.startsWith('concept:')) {
@@ -541,7 +560,7 @@ export function prioritizedLatestCovenantPerformance(
 }
 
 function compactPerformance(row: CovenantPeriodPerformance): string {
-  const current = row.value === null ? 'N/D' : row.value.toLocaleString('es-MX', { maximumFractionDigits: 2 });
+  const current = (row.value ?? 0).toLocaleString('es-MX', { maximumFractionDigits: 2 });
   const previous = row.previousValue === null ? 'sin comparativo' : row.previousValue.toLocaleString('es-MX', { maximumFractionDigits: 2 });
   return `${row.covenantName}: ${current} vs. ${previous} (${row.movementLabel.toLowerCase()}, ${row.status})`;
 }
