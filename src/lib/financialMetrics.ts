@@ -195,8 +195,8 @@ export function getMetric(stmt: FinancialStatement_DB, key: string): number | nu
     case 'currentAssets': return firstValue(m.currentAssets, findConsolidatedMetricValue(stmt, 'currentAssets'), raw(['activo circulante', 'activo corriente', 'total activo a corto plazo', 'activo a corto plazo', ...metricAliases('currentAssets')], ['balance_general']));
     case 'currentLiabilities': return firstValue(m.currentLiabilities, findConsolidatedMetricValue(stmt, 'currentLiabilities'), raw(['pasivo circulante', 'pasivo corriente', 'total pasivo a corto plazo', 'pasivo a corto plazo', ...metricAliases('currentLiabilities')], ['balance_general']));
     case 'totalDebt': return firstValue(m.totalDebt, addValues(getMetric(stmt, 'banksFundsShortTerm'), getMetric(stmt, 'banksFundsLongTerm')), raw(['deuda total', 'prestamos total', 'préstamos total', 'pasivo con costo', 'deuda', ...metricAliases('totalDebt')], ['balance_general']), findConsolidatedMetricValue(stmt, 'totalDebt'));
-    case 'banksFundsShortTerm': return firstValue(raw(['prestamos total corto plazo', 'préstamos total corto plazo', 'prestamos (total corto plazo)', 'prestamos corto plazo', 'préstamos corto plazo', 'bancos y fondos corto plazo', 'bancos y fondos cp', 'fondeo corto plazo', ...metricAliases('banksFundsShortTerm')], ['balance_general']), findConsolidatedMetricValue(stmt, 'banksFundsShortTerm'));
-    case 'banksFundsLongTerm': return firstValue(raw(['prestamos total largo plazo', 'préstamos total largo plazo', 'prestamos (total largo plazo)', 'prestamos largo plazo', 'préstamos largo plazo', 'bancos y fondos largo plazo', 'bancos y fondos lp', 'fondeo largo plazo', ...metricAliases('banksFundsLongTerm')], ['balance_general']), findConsolidatedMetricValue(stmt, 'banksFundsLongTerm'));
+    case 'banksFundsShortTerm': return firstValue(raw(['prestamos total corto plazo', 'préstamos total corto plazo', 'prestamos (total corto plazo)', 'prestamos corto plazo', 'préstamos corto plazo', 'bancos y fondos corto plazo', 'bancos y fondos cp', 'fondeo corto plazo', 'prestamos bancarios y de otros organismos de corto plazo', 'prestamos interbancarios y de otros organismos de corto plazo', ...metricAliases('banksFundsShortTerm')], ['balance_general']), findConsolidatedMetricValue(stmt, 'banksFundsShortTerm'));
+    case 'banksFundsLongTerm': return firstValue(raw(['prestamos total largo plazo', 'préstamos total largo plazo', 'prestamos (total largo plazo)', 'prestamos largo plazo', 'préstamos largo plazo', 'bancos y fondos largo plazo', 'bancos y fondos lp', 'fondeo largo plazo', 'prestamos bancarios y de otros organismos de largo plazo', 'prestamos interbancarios y de otros organismos de largo plazo', ...metricAliases('banksFundsLongTerm')], ['balance_general']), findConsolidatedMetricValue(stmt, 'banksFundsLongTerm'));
     case 'totalLiabilities': return firstValue(raw(['total de pasivo', 'total, de pasivo', 'total pasivo', 'suma del pasivo', 'pasivo total', ...metricAliases('totalLiabilities')], ['balance_general']), findConsolidatedMetricValue(stmt, 'totalLiabilities'), getMetric(stmt, 'totalDebt'));
     case 'totalAssets': return firstValue(m.totalAssets, findConsolidatedMetricValue(stmt, 'totalAssets'), raw(['total activo', 'activos totales', 'suma del activo', ...metricAliases('totalAssets')], ['balance_general']));
     case 'equity': return firstValue(m.equity, findConsolidatedMetricValue(stmt, 'equity'), raw(['capital contable', 'patrimonio', 'suma del capital', 'total capital', ...metricAliases('equity')], ['balance_general']));
@@ -226,6 +226,11 @@ export function getMetric(stmt: FinancialStatement_DB, key: string): number | nu
 function div(a: number | null, b: number | null): number | null {
   if (a === null || b === null || b === 0) return null;
   return a / b;
+}
+
+// Covenant formulas intentionally treat missing references as 0; division by 0 still returns null via div().
+function metricValueOrZero(stmt: FinancialStatement_DB, key: string): number {
+  return getMetric(stmt, key) ?? 0;
 }
 
 export function standardRatios(stmt: FinancialStatement_DB): RatioResult[] {
@@ -337,7 +342,7 @@ export function evaluateFormula(formula: string, stmt: FinancialStatement_DB): n
   if (f.startsWith('ratio:')) {
     const body = f.slice('ratio:'.length);
     const [num, den] = body.split('/');
-    return div(getMetric(stmt, num), getMetric(stmt, den));
+    return div(metricValueOrZero(stmt, num), metricValueOrZero(stmt, den));
   }
   const low = f.toLowerCase();
   if (low.includes('deuda') && low.includes('ebitda')) return standardRatios(stmt).find(r => r.key === 'debt_ebitda')?.value ?? null;
@@ -351,7 +356,7 @@ export function evaluateFormula(formula: string, stmt: FinancialStatement_DB): n
 }
 
 function tokenValue(token: string, stmt: FinancialStatement_DB): number | null {
-  if (token.startsWith('ref:')) return getMetric(stmt, token.slice(4));
+  if (token.startsWith('ref:')) return metricValueOrZero(stmt, token.slice(4));
   if (token.startsWith('num:')) {
     const n = Number(token.slice(4));
     return Number.isFinite(n) ? n : null;
