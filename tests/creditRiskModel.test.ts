@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Covenant_DB, FinancialStatement_DB } from '../src/db/index';
-import { evaluateCovenantForStatement } from '../src/lib/financialMetrics';
+import { evaluateCovenantForStatement, evaluateFormula } from '../src/lib/financialMetrics';
 import { parseNullableFinancialNumber } from '../src/lib/numberParsing';
 import {
   buildCreditRiskFeatures,
@@ -69,6 +69,16 @@ test('covenant calculation detects a DSCR breach', () => {
 
   assert.equal(result.value, 0.9);
   assert.equal(result.status, 'incumple');
+});
+
+test('formula evaluation treats missing references as zero but keeps zero denominators invalid', () => {
+  const stmt = statement('2026-Q2', '2026-06-30', {
+    ebitda: 100,
+  });
+
+  assert.equal(evaluateFormula('expr:["ref:ebitda","+","ref:totalDebt"]', stmt), 100);
+  assert.equal(evaluateFormula('ratio:totalDebt/ebitda', stmt), 0);
+  assert.equal(evaluateFormula('ratio:ebitda/totalDebt', stmt), null);
 });
 
 test('credit risk model builds features from financial statements and covenants', () => {
