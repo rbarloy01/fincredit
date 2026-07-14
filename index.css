@@ -111,6 +111,13 @@ body {
   backdrop-filter: blur(18px);
 }
 
+/* Full-page wrappers (min-h-screen) must never get backdrop-filter: it creates a
+   containing block for position:fixed descendants, trapping every modal that
+   opens inside that page (e.g. the "Nuevo Covenant" dialog) off-screen. */
+.finmonitor-shell .min-h-screen {
+  backdrop-filter: none !important;
+}
+
 .bluebonnet-auth .bg-slate-900 {
   background-color: rgba(6, 14, 56, 0.72) !important;
   backdrop-filter: blur(18px);
