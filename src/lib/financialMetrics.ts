@@ -146,7 +146,11 @@ function findRaw(stmt: FinancialStatement_DB, names: string[], types?: string[])
     aliases.forEach(alias => {
       const exact = n === alias.value;
       const contains = n.includes(alias.value);
-      const reverseContains = alias.value.includes(n);
+      // Only treat "alias contains item" as a match when the item name is a genuine
+      // abbreviation of the alias (close in length) — otherwise a short generic
+      // account like "TOTAL ACTIVO" spuriously matches a longer, more specific
+      // alias like "total activo a corto plazo" just because it's a text prefix.
+      const reverseContains = alias.value.includes(n) && n.length >= alias.value.length * 0.6;
       if (!exact && !contains && !reverseContains) return;
       let score = exact ? 1000 : contains ? 700 : 450;
       score += Math.max(0, 120 - alias.index);
