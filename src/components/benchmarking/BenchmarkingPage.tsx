@@ -21,6 +21,7 @@ import { db, Client, CustomField, FinancialStatement_DB, normalizeFinancialWrite
 import { standardRatios } from '../../lib/financialMetrics';
 import { supabase } from '../../lib/supabase';
 import type { SheetDef } from '../../lib/export';
+import { loadExportModule } from '../../lib/exportLoader';
 import WorkingOverlay from '../common/WorkingOverlay';
 
 type BenchRow = {
@@ -131,8 +132,9 @@ const BENCHMARK_FILTERS: Array<{ key: BenchmarkFilterKey; label: string; allLabe
 const EMPTY_FILTERS = BENCHMARK_FILTERS.reduce((acc, filter) => ({ ...acc, [filter.key]: 'all' }), {} as FilterState);
 const DEFAULT_REPORT_DIMS: BenchmarkFilterKey[] = ['legalEntity', 'mainProduct', 'ticketRange'];
 const PRIMARY_FILTER_KEYS: BenchmarkFilterKey[] = ['legalEntity', 'mainProduct', 'ticketRange', 'statementType'];
-const CHART_COLORS = ['#4f46e5', '#06b6d4', '#10b981', '#f59e0b', '#f43f5e', '#64748b'];
-const KEY_RATIO_CHART_KEYS = ['debt_ebitda', 'dscr', 'current_ratio', 'capitalization', 'past_due_portfolio'];
+const CHART_COLORS = ['#4f46e5', '#06b6d4', '#10b981', '#f59e0b', '#f43f5e', '#64748b', '#8b5cf6', '#14b8a6', '#84cc16', '#ef4444', '#0ea5e9', '#a855f7', '#22c55e', '#eab308'];
+const DEFAULT_KEY_RATIO_CHART_KEYS = ['debt_ebitda', 'dscr', 'current_ratio', 'capitalization', 'past_due_portfolio'];
+const DEFAULT_TREND_RATIO_KEYS = ['debt_ebitda', 'dscr', 'current_ratio'];
 const PERIOD_COMPARABILITY_OPTIONS: Array<{ value: PeriodComparabilityFilter; label: string }> = [
   { value: 'all', label: 'Mensual + acumulado' },
   { value: 'mensual', label: 'Solo mensual' },
@@ -888,6 +890,8 @@ const BenchmarkingPage: React.FC = () => {
   const [dims, setDims] = useState<string[]>(DEFAULT_REPORT_DIMS);
   const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS);
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+  const [keyRatioChartKeys, setKeyRatioChartKeys] = useState<string[]>(DEFAULT_KEY_RATIO_CHART_KEYS);
+  const [trendChartKeys, setTrendChartKeys] = useState<string[]>(DEFAULT_TREND_RATIO_KEYS);
 
   const loadBenchmarkRows = useCallback(async (active = () => true) => {
     try {
@@ -1103,7 +1107,7 @@ const BenchmarkingPage: React.FC = () => {
     return 'La cohorte filtrada no tiene segmentos para graficar.';
   }, [cohortFiltered.length, filtered.length, rows.length]);
 
-  const keyRatioChartData = useMemo(() => KEY_RATIO_CHART_KEYS.map(key => {
+  const keyRatioChartData = useMemo(() => keyRatioChartKeys.map(key => {
     const value = ratioAnalysis.medians[key];
     const isPercent = percentRatioKeys.has(key);
     return {
@@ -1114,7 +1118,7 @@ const BenchmarkingPage: React.FC = () => {
       unit: isPercent ? '%' : 'x',
       hasData: value !== null,
     };
-  }).filter(item => item.hasData), [ratioAnalysis.medians]);
+  }).filter(item => item.hasData), [keyRatioChartKeys, ratioAnalysis.medians]);
 
   const dataCoverageChartData = useMemo(() => ratioKeys.map(key => ({
     ratio: ratioLabels[key],
@@ -1134,11 +1138,9 @@ const BenchmarkingPage: React.FC = () => {
     return {
       period: option.label,
       periodKey: option.value,
-      deuda: percentile(metrics.map(metric => metric.debt_ebitda), 0.5),
-      dscr: percentile(metrics.map(metric => metric.dscr), 0.5),
-      liquidez: percentile(metrics.map(metric => metric.current_ratio), 0.5),
+      ...Object.fromEntries(trendChartKeys.map(key => [key, percentile(metrics.map(metric => metric[key]), 0.5)])),
     };
-  }).filter(item => item.deuda !== null || item.dscr !== null || item.liquidez !== null).slice(-12), [filtered, getStatementMetrics, periodOptions, periodTypeFilter, selectedFinancialYear]);
+  }).filter(item => trendChartKeys.some(key => item[key as keyof typeof item] !== null)).slice(-12), [filtered, getStatementMetrics, periodOptions, periodTypeFilter, selectedFinancialYear, trendChartKeys]);
 
   const riskScatterData = useMemo(() => ratioAnalysis.topSegments.map(segment => ({
     name: segment.name,
@@ -1324,7 +1326,7 @@ const BenchmarkingPage: React.FC = () => {
         colWidths: [28, 80],
         wrapColumns: [2],
       };
-      const { exportToExcel } = await import('../../lib/export');
+      const { exportToExcel } = await loadExportModule();
       await exportToExcel([summary, cohortSheet, periodTypeSheet, participantsSheet, baseSheet, miniStudySheet, dictionarySheet], 'Benchmarking_Ratio_Analysis');
     } finally {
       setExporting(false);
@@ -1335,7 +1337,7 @@ const BenchmarkingPage: React.FC = () => {
     if (!reportRef.current) return;
     setExporting(true);
     try {
-      const { exportToPdf } = await import('../../lib/export');
+      const { exportToPdf } = await loadExportModule();
       await exportToPdf([reportRef.current], 'Benchmark_Ratio_Analysis');
     } finally {
       setExporting(false);
@@ -1343,6 +1345,12 @@ const BenchmarkingPage: React.FC = () => {
   };
 
   const updateFilter = (key: BenchmarkFilterKey, value: string) => setFilters(prev => ({ ...prev, [key]: value }));
+  const toggleChartRatio = (key: string, setSelectedKeys: React.Dispatch<React.SetStateAction<string[]>>) => {
+    setSelectedKeys(prev => {
+      if (prev.includes(key)) return prev.length > 1 ? prev.filter(item => item !== key) : prev;
+      return [...prev, key];
+    });
+  };
   const clearFilters = () => {
     setFilters(EMPTY_FILTERS);
     setPeriod('latest');
@@ -1762,8 +1770,31 @@ const BenchmarkingPage: React.FC = () => {
 
         <div className="bg-white border border-slate-200 rounded-2xl p-5">
           <div className="mb-4">
-            <p className="text-xs font-black text-slate-400 uppercase tracking-widest">Medianas clave</p>
-            <h3 className="text-lg font-black text-slate-900 mt-1">Ratios ejecutivos de la cohorte</h3>
+            <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+              <div>
+                <p className="text-xs font-black text-slate-400 uppercase tracking-widest">Medianas clave</p>
+                <h3 className="text-lg font-black text-slate-900 mt-1">Ratios ejecutivos de la cohorte</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setKeyRatioChartKeys(DEFAULT_KEY_RATIO_CHART_KEYS)}
+                className="text-xs font-black text-indigo-600 hover:text-indigo-800 uppercase tracking-widest"
+              >
+                Base
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-2 mt-3">
+              {ratioKeys.map(key => (
+                <button
+                  type="button"
+                  key={`median-toggle-${key}`}
+                  onClick={() => toggleChartRatio(key, setKeyRatioChartKeys)}
+                  className={`rounded-lg border px-2.5 py-1 text-[11px] font-black ${keyRatioChartKeys.includes(key) ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}
+                >
+                  {ratioLabels[key]}
+                </button>
+              ))}
+            </div>
           </div>
           <div className="h-80">
             {keyRatioChartData.length ? (
@@ -1787,8 +1818,31 @@ const BenchmarkingPage: React.FC = () => {
 
         <div className="bg-white border border-slate-200 rounded-2xl p-5">
           <div className="mb-4">
-            <p className="text-xs font-black text-slate-400 uppercase tracking-widest">Evolución histórica</p>
-            <h3 className="text-lg font-black text-slate-900 mt-1">Medianas por periodo</h3>
+            <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
+              <div>
+                <p className="text-xs font-black text-slate-400 uppercase tracking-widest">Evolución histórica</p>
+                <h3 className="text-lg font-black text-slate-900 mt-1">Medianas por periodo</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTrendChartKeys(DEFAULT_TREND_RATIO_KEYS)}
+                className="text-xs font-black text-indigo-600 hover:text-indigo-800 uppercase tracking-widest"
+              >
+                Base
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-2 mt-3">
+              {ratioKeys.map(key => (
+                <button
+                  type="button"
+                  key={`trend-toggle-${key}`}
+                  onClick={() => toggleChartRatio(key, setTrendChartKeys)}
+                  className={`rounded-lg border px-2.5 py-1 text-[11px] font-black ${trendChartKeys.includes(key) ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}
+                >
+                  {ratioLabels[key]}
+                </button>
+              ))}
+            </div>
           </div>
           <div className="h-80">
             {periodTrendChartData.length ? (
@@ -1798,14 +1852,26 @@ const BenchmarkingPage: React.FC = () => {
                   <XAxis dataKey="period" tick={{ fontSize: 11, fill: '#64748b' }} interval={0} angle={-18} textAnchor="end" height={48} />
                   <YAxis tick={{ fontSize: 11, fill: '#64748b' }} />
                   <Tooltip
-                    formatter={(value: any, name: any) => [
-                      typeof value === 'number' ? value.toLocaleString('es-MX', { maximumFractionDigits: 2 }) : value,
-                      name,
-                    ]}
+                    formatter={(value: any, name: any, item: any) => {
+                      const key = String(item?.dataKey || '');
+                      return [
+                        typeof value === 'number' ? formatBenchmarkMetric(value, key) : value,
+                        name,
+                      ];
+                    }}
                   />
-                  <Line type="monotone" dataKey="deuda" name="Deuda/EBITDA" stroke="#4f46e5" strokeWidth={3} dot={{ r: 3 }} connectNulls />
-                  <Line type="monotone" dataKey="dscr" name="DSCR" stroke="#10b981" strokeWidth={3} dot={{ r: 3 }} connectNulls />
-                  <Line type="monotone" dataKey="liquidez" name="Razón corriente" stroke="#06b6d4" strokeWidth={3} dot={{ r: 3 }} connectNulls />
+                  {trendChartKeys.map((key, index) => (
+                    <Line
+                      key={`trend-line-${key}`}
+                      type="monotone"
+                      dataKey={key}
+                      name={ratioLabels[key]}
+                      stroke={CHART_COLORS[index % CHART_COLORS.length]}
+                      strokeWidth={3}
+                      dot={{ r: 3 }}
+                      connectNulls
+                    />
+                  ))}
                 </LineChart>
               </ResponsiveContainer>
             ) : (

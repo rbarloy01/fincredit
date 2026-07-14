@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useState, useEffect, useRef } from 'react';
+import React, { Suspense, useState, useEffect, useRef } from 'react';
 import { db, Client, Transaction, FinancialStatement_DB, Covenant_DB, LoanTape_DB, CustomField } from '../../db/index';
 import { Session } from '../../services/auth';
 import { AISettings } from '../../services/ai';
@@ -11,11 +11,13 @@ import AuditPanel from '../audit/AuditPanel';
 import WorkingOverlay from '../common/WorkingOverlay';
 import CompanyOverviewPanel from './CompanyOverviewPanel';
 import { ALL_FACILITIES, facilityDisplayName, matchesFacilityFilter } from '../../lib/facilityHistory';
+import { lazyWithChunkRetry } from '../../lib/lazyWithChunkRetry';
+import { loadExportModule } from '../../lib/exportLoader';
 
-const FinancialPanel = lazy(() => import('../financials/FinancialPanel'));
-const LoanTapePanel = lazy(() => import('../loantape/LoanTapePanel'));
-const ClientReportView = lazy(() => import('../report/ReportView'));
-const CrmPanel = lazy(() => import('../crm/CrmPanel'));
+const FinancialPanel = lazyWithChunkRetry(() => import('../financials/FinancialPanel'), 'financial-panel');
+const LoanTapePanel = lazyWithChunkRetry(() => import('../loantape/LoanTapePanel'), 'loan-tape-panel');
+const ClientReportView = lazyWithChunkRetry(() => import('../report/ReportView'), 'client-report-view');
+const CrmPanel = lazyWithChunkRetry(() => import('../crm/CrmPanel'), 'crm-panel');
 
 interface Props {
   clientId: string;
@@ -82,7 +84,7 @@ const ResumenTab: React.FC<{ client: Client; transactions: Transaction[]; covena
   const handleExport = async (format: 'excel' | 'pdf') => {
     setExporting(format);
     try {
-      const { exportResumen } = await import('../../lib/export');
+      const { exportResumen } = await loadExportModule();
       await exportResumen(client, transactions, covenants, format, format === 'pdf' ? panelRef.current ?? undefined : undefined);
     } finally {
       setExporting(null);

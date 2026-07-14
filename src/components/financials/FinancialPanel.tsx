@@ -2,8 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { db, FinancialStatement_DB, Covenant_DB } from '../../db/index';
 import { Session } from '../../services/auth';
 import { AISettings, extractFinancials } from '../../services/ai';
-import { Upload, Trash2, Download, Plus, X, TrendingUp, Edit2, Check, FileText, ImageDown } from 'lucide-react';
+import { Upload, Trash2, Download, Plus, X, TrendingUp, Edit2, Check, FileText, ImageDown, Save, ChevronDown } from 'lucide-react';
 import type { DefinedConcept, VerticalBaseConfig } from '../../lib/export';
+import { loadExportModule } from '../../lib/exportLoader';
+import { reserveDownloadTarget } from '../../lib/browserDownload';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { evaluateFormula, formulaLabel, standardRatios } from '../../lib/financialMetrics';
 import WorkingOverlay from '../common/WorkingOverlay';
@@ -24,6 +26,14 @@ interface Props {
 type StatementType = 'balance_general' | 'estado_resultados' | 'flujo_efectivo' | 'otro';
 
 interface RawItem { name: string; value: number; sectionPath?: string | null; statementType?: StatementType; }
+
+interface ManualLineItem {
+  id: string;
+  statementType: 'balance_general' | 'estado_resultados';
+  sectionPath: string;
+  name: string;
+  value: string;
+}
 
 interface ReviewStatement {
   period: string;
@@ -162,6 +172,38 @@ const MAPPED_FIELDS = [
 
 type MappedField = typeof MAPPED_FIELDS[number][0];
 
+const manualRow = (
+  statementType: ManualLineItem['statementType'],
+  sectionPath: string,
+  name = '',
+  value = '',
+): ManualLineItem => ({
+  id: crypto.randomUUID(),
+  statementType,
+  sectionPath,
+  name,
+  value,
+});
+
+const defaultManualBalanceRows = () => [
+  manualRow('balance_general', 'Manual / ACTIVO', 'Efectivo y equivalentes'),
+  manualRow('balance_general', 'Manual / ACTIVO', 'Cuentas por cobrar'),
+  manualRow('balance_general', 'Manual / ACTIVO', 'Inventarios'),
+  manualRow('balance_general', 'Manual / ACTIVO', 'Total activo'),
+  manualRow('balance_general', 'Manual / PASIVO', 'Pasivo corriente'),
+  manualRow('balance_general', 'Manual / PASIVO', 'Deuda total'),
+  manualRow('balance_general', 'Manual / CAPITAL', 'Capital contable'),
+];
+
+const defaultManualIncomeRows = () => [
+  manualRow('estado_resultados', 'Manual / Estado de Resultados', 'Ingresos'),
+  manualRow('estado_resultados', 'Manual / Estado de Resultados', 'Costo de ventas'),
+  manualRow('estado_resultados', 'Manual / Estado de Resultados', 'Gastos operativos'),
+  manualRow('estado_resultados', 'Manual / Estado de Resultados', 'EBITDA / Utilidad operativa'),
+  manualRow('estado_resultados', 'Manual / Estado de Resultados', 'Gasto financiero'),
+  manualRow('estado_resultados', 'Manual / Estado de Resultados', 'Utilidad neta'),
+];
+
 const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSettings, covenants, onStatementsChange, onCovenantsChange }) => {
   const [statements, setStatements] = useState<FinancialStatement_DB[]>([]);
   const [loading, setLoading] = useState(true);
@@ -172,6 +214,12 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   const [editValue, setEditValue] = useState('');
   const [exporting, setExporting] = useState<'excel' | 'pdf' | 'chart' | null>(null);
   const [sectionFilter, setSectionFilter] = useState<StatementType | 'all'>('all');
+  const [showManualEntry, setShowManualEntry] = useState(false);
+  const [savingManual, setSavingManual] = useState(false);
+  const [manualPeriod, setManualPeriod] = useState('');
+  const [manualPeriodDate, setManualPeriodDate] = useState('');
+  const [manualBalanceRows, setManualBalanceRows] = useState<ManualLineItem[]>(defaultManualBalanceRows);
+  const [manualIncomeRows, setManualIncomeRows] = useState<ManualLineItem[]>(defaultManualIncomeRows);
   const [accountMappings, setAccountMappings] = useState<Record<string, MappedField | ''>>({});
   const [verticalBaseOverrides, setVerticalBaseOverrides] = useState<VerticalBaseConfig>({});
   const [concepts, setConcepts] = useState<DefinedConcept[]>([]);
@@ -233,11 +281,32 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
     void db.setClientSetting(clientId, mappingStorageKey, next);
   };
 
+  const inferMappedField = (item: RawItem): MappedField | '' => {
+    const n = normalizeName(item.name);
+    const path = normalizeName(item.sectionPath || '');
+    if ((item.statementType || 'otro') === 'estado_resultados') {
+      if (/(utilidadneta|resultadoneto|netincome)/.test(n)) return 'netIncome';
+      if (/(gastofinanciero|gastosfinancieros|intereses|interestexpense)/.test(n)) return 'interestExpense';
+      if (/(ebitda|utilidadoperativa|resultadooperativo|utilidaddeoperacion)/.test(n)) return 'ebitda';
+      if (/(gastooperativo|gastosoperativos|gastosdeadministracion|gastosdeventa)/.test(n)) return 'operatingExpenses';
+      if (/(costodeventa|costosdeventa|costoventas|cogs)/.test(n)) return 'cogs';
+      if (/(totalingresos|ingresos|ventas|revenue)/.test(n)) return 'revenue';
+    }
+    if ((item.statementType || 'otro') === 'balance_general') {
+      if (/(capitalcontable|totalcapital|patrimonio|equity)/.test(n) || path.includes('capital')) return 'equity';
+      if (/(deudatotal|totaldeuda|prestamosbancarios|pasivoconcosto|deudafinanciera|totaldebt)/.test(n)) return 'totalDebt';
+      if (/(pasivocorriente|pasivocirculante|currentliabilities)/.test(n)) return 'currentLiabilities';
+      if (/(totalactivo|activototal|sumaactivo|totalassets)/.test(n)) return 'totalAssets';
+      if (/(activocorriente|activocirculante|currentassets)/.test(n)) return 'currentAssets';
+    }
+    return '';
+  };
+
   const mappedForStatement = (stmt: FinancialStatement_DB) => {
     const next: FinancialStatement_DB['mappedData'] = { ...EMPTY_MAPPED };
     stmt.rawLineItems.forEach(item => {
       const key = `${item.statementType || 'otro'}||${item.name}`;
-      const field = accountMappings[key];
+      const field = accountMappings[key] || inferMappedField(item);
       if (field) next[field] = (next[field] || 0) + (Number(item.value) || 0);
     });
     if (!next.ebitda && (next.revenue || next.cogs || next.operatingExpenses)) {
@@ -266,6 +335,83 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
       });
     }
     await loadStatements();
+  };
+
+  const resetManualRows = () => {
+    setManualPeriod('');
+    setManualPeriodDate('');
+    setManualBalanceRows(defaultManualBalanceRows());
+    setManualIncomeRows(defaultManualIncomeRows());
+  };
+
+  const updateManualRow = (
+    statementType: ManualLineItem['statementType'],
+    rowId: string,
+    updates: Partial<ManualLineItem>,
+  ) => {
+    const setter = statementType === 'balance_general' ? setManualBalanceRows : setManualIncomeRows;
+    setter(rows => rows.map(row => row.id === rowId ? { ...row, ...updates } : row));
+  };
+
+  const removeManualRow = (statementType: ManualLineItem['statementType'], rowId: string) => {
+    const setter = statementType === 'balance_general' ? setManualBalanceRows : setManualIncomeRows;
+    setter(rows => rows.filter(row => row.id !== rowId));
+  };
+
+  const addManualRow = (statementType: ManualLineItem['statementType'], sectionPath: string) => {
+    const setter = statementType === 'balance_general' ? setManualBalanceRows : setManualIncomeRows;
+    setter(rows => [...rows, manualRow(statementType, sectionPath)]);
+  };
+
+  const manualRowsToRawItems = (): RawItem[] => [...manualBalanceRows, ...manualIncomeRows]
+    .map(row => ({
+      name: row.name.trim(),
+      value: parseFinancialNumber(row.value),
+      sectionPath: row.sectionPath,
+      statementType: row.statementType,
+    }))
+    .filter(item => item.name && Number.isFinite(item.value));
+
+  const saveManualStatement = async () => {
+    const rawLineItems = mergeRawItems(manualRowsToRawItems());
+    if (!manualPeriod.trim() || !manualPeriodDate || rawLineItems.length === 0) {
+      alert('Captura periodo, fecha de cierre y al menos una cuenta con valor.');
+      return;
+    }
+    setSavingManual(true);
+    try {
+      const existingStatements = await db.getStatements(clientId);
+      const existing = existingStatements.find(saved => saved.periodDate === manualPeriodDate);
+      if (existing) {
+        const mergedLineItems = mergeRawItems([...existing.rawLineItems, ...rawLineItems]);
+        await db.updateStatement(existing.id, {
+          documentType: joinUnique([existing.documentType, 'Captura manual']),
+          fileName: joinUnique([existing.fileName, 'Captura manual']),
+          period: manualPeriod.trim(),
+          periodDate: manualPeriodDate,
+          rawLineItems: mergedLineItems,
+          mappedData: mappedForItems(mergedLineItems),
+        });
+      } else {
+        await db.createStatement({
+          clientId,
+          sourceCompanyName: clientName,
+          documentType: 'Captura manual',
+          period: manualPeriod.trim(),
+          periodDate: manualPeriodDate,
+          fileName: 'Captura manual',
+          rawLineItems,
+          mappedData: mappedForItems(rawLineItems),
+          extraAccounts: [],
+        });
+      }
+      resetManualRows();
+      await loadStatements();
+    } catch (err: any) {
+      alert(`Error al guardar captura manual: ${err.message}`);
+    } finally {
+      setSavingManual(false);
+    }
   };
 
   const saveVerticalBase = (segment: string, key: string) => {
@@ -433,8 +579,9 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
 
   const handleExport = async (format: 'excel' | 'pdf') => {
     setExporting(format);
+    const downloadTarget = reserveDownloadTarget();
     try {
-      const { exportEstadosFinancieros } = await import('../../lib/export');
+      const { exportEstadosFinancieros } = await loadExportModule();
       await exportEstadosFinancieros(
         statements,
         clientName,
@@ -443,6 +590,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
         covenants,
         verticalBaseOverrides,
         concepts,
+        downloadTarget,
       );
     } catch (err: any) {
       console.error('Financial statements export error:', err);
@@ -455,10 +603,11 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   const handleExportChart = async () => {
     if (!chartRef.current) return;
     setExporting('chart');
+    const downloadTarget = reserveDownloadTarget();
     try {
-      const { exportToPng } = await import('../../lib/export');
+      const { exportToPng } = await loadExportModule();
       const safeClient = clientName.replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '') || 'Cliente';
-      await exportToPng(chartRef.current, `Grafica_EFF_${safeClient}`);
+      await exportToPng(chartRef.current, `Grafica_EFF_${safeClient}`, downloadTarget);
     } finally {
       setExporting(null);
     }
@@ -585,8 +734,8 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   return (
     <div ref={panelRef} className="space-y-6">
       <WorkingOverlay
-        show={uploading || !!exporting}
-        title={exporting ? 'Exportando' : 'Procesando EFF'}
+        show={uploading || !!exporting || savingManual}
+        title={savingManual ? 'Guardando captura manual' : exporting ? 'Exportando' : 'Procesando EFF'}
         messages={[
           'Almost there...',
           'Working on it...',
@@ -629,6 +778,17 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
               </button>
             </>
           )}
+          <button
+            onClick={() => setShowManualEntry(open => !open)}
+            className={`flex items-center gap-2 border font-bold px-4 py-2.5 rounded-xl text-sm transition-all ${
+              showManualEntry
+                ? 'bg-slate-900 text-white border-slate-900'
+                : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+            }`}
+          >
+            <ChevronDown className={`w-4 h-4 transition-transform ${showManualEntry ? 'rotate-180' : ''}`} />
+            Captura manual
+          </button>
           <input
             ref={fileInputRef}
             type="file"
@@ -650,6 +810,121 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
           </button>
         </div>
       </div>
+
+      {showManualEntry && (
+        <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+          <div className="px-5 py-4 border-b border-slate-100 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest">Captura manual oculta</h3>
+              <p className="text-xs text-slate-400 mt-1">Úsala cuando no puedas cargar archivos o la ingesta no traiga datos; se guarda en este cliente.</p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-[180px_180px_auto] gap-2">
+              <label>
+                <span className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Periodo</span>
+                <input
+                  value={manualPeriod}
+                  onChange={e => setManualPeriod(e.target.value)}
+                  placeholder="FY2025 / 2T 2026"
+                  className="h-10 w-full bg-slate-50 border border-slate-200 rounded-xl px-3 text-sm font-bold text-slate-800 outline-none focus:ring-2 focus:ring-indigo-300"
+                />
+              </label>
+              <label>
+                <span className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Fecha cierre</span>
+                <input
+                  type="date"
+                  value={manualPeriodDate}
+                  onChange={e => setManualPeriodDate(e.target.value)}
+                  className="h-10 w-full bg-slate-50 border border-slate-200 rounded-xl px-3 text-sm font-bold text-slate-800 outline-none focus:ring-2 focus:ring-indigo-300"
+                />
+              </label>
+              <button
+                onClick={saveManualStatement}
+                disabled={savingManual}
+                className="h-10 self-end flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-300 text-white font-black px-4 rounded-xl text-sm"
+              >
+                {savingManual ? <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg> : <Save className="w-4 h-4" />}
+                Guardar
+              </button>
+            </div>
+          </div>
+
+          {([
+            ['balance_general', 'Balance General', manualBalanceRows] as const,
+            ['estado_resultados', 'Estado de Resultados', manualIncomeRows] as const,
+          ]).map(([statementType, label, rows]) => (
+            <div key={statementType} className="p-5 border-b border-slate-100 last:border-b-0">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <h4 className="text-xs font-black uppercase tracking-widest text-slate-700">{label}</h4>
+                <button
+                  onClick={() => addManualRow(statementType, statementType === 'balance_general' ? 'Manual / ACTIVO' : 'Manual / Estado de Resultados')}
+                  className="flex items-center gap-1.5 bg-slate-100 text-slate-700 border border-slate-200 px-3 py-2 rounded-xl text-xs font-black hover:bg-slate-50"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Cuenta
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-slate-50">
+                      <th className="text-left px-3 py-2 text-xs font-black text-slate-600 uppercase tracking-wider w-52">Sección</th>
+                      <th className="text-left px-3 py-2 text-xs font-black text-slate-600 uppercase tracking-wider min-w-[220px]">Cuenta</th>
+                      <th className="text-right px-3 py-2 text-xs font-black text-slate-600 uppercase tracking-wider w-44">Valor</th>
+                      <th className="w-10" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((row, index) => (
+                      <tr key={row.id} className={index % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}>
+                        <td className="px-3 py-2">
+                          {statementType === 'balance_general' ? (
+                            <select
+                              value={row.sectionPath}
+                              onChange={e => updateManualRow(statementType, row.id, { sectionPath: e.target.value })}
+                              className="h-9 w-full bg-white border border-slate-200 rounded-lg px-2 text-xs font-bold text-slate-700"
+                            >
+                              <option value="Manual / ACTIVO">Activo</option>
+                              <option value="Manual / PASIVO">Pasivo</option>
+                              <option value="Manual / CAPITAL">Capital</option>
+                            </select>
+                          ) : (
+                            <span className="block h-9 rounded-lg bg-slate-100 px-2 py-2 text-xs font-bold text-slate-500">Resultados</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2">
+                          <input
+                            value={row.name}
+                            onChange={e => updateManualRow(statementType, row.id, { name: e.target.value })}
+                            placeholder="Nombre de cuenta"
+                            className="h-9 w-full bg-white border border-slate-200 rounded-lg px-3 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-indigo-300"
+                          />
+                        </td>
+                        <td className="px-3 py-2">
+                          <input
+                            value={row.value}
+                            onChange={e => updateManualRow(statementType, row.id, { value: e.target.value })}
+                            placeholder="0"
+                            inputMode="decimal"
+                            className="h-9 w-full bg-white border border-slate-200 rounded-lg px-3 text-right font-mono text-sm text-slate-800 outline-none focus:ring-2 focus:ring-indigo-300"
+                          />
+                        </td>
+                        <td className="px-2 py-2 text-right">
+                          <button
+                            onClick={() => removeManualRow(statementType, row.id)}
+                            className="text-slate-300 hover:text-rose-500"
+                            title="Eliminar cuenta"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Multi-period pivot table */}
       {statements.length > 0 && (

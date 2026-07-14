@@ -258,6 +258,106 @@ body {
   color: #f7fbff !important;
 }
 
+.crm-page {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(246, 249, 252, 0.84) 220px),
+    #f6f8fb;
+}
+
+.crm-card {
+  border: 1px solid rgba(148, 163, 184, 0.34);
+  border-radius: 8px;
+  background: #ffffff !important;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 12px 30px rgba(15, 23, 42, 0.04);
+  backdrop-filter: none !important;
+}
+
+.crm-input {
+  background: #ffffff !important;
+  box-shadow: inset 0 1px 0 rgba(15, 23, 42, 0.03);
+  backdrop-filter: none !important;
+}
+
+.crm-metric {
+  position: relative;
+  min-height: 104px;
+  overflow: hidden;
+  padding: 16px;
+}
+
+.crm-metric::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: #64748b;
+}
+
+.crm-metric-icon {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: #f1f5f9;
+  color: #334155;
+}
+
+.crm-metric-blue::before {
+  background: #2563eb;
+}
+
+.crm-metric-blue .crm-metric-icon {
+  background: #eff6ff;
+  color: #2563eb;
+}
+
+.crm-metric-emerald::before {
+  background: #059669;
+}
+
+.crm-metric-emerald .crm-metric-icon {
+  background: #ecfdf5;
+  color: #059669;
+}
+
+.crm-metric-rose::before {
+  background: #e11d48;
+}
+
+.crm-metric-rose .crm-metric-icon {
+  background: #fff1f2;
+  color: #e11d48;
+}
+
+.crm-metric-amber::before {
+  background: #d97706;
+}
+
+.crm-metric-amber .crm-metric-icon {
+  background: #fffbeb;
+  color: #d97706;
+}
+
+.crm-metric-slate::before {
+  background: #475569;
+}
+
+.crm-detail .crm-card article,
+.crm-detail .crm-card input,
+.crm-detail .crm-card textarea,
+.crm-detail .crm-card select {
+  backdrop-filter: none !important;
+}
+
+.line-clamp-2 {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .bluebonnet-auth .text-slate-400,
 .bluebonnet-auth .text-slate-500,
 .bluebonnet-auth .text-slate-600 {

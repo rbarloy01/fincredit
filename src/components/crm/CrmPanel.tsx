@@ -183,8 +183,8 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
     await loadCrm();
   };
 
-  const inputClass = 'w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-800 outline-none focus:ring-2 focus:ring-indigo-300';
-  const labelClass = 'mb-1 block text-[10px] font-black uppercase tracking-widest text-slate-400';
+  const inputClass = 'crm-input w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-semibold text-slate-800 outline-none focus:ring-2 focus:ring-blue-200';
+  const labelClass = 'mb-1 block text-[10px] font-black uppercase tracking-widest text-slate-500';
 
   if (loading) {
     return (
@@ -198,37 +198,37 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="crm-page crm-detail space-y-5">
       {error && (
-        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-bold text-rose-700">
+        <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-bold text-rose-700">
           {error}
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-4">
-        <div className="rounded-xl border border-slate-200 bg-white p-4">
-          <p className="text-xs font-black uppercase tracking-wider text-slate-400">Contactos</p>
+      <div className="grid grid-cols-1 gap-3 xl:grid-cols-4">
+        <div className="crm-card crm-metric crm-metric-slate">
+          <p className="text-[11px] font-black uppercase tracking-wider text-slate-500">Contactos</p>
           <p className="mt-1 text-2xl font-black text-slate-900">{contacts.length}</p>
         </div>
-        <div className="rounded-xl border border-amber-200 bg-white p-4">
-          <p className="text-xs font-black uppercase tracking-wider text-amber-600">Pendientes</p>
+        <div className="crm-card crm-metric crm-metric-amber">
+          <p className="text-[11px] font-black uppercase tracking-wider text-amber-700">Pendientes</p>
           <p className="mt-1 text-2xl font-black text-amber-700">{openActivities.length}</p>
         </div>
-        <div className="rounded-xl border border-emerald-200 bg-white p-4">
-          <p className="text-xs font-black uppercase tracking-wider text-emerald-600">Completadas</p>
+        <div className="crm-card crm-metric crm-metric-emerald">
+          <p className="text-[11px] font-black uppercase tracking-wider text-emerald-700">Completadas</p>
           <p className="mt-1 text-2xl font-black text-emerald-700">{doneActivities.length}</p>
         </div>
-        <div className="rounded-xl border border-indigo-200 bg-white p-4">
-          <p className="text-xs font-black uppercase tracking-wider text-indigo-600">Contacto principal</p>
+        <div className="crm-card crm-metric crm-metric-blue">
+          <p className="text-[11px] font-black uppercase tracking-wider text-blue-700">Contacto principal</p>
           <p className="mt-1 truncate text-lg font-black text-slate-900">{primaryContact?.name || 'Sin asignar'}</p>
         </div>
       </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[0.9fr_1.1fr]">
         <section className="space-y-4">
-          <div className="rounded-xl border border-slate-200 bg-white p-5">
-            <div className="mb-4 flex items-center gap-2">
-              <UsersRound className="h-4 w-4 text-indigo-600" />
+          <div className="crm-card p-5">
+            <div className="mb-4 flex items-center gap-2 border-b border-slate-200 pb-3">
+              <UsersRound className="h-4 w-4 text-blue-600" />
               <h2 className="text-sm font-black uppercase tracking-widest text-slate-900">Nuevo contacto</h2>
             </div>
             <form onSubmit={saveContact} className="space-y-3">
@@ -276,14 +276,14 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
                 </label>
               </div>
               <label className="flex items-center gap-2 text-sm font-bold text-slate-600">
-                <input type="checkbox" checked={contactDraft.isPrimary} onChange={e => setContactDraft(prev => ({ ...prev, isPrimary: e.target.checked }))} />
+                <input className="h-4 w-4 rounded border-slate-300 text-blue-600" type="checkbox" checked={contactDraft.isPrimary} onChange={e => setContactDraft(prev => ({ ...prev, isPrimary: e.target.checked }))} />
                 Contacto principal
               </label>
               <label>
                 <span className={labelClass}>Notas</span>
                 <textarea className={`${inputClass} min-h-20`} value={contactDraft.notes} onChange={e => setContactDraft(prev => ({ ...prev, notes: e.target.value }))} placeholder="Preferencias, contexto y señales de relación" />
               </label>
-              <button disabled={saving || !contactDraft.name.trim()} className="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-black text-white hover:bg-indigo-500 disabled:opacity-50">
+              <button disabled={saving || !contactDraft.name.trim()} className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-700 px-4 py-3 text-sm font-black text-white hover:bg-blue-600 disabled:opacity-50">
                 <Plus className="h-4 w-4" />
                 Agregar contacto
               </button>
@@ -292,7 +292,7 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
 
           <div className="space-y-3">
             {contacts.map(contact => (
-              <article key={contact.id} className="rounded-xl border border-slate-200 bg-white p-4">
+              <article key={contact.id} className="crm-card p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
@@ -301,13 +301,13 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
                     </div>
                     <p className="mt-1 text-xs font-bold text-slate-500">{[contact.title, contact.department].filter(Boolean).join(' · ') || 'Sin cargo'}</p>
                   </div>
-                  <button onClick={() => removeContact(contact)} className="rounded-lg p-2 text-slate-400 hover:bg-rose-50 hover:text-rose-600">
+                  <button onClick={() => removeContact(contact)} className="rounded-md p-2 text-slate-400 hover:bg-rose-50 hover:text-rose-600" title="Eliminar contacto">
                     <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <span className={`rounded-lg border px-2 py-1 text-[10px] font-black uppercase tracking-wider ${relationshipClass(contact.relationship)}`}>{contact.relationship}</span>
-                  <span className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-600">{contact.influence}</span>
+                  <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase tracking-wider ${relationshipClass(contact.relationship)}`}>{contact.relationship}</span>
+                  <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-600">{contact.influence}</span>
                 </div>
                 {(contact.email || contact.phone) && (
                   <div className="mt-3 space-y-1 text-xs font-semibold text-slate-500">
@@ -322,9 +322,9 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
         </section>
 
         <section className="space-y-4">
-          <div className="rounded-xl border border-slate-200 bg-white p-5">
-            <div className="mb-4 flex items-center gap-2">
-              <Clock className="h-4 w-4 text-indigo-600" />
+          <div className="crm-card p-5">
+            <div className="mb-4 flex items-center gap-2 border-b border-slate-200 pb-3">
+              <Clock className="h-4 w-4 text-blue-600" />
               <h2 className="text-sm font-black uppercase tracking-widest text-slate-900">Nueva actividad</h2>
             </div>
             <form onSubmit={saveActivity} className="space-y-3">
@@ -422,15 +422,15 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
                 <span className={labelClass}>Detalle</span>
                 <textarea className={`${inputClass} min-h-20`} value={activityDraft.detail} onChange={e => setActivityDraft(prev => ({ ...prev, detail: e.target.value }))} placeholder="Contexto, acuerdos y próximos pasos" />
               </label>
-              <button disabled={saving || !(activityDraft.subject.trim() || activityDraft.quickNote.trim() || activityDraft.nextStep.trim())} className="flex w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-50">
+              <button disabled={saving || !(activityDraft.subject.trim() || activityDraft.quickNote.trim() || activityDraft.nextStep.trim())} className="flex w-full items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-3 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-50">
                 <Plus className="h-4 w-4" />
                 Agregar actividad
               </button>
             </form>
           </div>
 
-          <div className="rounded-xl border border-slate-200 bg-white">
-            <div className="border-b border-slate-100 px-5 py-4">
+          <div className="crm-card overflow-hidden">
+            <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
               <h2 className="text-sm font-black uppercase tracking-widest text-slate-900">Pendientes</h2>
             </div>
             <div className="divide-y divide-slate-100">
@@ -443,19 +443,19 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
                       <p className="mt-1 text-xs font-bold text-slate-500">{activity.phase || 'Sin fase'} · {activity.recordType || typeLabel(activity.type)} · {fmtDate(activity.dueAt)}</p>
                     </div>
                     <div className="flex items-center gap-1">
-                      <button onClick={() => completeActivity(activity)} className="rounded-lg p-2 text-emerald-600 hover:bg-emerald-50">
+                      <button onClick={() => completeActivity(activity)} className="rounded-md p-2 text-emerald-600 hover:bg-emerald-50" title="Marcar como completada">
                         <CheckCircle2 className="h-4 w-4" />
                       </button>
-                      <button onClick={() => removeActivity(activity)} className="rounded-lg p-2 text-slate-400 hover:bg-rose-50 hover:text-rose-600">
+                      <button onClick={() => removeActivity(activity)} className="rounded-md p-2 text-slate-400 hover:bg-rose-50 hover:text-rose-600" title="Eliminar actividad">
                         <Trash2 className="h-4 w-4" />
                       </button>
                     </div>
                   </div>
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <span className={`rounded-lg px-2 py-1 text-[10px] font-black uppercase tracking-wider ${priorityClass(activity.priority)}`}>{activity.priority}</span>
-                    {(activity.contactName || activity.contactId) && <span className="rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-600">{activity.contactName || contacts.find(c => c.id === activity.contactId)?.name || 'Contacto'}</span>}
-                    {activity.nextStage && <span className="rounded-lg bg-emerald-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-emerald-700">{activity.nextStage}</span>}
-                    {activity.analystName && <span className="rounded-lg bg-indigo-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-indigo-700">{activity.analystName}</span>}
+                    <span className={`rounded-md px-2 py-1 text-[10px] font-black uppercase tracking-wider ${priorityClass(activity.priority)}`}>{activity.priority}</span>
+                    {(activity.contactName || activity.contactId) && <span className="rounded-md bg-slate-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-600">{activity.contactName || contacts.find(c => c.id === activity.contactId)?.name || 'Contacto'}</span>}
+                    {activity.nextStage && <span className="rounded-md bg-emerald-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-emerald-700">{activity.nextStage}</span>}
+                    {activity.analystName && <span className="rounded-md bg-blue-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-blue-700">{activity.analystName}</span>}
                   </div>
                   {activity.quickNote && <p className="mt-3 text-sm leading-6 text-slate-700">{activity.quickNote}</p>}
                   {activity.nextStep && <p className="mt-2 text-sm font-bold leading-6 text-slate-600">Siguiente paso: {activity.nextStep}</p>}
@@ -465,13 +465,13 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
             </div>
           </div>
 
-          <div className="rounded-xl border border-slate-200 bg-white p-5">
-            <h2 className="text-sm font-black uppercase tracking-widest text-slate-900">Timeline</h2>
+          <div className="crm-card p-5">
+            <h2 className="border-b border-slate-200 pb-3 text-sm font-black uppercase tracking-widest text-slate-900">Timeline</h2>
             <div className="mt-5 space-y-4">
               {timeline.length === 0 && <p className="py-8 text-center text-sm font-semibold text-slate-400">Aún no hay historia CRM para este cliente</p>}
               {timeline.slice(0, 12).map(item => (
                 <div key={`${item.kind}-${item.id}-${item.at}`} className="flex gap-3">
-                  <div className="mt-1 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-indigo-50 text-indigo-600">
+                  <div className="mt-1 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-blue-50 text-blue-600">
                     {item.kind === 'contact' ? <UserRound className="h-4 w-4" /> : <Clock className="h-4 w-4" />}
                   </div>
                   <div className="min-w-0 flex-1 border-b border-slate-100 pb-4">

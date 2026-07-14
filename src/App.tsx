@@ -1,4 +1,4 @@
-import React, { Component, lazy, Suspense, useState, useEffect, type ReactNode, type ComponentType } from 'react';
+import React, { Component, Suspense, useState, useEffect, type ReactNode } from 'react';
 import { auth, Session } from './services/auth';
 import LoginPage from './components/auth/LoginPage';
 import ClientList from './components/clients/ClientList';
@@ -6,45 +6,7 @@ import { Client, CustomField, db, RolloutGuardFeature, RolloutGuardResult } from
 import { AISettings, loadAISettings } from './services/ai';
 import { Activity, AlertTriangle, BarChart3, Building2, ClipboardList, Inbox, Layers3, Settings, LogOut, RefreshCw, ShieldCheck, Moon, Sun, Sparkles } from 'lucide-react';
 import { isSupabaseConfigured, supabaseConfigError } from './lib/supabase';
-
-const APP_BUILD_ID = '2026-07-06-crm-sidebar-v1';
-
-function resetChunkRetryStateForCurrentBuild() {
-  try {
-    const buildKey = 'finmonitor_build_id';
-    if (sessionStorage.getItem(buildKey) === APP_BUILD_ID) return;
-
-    Object.keys(sessionStorage)
-      .filter(key => key.startsWith('finmonitor_chunk_retry_'))
-      .forEach(key => sessionStorage.removeItem(key));
-    sessionStorage.setItem(buildKey, APP_BUILD_ID);
-  } catch {}
-}
-
-function lazyWithChunkRetry<T extends { default: ComponentType<any> }>(
-  load: () => Promise<T>,
-  chunkKey: string,
-) {
-  return lazy(async () => {
-    try {
-      const module = await load();
-      sessionStorage.removeItem(`finmonitor_chunk_retry_${chunkKey}`);
-      return module;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const isMissingChunk = /Failed to fetch dynamically imported module|Importing a module script failed|Loading chunk|ChunkLoadError/i.test(message);
-      const retryKey = `finmonitor_chunk_retry_${chunkKey}`;
-
-      if (isMissingChunk && sessionStorage.getItem(retryKey) !== '1') {
-        sessionStorage.setItem(retryKey, '1');
-        window.location.reload();
-        return new Promise<T>(() => {});
-      }
-
-      throw error;
-    }
-  });
-}
+import { lazyWithChunkRetry, resetChunkRetryStateForCurrentBuild } from './lib/lazyWithChunkRetry';
 
 const ClientForm = lazyWithChunkRetry(() => import('./components/clients/ClientForm'), 'client-form');
 const ClientDetail = lazyWithChunkRetry(() => import('./components/clients/ClientDetail'), 'client-detail');

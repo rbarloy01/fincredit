@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useState, useEffect, useRef } from 'react';
+import React, { Suspense, useState, useEffect, useRef } from 'react';
 import { db, LoanTape_DB } from '../../db/index';
 import { Session } from '../../services/auth';
 import { AISettings, analyzeLoanTape, StructuredLoanTapeAnalysis } from '../../services/ai';
@@ -16,8 +16,10 @@ import {
   normalizeLoanTapeAnalystState,
 } from '../../lib/loanTapeWorkspace';
 import WorkingOverlay from '../common/WorkingOverlay';
+import { lazyWithChunkRetry } from '../../lib/lazyWithChunkRetry';
+import { loadExportModule } from '../../lib/exportLoader';
 
-const WorkspaceBlock = lazy(() => import('./LoanTapeWorkspaceBlock'));
+const WorkspaceBlock = lazyWithChunkRetry(() => import('./LoanTapeWorkspaceBlock'), 'loan-tape-workspace-block');
 
 interface Props {
   clientId: string;
@@ -163,7 +165,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
   const handleExport = async (format: 'excel' | 'pdf') => {
     setExporting(format);
     try {
-      const { exportLoanTape } = await import('../../lib/export');
+      const { exportLoanTape } = await loadExportModule();
       await exportLoanTape(tapes, clientName, format, format === 'pdf' ? panelRef.current ?? undefined : undefined);
     } finally {
       setExporting(null);

@@ -156,6 +156,7 @@ async function requireManager(req: any, supabaseUrl: string, serviceKey: string)
 
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
+    const buildId = env.VERCEL_GIT_COMMIT_SHA || env.VERCEL_DEPLOYMENT_ID || `${Date.now()}`;
     return {
       root: path.resolve(__dirname),
       server: {
@@ -347,13 +348,17 @@ export default defineConfig(({ mode }) => {
       }],
       define: {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
-        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
+        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+        __APP_BUILD_ID__: JSON.stringify(buildId),
       },
       build: {
         chunkSizeWarningLimit: 1000,
         rollupOptions: {
           output: {
             manualChunks(id) {
+              if (id.endsWith('/src/lib/export.ts')) {
+                return 'export';
+              }
               if (!id.includes('node_modules')) return;
 
               if (id.includes('/react/') || id.includes('/react-dom/') || id.includes('/scheduler/')) {

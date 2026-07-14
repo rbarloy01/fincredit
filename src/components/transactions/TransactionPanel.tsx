@@ -10,6 +10,7 @@ import {
 import WorkingOverlay from '../common/WorkingOverlay';
 import { parseFinancialNumber } from '../../lib/numberParsing';
 import { extractPdfText, isUsefulExtractedText } from '../../lib/documentParsing';
+import { loadExportModule } from '../../lib/exportLoader';
 
 const nanoid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
@@ -107,7 +108,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
   const handleExport = async (format: 'excel' | 'pdf') => {
     setExporting(format);
     try {
-      const { exportTransacciones } = await import('../../lib/export');
+      const { exportTransacciones } = await loadExportModule();
       await exportTransacciones(transactions, clientName, format, format === 'pdf' ? panelRef.current ?? undefined : undefined);
     } finally {
       setExporting(null);

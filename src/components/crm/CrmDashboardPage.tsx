@@ -238,56 +238,66 @@ const CrmDashboardPage: React.FC<Props> = ({ onSelectClient }) => {
   const balance = rows.reduce((sum, row) => sum + row.balance, 0);
   const risky = rows.filter(row => ['vencido', 'urgente', 'prioridad alta', 'sin actividad crm'].includes(row.status.toLowerCase())).length;
 
+  const metrics = [
+    { label: 'Clientes', value: clients.length.toLocaleString('es-MX'), icon: Building2, tone: 'slate' },
+    { label: 'Monto autorizado', value: fmtCurrency(exposure), icon: TrendingUp, tone: 'blue' },
+    { label: 'Saldo actual', value: fmtCurrency(balance), icon: CheckCircle2, tone: 'emerald' },
+    { label: 'Alertas abiertas', value: risky.toLocaleString('es-MX'), icon: AlertTriangle, tone: 'rose' },
+  ];
+
   return (
-    <div className="min-h-screen bg-slate-50 p-8">
-      <div className="mb-6 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-        <div>
-          <h1 className="text-3xl font-black tracking-tight text-slate-900">CRM</h1>
-          <p className="mt-1 text-sm font-semibold text-slate-500">Seguimiento operativo con estructura del tracker de Monitoring.</p>
+    <div className="crm-page min-h-screen px-5 py-6 md:px-8">
+      <div className="mb-5 flex flex-col gap-4 border-b border-slate-200/80 pb-5 xl:flex-row xl:items-end xl:justify-between">
+        <div className="max-w-2xl">
+          <p className="text-[11px] font-black uppercase tracking-[0.18em] text-blue-700">Tracker comercial</p>
+          <h1 className="mt-1 text-3xl font-black tracking-tight text-slate-950">CRM</h1>
+          <p className="mt-1 text-sm font-semibold text-slate-500">Contratos, seguimiento y monitoreo en una vista de trabajo.</p>
         </div>
-        <div className="relative w-full xl:w-96">
+        <div className="relative w-full xl:w-[28rem]">
           <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
           <input
             value={search}
             onChange={event => setSearch(event.target.value)}
             placeholder="Buscar contrato, cliente, analista o siguiente paso..."
-            className="w-full rounded-xl border border-slate-200 bg-white py-3 pl-11 pr-4 text-sm font-semibold text-slate-800 outline-none focus:ring-2 focus:ring-indigo-300"
+            className="crm-input w-full rounded-lg border border-slate-300 bg-white py-3 pl-11 pr-4 text-sm font-semibold text-slate-800 outline-none focus:ring-2 focus:ring-blue-200"
           />
         </div>
       </div>
 
-      <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-4">
-        <div className="rounded-xl border border-slate-200 bg-white p-4">
-          <p className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-slate-400"><Building2 className="h-3.5 w-3.5" />Clientes</p>
-          <p className="mt-1 text-2xl font-black text-slate-900">{clients.length}</p>
-        </div>
-        <div className="rounded-xl border border-indigo-200 bg-white p-4">
-          <p className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-indigo-600"><TrendingUp className="h-3.5 w-3.5" />Monto</p>
-          <p className="mt-1 text-2xl font-black text-slate-900">{fmtCurrency(exposure)}</p>
-        </div>
-        <div className="rounded-xl border border-emerald-200 bg-white p-4">
-          <p className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-emerald-600"><CheckCircle2 className="h-3.5 w-3.5" />Saldo</p>
-          <p className="mt-1 text-2xl font-black text-slate-900">{fmtCurrency(balance)}</p>
-        </div>
-        <div className="rounded-xl border border-rose-200 bg-white p-4">
-          <p className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-rose-600"><AlertTriangle className="h-3.5 w-3.5" />Alertas</p>
-          <p className="mt-1 text-2xl font-black text-rose-700">{risky}</p>
-        </div>
+      <div className="mb-5 grid grid-cols-1 gap-3 md:grid-cols-4">
+        {metrics.map(metric => {
+          const Icon = metric.icon;
+          return (
+            <div key={metric.label} className={`crm-card crm-metric crm-metric-${metric.tone}`}>
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-[11px] font-black uppercase tracking-wider text-slate-500">{metric.label}</p>
+                <span className="crm-metric-icon">
+                  <Icon className="h-4 w-4" />
+                </span>
+              </div>
+              <p className="mt-3 truncate text-2xl font-black tracking-tight text-slate-950">{metric.value}</p>
+            </div>
+          );
+        })}
       </div>
 
       {error && (
-        <div className="mb-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-800">
+        <div className="mb-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-800">
           {error}
         </div>
       )}
 
-      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+      <div className="crm-card overflow-hidden">
+        <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-3">
+          <p className="text-xs font-black uppercase tracking-widest text-slate-600">Pipeline de seguimiento</p>
+          <p className="text-xs font-bold text-slate-500">{rows.length.toLocaleString('es-MX')} registros</p>
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[1280px] text-left text-sm">
-            <thead className="bg-slate-50">
+            <thead className="bg-white">
               <tr>
                 {['Contrato', 'Cliente', 'RFC', 'Industria', 'Term Sheet', 'Monitoreo', 'Monto', 'Saldo Actual', '% Utilización', 'Estatus CRM', 'Analista', 'Última actualización', 'Siguiente paso'].map(header => (
-                  <th key={header} className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-500">{header}</th>
+                  <th key={header} className="whitespace-nowrap border-b border-slate-200 px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-500">{header}</th>
                 ))}
               </tr>
             </thead>
@@ -303,10 +313,12 @@ const CrmDashboardPage: React.FC<Props> = ({ onSelectClient }) => {
                 </tr>
               )}
               {!loading && rows.map(row => (
-                <tr key={`${row.client.id}-${row.id}`} className="hover:bg-slate-50">
-                  <td className="px-4 py-3 font-black text-slate-900">{row.contract}</td>
+                <tr key={`${row.client.id}-${row.id}`} className="transition-colors hover:bg-blue-50/60">
+                  <td className="max-w-[16rem] px-4 py-3 font-black text-slate-900">
+                    <span className="line-clamp-2">{row.contract}</span>
+                  </td>
                   <td className="px-4 py-3">
-                    <button onClick={() => onSelectClient(row.client.id)} className="font-black text-indigo-700 hover:text-indigo-500">
+                    <button onClick={() => onSelectClient(row.client.id)} className="text-left font-black text-blue-700 hover:text-blue-500">
                       {row.client.name}
                     </button>
                   </td>
@@ -317,7 +329,7 @@ const CrmDashboardPage: React.FC<Props> = ({ onSelectClient }) => {
                       <button
                         onClick={() => openContractFile(row.contractFiles[0])}
                         disabled={openingFileId === row.contractFiles[0].id}
-                        className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-indigo-700 hover:bg-indigo-100 disabled:opacity-50"
+                        className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-blue-700 hover:bg-blue-100 disabled:opacity-50"
                         title={row.contractFiles[0].originalName}
                       >
                         <FileText className="h-3.5 w-3.5" />
@@ -325,17 +337,17 @@ const CrmDashboardPage: React.FC<Props> = ({ onSelectClient }) => {
                         <ExternalLink className="h-3 w-3" />
                       </button>
                     ) : (
-                      <span className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-500">Sin archivo</span>
+                      <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-500">Sin archivo</span>
                     )}
                   </td>
                   <td className="px-4 py-3">
-                    <span title={row.monitorDetail} className={`rounded-lg border px-2 py-1 text-[10px] font-black uppercase tracking-wider ${monitorClass(row.monitor)}`}>{row.monitor}</span>
+                    <span title={row.monitorDetail} className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase tracking-wider ${monitorClass(row.monitor)}`}>{row.monitor}</span>
                   </td>
                   <td className="px-4 py-3 font-mono font-bold text-slate-700">{fmtCurrency(row.amount, row.transaction.currency || row.client.currency)}</td>
                   <td className="px-4 py-3 font-mono font-bold text-slate-700">{fmtCurrency(row.balance, row.transaction.currency || row.client.currency)}</td>
                   <td className="px-4 py-3 font-mono font-bold text-slate-700">{pct(row.utilization)}</td>
                   <td className="px-4 py-3">
-                    <span className={`rounded-lg border px-2 py-1 text-[10px] font-black uppercase tracking-wider ${statusClass(row.status)}`}>{row.status}</span>
+                    <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase tracking-wider ${statusClass(row.status)}`}>{row.status}</span>
                   </td>
                   <td className="px-4 py-3 font-bold text-slate-600">{row.urgent?.analystName || row.latest?.analystName || row.client.analystName || '-'}</td>
                   <td className="max-w-sm px-4 py-3 text-xs font-semibold leading-5 text-slate-600">

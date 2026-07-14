@@ -1555,16 +1555,19 @@ export const db = {
 
   // ── Loan Tapes ─────────────────────────────────────────────────────────────
   async createLoanTape(data: Omit<LoanTape_DB, 'id' | 'uploadDate'>): Promise<LoanTape_DB> {
-    const payload = {
+    const payload: any = {
       client_id: data.clientId, source_document_id: data.sourceDocumentId || null,
       name: data.name, file_name: data.fileName,
       tape_type: data.tapeType, extracted_data: normalizeLoanTapeData(data.extractedData),
       analyst_state: data.analystState || {},
     };
-    let { data: row, error } = await supabase.from('loan_tapes').insert(payload).select().single();
-    if (error && isMissingSchemaError(error, 'source_document_id')) {
-      const { source_document_id, ...fallbackPayload } = payload;
-      const retry = await supabase.from('loan_tapes').insert(fallbackPayload).select().single();
+    let insertPayload = { ...payload };
+    let { data: row, error } = await supabase.from('loan_tapes').insert(insertPayload).select().single();
+    for (let attempt = 0; error && attempt < 2; attempt += 1) {
+      if (isMissingSchemaError(error, 'source_document_id')) delete insertPayload.source_document_id;
+      else if (isMissingSchemaError(error, 'analyst_state')) delete insertPayload.analyst_state;
+      else break;
+      const retry = await supabase.from('loan_tapes').insert(insertPayload).select().single();
       row = retry.data;
       error = retry.error;
     }
@@ -1602,7 +1605,13 @@ export const db = {
     if (updates.name !== undefined) row.name = updates.name;
     if (updates.extractedData !== undefined) row.extracted_data = normalizeLoanTapeData(updates.extractedData);
     if (updates.analystState !== undefined) row.analyst_state = updates.analystState;
-    const { error } = await supabase.from('loan_tapes').update(row).eq('id', id);
+    let { error } = await supabase.from('loan_tapes').update(row).eq('id', id);
+    if (error && isMissingSchemaError(error, 'analyst_state')) {
+      delete row.analyst_state;
+      if (Object.keys(row).length === 0) return;
+      const retry = await supabase.from('loan_tapes').update(row).eq('id', id);
+      error = retry.error;
+    }
     if (error) err('updateLoanTape', error);
   },
 

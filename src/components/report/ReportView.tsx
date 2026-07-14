@@ -4,6 +4,7 @@ import { StructuredLoanTapeAnalysis } from '../../services/ai';
 import { Download, ChevronDown, ChevronRight, MessageSquare, FileSpreadsheet, Upload, Trash2, ImageDown, ArrowUp, ArrowDown, Save, LayoutGrid } from 'lucide-react';
 import {
   evaluateCovenantAuto,
+  getMetric,
   prioritizedLatestCovenantPerformance,
 } from '../../lib/financialMetrics';
 import { canUseLegacyFacilityFallback, facilityDisplayName, matchesFacilityFilter } from '../../lib/facilityHistory';
@@ -991,26 +992,46 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
       const allPeriods = covenantFrequencyGroups.flatMap(group => group.periods);
       const sourceRows: any[][] = [['Key', 'Covenant', 'Facility', 'Linea', 'Frecuencia', ...allPeriods.map(periodLabel)]];
       const metricRows: Record<string, number> = {};
-      const metricDefs: Array<[string, string, keyof FinancialStatement_DB['mappedData']]> = [
-        ['revenue', 'Ingresos', 'revenue'],
-        ['ebitda', 'EBITDA', 'ebitda'],
-        ['interestExpense', 'Gasto financiero', 'interestExpense'],
-        ['netIncome', 'Utilidad neta', 'netIncome'],
-        ['currentAssets', 'Activo corriente', 'currentAssets'],
-        ['currentLiabilities', 'Pasivo corriente', 'currentLiabilities'],
-        ['totalDebt', 'Deuda total', 'totalDebt'],
-        ['totalAssets', 'Total activo', 'totalAssets'],
-        ['equity', 'Capital', 'equity'],
+      const metricDefs: Array<[string, string]> = [
+        ['revenue', 'Ingresos'],
+        ['interestIncome', 'Ingresos por intereses'],
+        ['feeIncome', 'Ingresos por comisiones'],
+        ['coreBusinessIncome', 'Ingresos core del negocio'],
+        ['adjustedFinancialMargin', 'Margen financiero ajustado'],
+        ['adjustedOperatingIncome', 'Utilidad operativa ajustada'],
+        ['adminSellingOperatingExpenses', 'Gastos adm., venta y operación'],
+        ['ebitda', 'EBITDA'],
+        ['interestExpense', 'Gasto financiero'],
+        ['netIncome', 'Utilidad neta'],
+        ['currentAssets', 'Activo corriente'],
+        ['currentLiabilities', 'Pasivo corriente'],
+        ['totalDebt', 'Deuda total'],
+        ['banksFundsShortTerm', 'Bancos y fondos CP'],
+        ['banksFundsLongTerm', 'Bancos y fondos LP'],
+        ['totalLiabilities', 'Total pasivo'],
+        ['totalAssets', 'Total activo'],
+        ['equity', 'Capital contable'],
+        ['cash', 'Bancos / efectivo'],
+        ['availableInvestments', 'Inversiones disponibles no comprometidas'],
+        ['loanPortfolio', 'Cartera de crédito'],
+        ['netPortfolio', 'Cartera neta'],
+        ['managedPortfolio', 'Cartera administrada'],
+        ['pastDuePortfolio', 'Cartera vencida'],
+        ['loanLossReserves', 'Estimación preventiva'],
+        ['productiveAssets', 'Activos productivos'],
       ];
-      metricDefs.forEach(([key, label, mappedKey]) => {
+      metricDefs.forEach(([key, label]) => {
         metricRows[key] = sourceRows.length + 1;
         sourceRows.push([
           key,
           label,
           'Métrica base',
-          'Dato fuente',
+          'Dato fuente normalizado',
           '',
-          ...allPeriods.map(period => statementForMonth(period)?.mappedData?.[mappedKey] ?? ''),
+          ...allPeriods.map(period => {
+            const statement = statementForMonth(period);
+            return statement ? getMetric(statement, key) ?? '' : '';
+          }),
         ]);
       });
       const metricRef = (key: string, col: string) => {
@@ -1039,10 +1060,12 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
         const low = f.toLowerCase();
         if (low.includes('deuda') && low.includes('ebitda')) return `IFERROR(${metricRef('totalDebt', col)}/${metricRef('ebitda', col)},"")`;
         if (low.includes('dscr') || (low.includes('ebitda') && low.includes('interes'))) return `IFERROR(${metricRef('ebitda', col)}/${metricRef('interestExpense', col)},"")`;
-        if (low.includes('corriente') || low.includes('liquidez')) return `IFERROR(${metricRef('currentAssets', col)}/${metricRef('currentLiabilities', col)},"")`;
+        if (low.includes('corriente')) return `IFERROR(${metricRef('currentAssets', col)}/${metricRef('currentLiabilities', col)},"")`;
+        if (low.includes('liquidez inmediata')) return `IFERROR((${metricRef('cash', col)}+${metricRef('availableInvestments', col)})/${metricRef('currentLiabilities', col)},"")`;
         if (low.includes('roa')) return `IFERROR(${metricRef('netIncome', col)}/${metricRef('totalAssets', col)},"")`;
         if (low.includes('roe')) return `IFERROR(${metricRef('netIncome', col)}/${metricRef('equity', col)},"")`;
-        if (low.includes('apalanc') || low.includes('equity') || low.includes('capital')) return `IFERROR(${metricRef('totalDebt', col)}/${metricRef('equity', col)},"")`;
+        if (low.includes('apalanc')) return `IFERROR((${metricRef('banksFundsShortTerm', col)}+${metricRef('banksFundsLongTerm', col)})/${metricRef('totalAssets', col)},"")`;
+        if (low.includes('equity') || low.includes('capital')) return `IFERROR(${metricRef('totalDebt', col)}/${metricRef('equity', col)},"")`;
         return fallbackCell;
       };
       const calcRows: any[][] = [
