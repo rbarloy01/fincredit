@@ -344,6 +344,61 @@ export default defineConfig(({ mode }) => {
               res.end(JSON.stringify({ error: error?.message || 'Claude proxy error' }));
             }
           });
+
+          server.middlewares.use('/api/benchmarking', async (req, res) => {
+            if (req.method !== 'GET') { res.statusCode = 405; res.end('Method not allowed'); return; }
+            try {
+              const supabaseUrl = env.SUPABASE_URL || env.VITE_SUPABASE_URL;
+              const serviceKey = env.SUPABASE_SERVICE_KEY;
+              if (!supabaseUrl || !serviceKey) { res.statusCode = 500; res.end(JSON.stringify({ error: 'Supabase admin env missing' })); return; }
+
+              const raw = req.headers?.authorization || req.headers?.Authorization || '';
+              const token = String(raw).replace(/^Bearer\s+/i, '').trim();
+              if (!token) { res.statusCode = 401; res.end(JSON.stringify({ error: 'No autenticado' })); return; }
+
+              const userRes = await fetch(`${supabaseUrl}/auth/v1/user`, {
+                headers: { apikey: serviceKey, Authorization: `Bearer ${token}` },
+              });
+              const user = parseJson(await userRes.text(), null);
+              if (!userRes.ok || !user?.id) { res.statusCode = 401; res.end(JSON.stringify({ error: 'No autenticado' })); return; }
+
+              const profileRes = await restJson(`${supabaseUrl}/rest/v1/profiles?select=id,role,org_id&id=eq.${encodeURIComponent(user.id)}&limit=1`, serviceKey, 'GET');
+              const profile = parseJson(profileRes.body, [])?.[0] || null;
+              if (!profile || !['manager', 'analyst'].includes(profile.role)) { res.statusCode = 403; res.end(JSON.stringify({ error: 'Usuario sin acceso aprobado' })); return; }
+              if (!profile.org_id) { res.statusCode = 403; res.end(JSON.stringify({ error: 'Usuario sin organización asignada' })); return; }
+
+              const clientsRes = await restJson(`${supabaseUrl}/rest/v1/clients?select=*&org_id=eq.${encodeURIComponent(profile.org_id)}&order=created_at.desc`, serviceKey, 'GET');
+              const clients = parseJson(clientsRes.body, []);
+              const clientIds = clients.map((c: any) => c.id).filter(Boolean);
+
+              const byClientIds = async (table: string, order?: string) => {
+                if (!clientIds.length) return [];
+                const chunks: string[][] = [];
+                for (let i = 0; i < clientIds.length; i += 75) chunks.push(clientIds.slice(i, i + 75));
+                const results = await Promise.all(chunks.map(async (ids) => {
+                  const filter = `in.(${ids.map((id: string) => `"${id.replace(/"/g, '')}"`).join(',')})`;
+                  const params = new URLSearchParams({ select: '*', client_id: filter });
+                  if (order) params.set('order', order);
+                  const r = await restJson(`${supabaseUrl}/rest/v1/${table}?${params.toString()}`, serviceKey, 'GET');
+                  return parseJson(r.body, []);
+                }));
+                return results.flat();
+              };
+
+              const [customFields, financialStatements, transactions] = await Promise.all([
+                byClientIds('custom_fields'),
+                byClientIds('financial_statements', 'period_date.asc'),
+                byClientIds('transactions', 'created_at.desc'),
+              ]);
+
+              res.statusCode = 200;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ clients, customFields, financialStatements, transactions }));
+            } catch (error: any) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: error?.message || 'Benchmarking API error' }));
+            }
+          });
         }
       }],
       define: {

@@ -47,6 +47,34 @@ export interface CovenantAnalystInsight {
 }
 
 const norm = (v: string) => v.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+
+// norm() strips spaces entirely, so a single extra/missing letter anywhere in a
+// phrase (most commonly Spanish plural/singular agreement \u2014 "credito" vs
+// "creditos", "cuenta" vs "cuentas") shifts every character after it and silently
+// breaks substring matching, even though the two phrases mean the same thing.
+// This word-level fallback tokenizes on real word boundaries first, strips a
+// trailing pluralizing "s"/"es", and drops connector words, so "cartera de
+// creditos vencida" still matches the alias "cartera de credito vencida".
+const SPANISH_STOPWORDS = new Set(['de', 'la', 'el', 'los', 'las', 'y', 'a', 'por', 'para', 'con', 'en', 'del', 'al', 'o', 'u', 'e']);
+
+function singularizeWord(word: string): string {
+  if (word.length > 5 && word.endsWith('ces')) return `${word.slice(0, -3)}z`;
+  if (word.length > 4 && word.endsWith('es')) return word.slice(0, -2);
+  if (word.length > 3 && word.endsWith('s')) return word.slice(0, -1);
+  return word;
+}
+
+function wordSet(value: string): Set<string> {
+  return new Set(
+    value
+      .toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean)
+      .filter(w => !SPANISH_STOPWORDS.has(w))
+      .map(singularizeWord),
+  );
+}
 const contractNameKey = (v: string) => v.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
 
 function asArray<T>(value: unknown): T[] {
@@ -141,10 +169,13 @@ export function accountOptions(statements: FinancialStatement_DB[]) {
 }
 
 function findRaw(stmt: FinancialStatement_DB, names: string[], types?: string[]): number | null {
-  const aliases = names.map((name, index) => ({ value: norm(name), index })).filter(alias => alias.value);
+  const aliases = names
+    .map((name, index) => ({ value: norm(name), words: wordSet(name), index }))
+    .filter(alias => alias.value);
   let best: { value: number; score: number } | null = null;
   rawLineItems(stmt).forEach((item, itemIndex) => {
     const n = norm(item.name);
+    const itemWords = wordSet(item.name);
     const section = norm(item.sectionPath || '');
     const typeOk = !types || types.includes(item.statementType || 'otro');
     if (!typeOk) return;
@@ -156,8 +187,17 @@ function findRaw(stmt: FinancialStatement_DB, names: string[], types?: string[])
       // account like "TOTAL ACTIVO" spuriously matches a longer, more specific
       // alias like "total activo a corto plazo" just because it's a text prefix.
       const reverseContains = alias.value.includes(n) && n.length >= alias.value.length * 0.6;
-      if (!exact && !contains && !reverseContains) return;
-      let score = exact ? 1000 : contains ? 700 : 450;
+      // Fallback for phrases that mean the same thing but don't line up character-
+      // for-character (plural/singular agreement, stray connector words) — compare
+      // word sets instead. Guarded the same way as contains/reverseContains: the
+      // smaller side must cover the larger closely enough to avoid short generic
+      // phrases fuzzy-matching much longer, unrelated ones.
+      const wordMatch = !exact && !contains && !reverseContains && alias.words.size >= 2 && itemWords.size >= 2 && (
+        [...alias.words].every(w => itemWords.has(w)) ||
+        ([...itemWords].every(w => alias.words.has(w)) && itemWords.size >= alias.words.size * 0.6)
+      );
+      if (!exact && !contains && !reverseContains && !wordMatch) return;
+      let score = exact ? 1000 : contains ? 700 : reverseContains ? 450 : 300;
       score += Math.max(0, 120 - alias.index);
       if (n.includes('total') || n.includes('subtotal') || section.includes('total')) score += 80;
       if (n.includes('neto') || n.includes('neta')) score += 35;
