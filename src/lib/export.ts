@@ -700,9 +700,9 @@ function accountSortRank(name: string, segment: string) {
   if (segment === 'Estado de Resultados') {
     if (/(ingreso|venta)/.test(n) && !/(otro|gasto)/.test(n)) return 10;
     if (/(costo)/.test(n)) return 20;
-    if (/(utilidadbruta|margenbruto)/.test(n)) return 30;
+    if (/(utilidadbruta|margenbruto|margenfinanciero)/.test(n)) return 30;
     if (/(gasto|administracion|venta|operativo|nomina|sueldo|depreciacion|amortizacion)/.test(n)) return 40;
-    if (/(utilidadoperativa|resultadooperativo|ebitda)/.test(n)) return 50;
+    if (/(utilidadoperativa|resultadooperativo|resultadodeoperacion|perdidadeoperacion|utilidaddeoperacion|ebitda)/.test(n)) return 50;
     if (/(otroingreso|otrosingresos|otrogasto|otrosgastos|financiamiento|interes)/.test(n)) return 60;
     if (/(antesdeimpuesto|antesdeisr)/.test(n)) return 70;
     if (/(impuesto|isr|ptu)/.test(n)) return 80;
@@ -778,7 +778,8 @@ function totalValueForSection(
   const detailSum = sumFormulaForRows(detailRows, valueCol);
   const base = verticalBaseValue(stmt, section, bases, concepts);
 
-  if (section === 'ACTIVO' || section === 'Estado de Resultados') return base ?? detailSum;
+  if (section === 'Estado de Resultados') return detailSum ?? base;
+  if (section === 'ACTIVO') return base ?? detailSum;
   if (section === 'CAPITAL') return stmt.mappedData.equity || detailSum;
   if (section === 'PASIVO') {
     const totalAssets = verticalBaseValue(stmt, 'ACTIVO', bases, concepts);
@@ -898,16 +899,21 @@ function buildSegmentedAnalysisSheet(
     const items = Array.from(keys.entries())
       .filter(([, meta]) => meta.segment === segment)
       .filter(([, meta]) => !isBalanceTotalAccount(meta.name, segment))
-      .sort((a, b) => segment === 'Estado de Resultados'
-        ? a[1].sourceOrder - b[1].sourceOrder
-        : accountSortRank(a[1].name, segment) - accountSortRank(b[1].name, segment)
-          || a[1].sourceOrder - b[1].sourceOrder);
+      .sort((a, b) => accountSortRank(a[1].name, segment) - accountSortRank(b[1].name, segment)
+        || a[1].sourceOrder - b[1].sourceOrder);
     if (!items.length) return;
     rows.push([segment]);
     const detailBaseRow = name === 'Balance General' && segment !== 'ACTIVO' && totalRows.ACTIVO
       ? totalRows.ACTIVO
       : rows.length + items.length + 1;
-    const detailRows = items.map(([key, meta]) => addAnalysisRow(rows, meta.name, segment, key, periods, detailBaseRow));
+    const itemRows = items.map(([key, meta]) => ({ key, meta, row: addAnalysisRow(rows, meta.name, segment, key, periods, detailBaseRow) }));
+    // For Estado de Resultados, only pure revenue lines (rank 10) feed the
+    // "INGRESOS TOTALES" sum — gastos and subtotal rows like Margen Financiero
+    // or Resultado Neto are shown on their own row but must not be summed
+    // together with revenue, which would double-count and produce nonsense.
+    const detailRows = segment === 'Estado de Resultados'
+      ? itemRows.filter(({ meta }) => accountSortRank(meta.name, segment) === 10).map(({ row }) => row)
+      : itemRows.map(({ row }) => row);
     const denominatorRow = name === 'Balance General' && segment !== 'ACTIVO' && totalRows.ACTIVO
       ? totalRows.ACTIVO
       : undefined;
