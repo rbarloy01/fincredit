@@ -4,7 +4,7 @@ import { Session } from '../../services/auth';
 import { Plus, ChevronDown, ChevronRight, MessageCircle, Send, TrendingUp, CheckCircle, AlertTriangle, XCircle, X, Trash2, Download, FileText, Star, Clipboard, BarChart3, ArrowDownRight, ArrowUpRight, RefreshCw } from 'lucide-react';
 import type { DefinedConcept } from '../../lib/export';
 import { loadExportModule } from '../../lib/exportLoader';
-import { accountOptions, buildCovenantAnalystInsight, buildCovenantInsightPrompt, covenantPerformanceHistory, evaluateCovenantAuto, evaluateCovenantForStatement, evaluateFormula, formulaLabel, getMetric, prioritizedLatestCovenantPerformance, rawAccountKey, standardRatioFormula, standardRatios, suggestedCovenants } from '../../lib/financialMetrics';
+import { accountOptions, buildCovenantAnalystInsight, buildCovenantInsightPrompt, evaluateCovenantAuto, evaluateCovenantForStatement, evaluateFormula, formulaLabel, getMetric, prioritizedLatestCovenantPerformance, rawAccountKey, standardRatioFormula, standardRatios, suggestedCovenants } from '../../lib/financialMetrics';
 import { GlobalCovenantTemplate, loadOrgConsolidationRules, loadOrgGlobalCovenantTemplates } from '../../lib/accountConsolidation';
 import { matchesFacilityFilter } from '../../lib/facilityHistory';
 import { normalizeFinancialNumberString, parseNullableFinancialNumber } from '../../lib/numberParsing';
@@ -415,72 +415,88 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
     await loadData();
   };
 
-  const options = accountOptions(orderedStatements);
-  const standardVirtuals = latestStatement
-    ? standardRatios(latestStatement)
-      .filter(r => !['revenue', 'ebitda'].includes(r.key))
-      .filter(r => !hiddenStandard.includes(standardRatioFormula(r.key)))
-      .map(r => {
-        const formula = standardRatioFormula(r.key);
-        const existing = covenants.find(c => c.formula === formula || clean(c.name) === clean(r.label));
-        return existing || ({
-          id: `virtual:${r.key}`,
-          clientId,
-          name: r.label,
-          type: 'financial',
-          formula,
-          threshold: '',
-          operator: 'none',
-          description: r.formula,
-          complianceStatus: '',
-          formulaByPeriod: {},
-          isCustom: false,
-          createdAt: '',
-          virtual: true,
-        } as Covenant_DB & { virtual: true });
-      })
-    : [];
-  const allDisplayCovenants = [
-    ...standardVirtuals,
-    ...covenants.filter(c => !standardVirtuals.some(s => s.id === c.id || s.formula === c.formula || clean(s.name) === clean(c.name))),
-  ];
-  const displayCovenants = allDisplayCovenants.filter(cov => {
-    if (facilityFilter === 'all') return true;
-    if (facilityFilter === 'general') return !cov.transactionId;
-    return matchesFacilityFilter(cov, facilityFilter, transactions.length);
-  });
-  const covenantRows = displayCovenants.map(cov => ({ cov, ...evaluateCovenantAuto(cov, orderedStatements) }));
-  const breachedCount = covenantRows.filter(r => r.status === 'incumple').length;
-  const warningCount = covenantRows.filter(r => r.status === 'alerta').length;
-  const calculatedCount = covenantRows.filter(r => r.value !== null).length;
-  const latestPerformance = prioritizedLatestCovenantPerformance(displayCovenants, orderedStatements, contractCovenants);
-  const analystInsight = buildCovenantAnalystInsight(latestPerformance);
-  const latestInsightPrompt = buildCovenantInsightPrompt(clientName, latestPerformance);
-  const deteriorationCount = latestPerformance.filter(r => r.movement === 'deterioration').length;
-  const bettermentCount = latestPerformance.filter(r => r.movement === 'betterment').length;
-  const noDataPerformanceCount = latestPerformance.filter(r => r.movement === 'insufficient').length;
-  const covenantById = new Map(displayCovenants.map(cov => [cov.id, cov]));
-  const storylineRows = latestPerformance
-    .map(row => ({ row, cov: covenantById.get(row.covenantId) }))
-    .filter((item): item is { row: typeof latestPerformance[number]; cov: Covenant_DB } => !!item.cov)
-    .slice(0, 6);
-  const suggestions = suggestedCovenants(orderedStatements).filter(s => !allDisplayCovenants.some(c => clean(c.name) === clean(s.name)));
-  const globalSuggestions = globalTemplates
-    .filter(t => t.active)
-    .filter(t => !allDisplayCovenants.some(c => clean(c.name) === clean(t.name) || (t.formula && c.formula === t.formula)));
-  const mappedOptions = [
-    { key: 'revenue', label: 'Mapped: Ingresos' },
-    { key: 'ebitda', label: 'Mapped: EBITDA' },
-    { key: 'totalDebt', label: 'Mapped: Deuda Total' },
-    { key: 'interestExpense', label: 'Mapped: Intereses' },
-    { key: 'currentAssets', label: 'Mapped: Activo Corriente' },
-    { key: 'currentLiabilities', label: 'Mapped: Pasivo Corriente' },
-    { key: 'netIncome', label: 'Mapped: Utilidad Neta' },
-    { key: 'equity', label: 'Mapped: Capital' },
-    { key: 'totalAssets', label: 'Mapped: Activos Totales' },
-    ...concepts.map(c => ({ key: `concept:${c.id}`, label: `Concepto: ${c.name}` })),
-  ];
-  const labelMap = Object.fromEntries([...mappedOptions, ...options.map(o => ({ key: `account:${o.key}`, label: o.label }))].map(o => [o.key, o.label]));
+  const {
+    options, standardVirtuals, allDisplayCovenants, displayCovenants, covenantRows,
+    breachedCount, warningCount, calculatedCount, latestPerformance, analystInsight,
+    latestInsightPrompt, deteriorationCount, bettermentCount, noDataPerformanceCount,
+    covenantById, storylineRows, suggestions, globalSuggestions, mappedOptions, labelMap,
+    performanceById,
+  } = useMemo(() => {
+    const options = accountOptions(orderedStatements);
+    const standardVirtuals = latestStatement
+      ? standardRatios(latestStatement)
+        .filter(r => !['revenue', 'ebitda'].includes(r.key))
+        .filter(r => !hiddenStandard.includes(standardRatioFormula(r.key)))
+        .map(r => {
+          const formula = standardRatioFormula(r.key);
+          const existing = covenants.find(c => c.formula === formula || clean(c.name) === clean(r.label));
+          return existing || ({
+            id: `virtual:${r.key}`,
+            clientId,
+            name: r.label,
+            type: 'financial',
+            formula,
+            threshold: '',
+            operator: 'none',
+            description: r.formula,
+            complianceStatus: '',
+            formulaByPeriod: {},
+            isCustom: false,
+            createdAt: '',
+            virtual: true,
+          } as Covenant_DB & { virtual: true });
+        })
+      : [];
+    const allDisplayCovenants = [
+      ...standardVirtuals,
+      ...covenants.filter(c => !standardVirtuals.some(s => s.id === c.id || s.formula === c.formula || clean(s.name) === clean(c.name))),
+    ];
+    const displayCovenants = allDisplayCovenants.filter(cov => {
+      if (facilityFilter === 'all') return true;
+      if (facilityFilter === 'general') return !cov.transactionId;
+      return matchesFacilityFilter(cov, facilityFilter, transactions.length);
+    });
+    const covenantRows = displayCovenants.map(cov => ({ cov, ...evaluateCovenantAuto(cov, orderedStatements) }));
+    const breachedCount = covenantRows.filter(r => r.status === 'incumple').length;
+    const warningCount = covenantRows.filter(r => r.status === 'alerta').length;
+    const calculatedCount = covenantRows.filter(r => r.value !== null).length;
+    const latestPerformance = prioritizedLatestCovenantPerformance(displayCovenants, orderedStatements, contractCovenants);
+    const performanceById = new Map(latestPerformance.map(row => [row.covenantId, row]));
+    const analystInsight = buildCovenantAnalystInsight(latestPerformance);
+    const latestInsightPrompt = buildCovenantInsightPrompt(clientName, latestPerformance);
+    const deteriorationCount = latestPerformance.filter(r => r.movement === 'deterioration').length;
+    const bettermentCount = latestPerformance.filter(r => r.movement === 'betterment').length;
+    const noDataPerformanceCount = latestPerformance.filter(r => r.movement === 'insufficient').length;
+    const covenantById = new Map(displayCovenants.map(cov => [cov.id, cov]));
+    const storylineRows = latestPerformance
+      .map(row => ({ row, cov: covenantById.get(row.covenantId) }))
+      .filter((item): item is { row: typeof latestPerformance[number]; cov: Covenant_DB } => !!item.cov)
+      .slice(0, 6);
+    const suggestions = suggestedCovenants(orderedStatements).filter(s => !allDisplayCovenants.some(c => clean(c.name) === clean(s.name)));
+    const globalSuggestions = globalTemplates
+      .filter(t => t.active)
+      .filter(t => !allDisplayCovenants.some(c => clean(c.name) === clean(t.name) || (t.formula && c.formula === t.formula)));
+    const mappedOptions = [
+      { key: 'revenue', label: 'Mapped: Ingresos' },
+      { key: 'ebitda', label: 'Mapped: EBITDA' },
+      { key: 'totalDebt', label: 'Mapped: Deuda Total' },
+      { key: 'interestExpense', label: 'Mapped: Intereses' },
+      { key: 'currentAssets', label: 'Mapped: Activo Corriente' },
+      { key: 'currentLiabilities', label: 'Mapped: Pasivo Corriente' },
+      { key: 'netIncome', label: 'Mapped: Utilidad Neta' },
+      { key: 'equity', label: 'Mapped: Capital' },
+      { key: 'totalAssets', label: 'Mapped: Activos Totales' },
+      ...concepts.map(c => ({ key: `concept:${c.id}`, label: `Concepto: ${c.name}` })),
+    ];
+    const labelMap = Object.fromEntries([...mappedOptions, ...options.map(o => ({ key: `account:${o.key}`, label: o.label }))].map(o => [o.key, o.label]));
+    return {
+      options, standardVirtuals, allDisplayCovenants, displayCovenants, covenantRows,
+      breachedCount, warningCount, calculatedCount, latestPerformance, analystInsight,
+      latestInsightPrompt, deteriorationCount, bettermentCount, noDataPerformanceCount,
+      covenantById, storylineRows, suggestions, globalSuggestions, mappedOptions, labelMap,
+      performanceById,
+    };
+  }, [orderedStatements, latestStatement, hiddenStandard, covenants, clientId, facilityFilter, transactions, contractCovenants, clientName, globalTemplates, concepts]);
   const formatConfigFor = (cov: Covenant_DB) => measurementConfig[cov.id] || {};
   const fmtCov = (value: number | null, cov: Covenant_DB) => formatCovenantValue(value, cov, formatConfigFor(cov));
   const reqLabel = (cov: Covenant_DB) => requirementLabel(cov, formatConfigFor(cov));
@@ -1012,7 +1028,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
                     </td>
                     <td className="px-4 py-2">
                       {(() => {
-                        const last = covenantPerformanceHistory(cov, orderedStatements).at(-1);
+                        const last = performanceById.get(cov.id);
                         if (!last) return <span className="text-slate-400">N/A</span>;
                         return (
                           <div>
