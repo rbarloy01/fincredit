@@ -457,7 +457,12 @@ export function evaluateCovenantForStatement(cov: Covenant_DB, stmt: FinancialSt
   if (cov.operator === 'lt') ok = value < threshold;
   if (cov.operator === 'lte') ok = value <= threshold;
   if (!ok) return { value, status: 'incumple', formula };
-  return { value, status: Math.abs((value - threshold) / (threshold || 1)) < 0.15 ? 'alerta' : 'cumple', formula };
+  // "Alerta" flags values sitting within 15% of the threshold, scaled by the
+  // threshold's own magnitude. That's undefined when threshold is 0 (nothing
+  // is "close to zero" in relative terms), so a compliant value can't be
+  // near-breach in that case — just report cumple.
+  if (threshold === 0) return { value, status: 'cumple', formula };
+  return { value, status: Math.abs((value - threshold) / threshold) < 0.15 ? 'alerta' : 'cumple', formula };
 }
 
 export function evaluateCovenantAuto(cov: Covenant_DB, statements: FinancialStatement_DB[]): { value: number | null; status: RatioStatus; mode: 'auto' | 'manual' } {
