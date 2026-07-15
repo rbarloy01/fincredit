@@ -126,7 +126,6 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
   const breaches = covenantResults.filter(r => r.status === 'incumple');
   const warnings = covenantResults.filter(r => r.status === 'alerta');
   const priorityCovenants = covenantResults
-    .filter(r => r.covenant.operator !== 'none' || r.status !== 'cumple')
     .sort((a, b) => {
       const rank: Record<string, number> = { incumple: 0, alerta: 1, cumple: 2 };
       return rank[a.status] - rank[b.status] || a.covenant.name.localeCompare(b.covenant.name);
@@ -384,7 +383,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
                 </tr>
               </thead>
               <tbody>
-                {priorityCovenants.slice(0, 10).map(row => {
+                {priorityCovenants.map(row => {
                   const latestHeadroom = covenantHeadroom(row.value, row.covenant);
                   return (
                     <tr key={row.covenant.id} className="border-t border-slate-100">
