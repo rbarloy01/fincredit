@@ -5,6 +5,11 @@ import { parseNullableFinancialNumber } from './numberParsing';
 export type RatioStatus = 'cumple' | 'alerta' | 'incumple';
 export type CovenantMovement = 'betterment' | 'deterioration' | 'stable' | 'new' | 'insufficient';
 
+export function isPercentCovenant(cov: Covenant_DB) {
+  const text = `${cov.name} ${cov.formula} ${cov.description || ''}`.toLowerCase();
+  return text.includes('%') || text.includes('capital') || text.includes('roa') || text.includes('roe') || text.includes('margen') || text.includes('margin');
+}
+
 export interface RatioResult {
   key: string;
   label: string;
@@ -444,12 +449,23 @@ export function formulaLabel(formula: string, labels: Record<string, string> = {
   }
 }
 
+// Percent-scale covenants (ICAP, márgenes, ROA/ROE, etc.) compute their value as
+// a 0-1 fraction but display it ×100 with a "%" suffix, so an analyst typing a
+// threshold like "15" naturally means "15%" (0.15), not the literal number 15.
+// Only rescale when the threshold wasn't already entered as a small fraction
+// (e.g. "0.15"), matching the >3 cutoff the UI uses to decide value display.
+export function resolveCovenantThreshold(cov: Covenant_DB): number | null {
+  const parsedThreshold = parseNullableFinancialNumber(cov.threshold);
+  if (parsedThreshold === null) return null;
+  const impliedPercentThreshold = isPercentCovenant(cov) && Math.abs(parsedThreshold) > 3;
+  return /%/.test(cov.threshold) || impliedPercentThreshold ? parsedThreshold / 100 : parsedThreshold;
+}
+
 export function evaluateCovenantForStatement(cov: Covenant_DB, stmt: FinancialStatement_DB): { value: number | null; status: RatioStatus; formula: string } {
   const formula = cov.formulaByPeriod?.[stmt.period] || cov.formula || cov.name;
   const value = evaluateFormula(formula, stmt);
   if (value === null || cov.operator === 'none') return { value, status: 'cumple', formula };
-  const parsedThreshold = parseNullableFinancialNumber(cov.threshold);
-  const threshold = parsedThreshold !== null && /%/.test(cov.threshold) ? parsedThreshold / 100 : parsedThreshold;
+  const threshold = resolveCovenantThreshold(cov);
   if (threshold === null) return { value, status: 'cumple', formula };
   let ok = true;
   if (cov.operator === 'gt') ok = value > threshold;

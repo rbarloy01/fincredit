@@ -15,6 +15,7 @@ import {
   metricLabels,
   prioritizedLatestCovenantPerformance,
   rawAccountKey,
+  resolveCovenantThreshold,
 } from './financialMetrics';
 import { buildLoanTapeExportContexts, type LoanTapeExportContext } from './loanTapeAnalytics';
 import {
@@ -389,7 +390,7 @@ export function buildFichaContractual(
     [],
     ['C. COVENANTS FINANCIEROS'],
     ['Covenant', 'Fórmula legible', 'Operador', 'Umbral'],
-    ...financial.map(c => [c.name, formulaLabel(c.formula || c.name, metricLabels), c.operator, parseNullableFinancialNumber(c.threshold)]),
+    ...financial.map(c => [c.name, formulaLabel(c.formula || c.name, metricLabels), c.operator, resolveCovenantThreshold(c)]),
     [],
     ['D. CALENDARIO DE DOCUMENTOS'],
     ['Documento', 'Periodicidad'],
@@ -1276,7 +1277,7 @@ export function buildMonitoreo(
     const valueRow = rows.length + 1;
     const formula = cov.formula || cov.name;
     const values = periods.map((p, i) => formulaToExcelCellRefs(cov.formulaByPeriod?.[p.stmt.period] || formula, colName(4 + i), rowMap));
-    const threshold = parseNullableFinancialNumber(cov.threshold);
+    const threshold = resolveCovenantThreshold(cov);
     const facility = cov.transactionId ? transactionNames[cov.transactionId] || 'Facility sin nombre' : 'General / legacy';
     rows.push([cov.name, facility, formulaLabel(formula, labels), cov.operator, threshold, ...values]);
     rows.push(['', '', 'Cálculo automático con referencias internas; no editar las celdas de valor', '', 'UMBRAL', ...periods.map(() => threshold)]);
@@ -1333,7 +1334,7 @@ export function buildCovenantsCalculados(
 
   financial.forEach(cov => {
     const formula = cov.formula || cov.name;
-    const threshold = parseNullableFinancialNumber(cov.threshold);
+    const threshold = resolveCovenantThreshold(cov);
     const facility = cov.transactionId ? transactionNames[cov.transactionId] || 'Facility sin nombre' : 'General / legacy';
     const opLabel = covenantOperatorLabel(cov.operator);
     const realRow = rows.length + 1;

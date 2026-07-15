@@ -4,7 +4,7 @@ import { Session } from '../../services/auth';
 import { Plus, ChevronDown, ChevronRight, MessageCircle, Send, TrendingUp, CheckCircle, AlertTriangle, XCircle, X, Trash2, Download, FileText, Star, Clipboard, BarChart3, ArrowDownRight, ArrowUpRight, RefreshCw } from 'lucide-react';
 import type { DefinedConcept } from '../../lib/export';
 import { loadExportModule } from '../../lib/exportLoader';
-import { accountOptions, buildCovenantAnalystInsight, buildCovenantInsightPrompt, evaluateCovenantAuto, evaluateCovenantForStatement, evaluateFormula, formulaLabel, getMetric, prioritizedLatestCovenantPerformance, rawAccountKey, standardRatioFormula, standardRatios, suggestedCovenants } from '../../lib/financialMetrics';
+import { accountOptions, buildCovenantAnalystInsight, buildCovenantInsightPrompt, evaluateCovenantAuto, evaluateCovenantForStatement, evaluateFormula, formulaLabel, getMetric, isPercentCovenant, prioritizedLatestCovenantPerformance, rawAccountKey, resolveCovenantThreshold, standardRatioFormula, standardRatios, suggestedCovenants } from '../../lib/financialMetrics';
 import { GlobalCovenantTemplate, loadOrgConsolidationRules, loadOrgGlobalCovenantTemplates } from '../../lib/accountConsolidation';
 import { matchesFacilityFilter } from '../../lib/facilityHistory';
 import { normalizeFinancialNumberString, parseNullableFinancialNumber } from '../../lib/numberParsing';
@@ -88,11 +88,6 @@ const operatorLabel = (operator: Covenant_DB['operator']) => (
   'N/A'
 );
 
-const isPercentCovenant = (cov: Covenant_DB) => {
-  const text = `${cov.name} ${cov.formula} ${cov.description || ''}`.toLowerCase();
-  return text.includes('%') || text.includes('capital') || text.includes('roa') || text.includes('roe') || text.includes('margen') || text.includes('margin');
-};
-
 const formatCovenantValue = (value: number | null, cov: Covenant_DB, config?: Partial<CovenantMeasurementConfig>) => {
   if (value === null || !Number.isFinite(value)) return '0';
   const mode = config?.displayMode || 'auto';
@@ -109,18 +104,12 @@ const formatCovenantValue = (value: number | null, cov: Covenant_DB, config?: Pa
 
 const requirementLabel = (cov: Covenant_DB, config?: Partial<CovenantMeasurementConfig>) => {
   if (cov.operator === 'none' || !cov.threshold) return 'Sin umbral';
-  const threshold = parseNullableFinancialNumber(cov.threshold);
+  const threshold = resolveCovenantThreshold(cov);
   return `${operatorLabel(cov.operator)} ${threshold === null ? cov.threshold : formatCovenantValue(threshold, cov, config)}`;
 };
 
-const parsedCovenantThreshold = (cov: Covenant_DB) => {
-  const parsed = parseNullableFinancialNumber(cov.threshold);
-  if (parsed === null) return null;
-  return /%/.test(cov.threshold) ? parsed / 100 : parsed;
-};
-
 const distanceToLimit = (value: number | null, cov: Covenant_DB) => {
-  const threshold = parsedCovenantThreshold(cov);
+  const threshold = resolveCovenantThreshold(cov);
   if (value === null || threshold === null || cov.operator === 'none') return null;
   if (cov.operator === 'lte' || cov.operator === 'lt') return threshold - value;
   if (cov.operator === 'gte' || cov.operator === 'gt') return value - threshold;

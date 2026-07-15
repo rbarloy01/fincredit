@@ -1,8 +1,7 @@
 import React from 'react';
 import { Client, Covenant_DB, FinancialStatement_DB, LoanTape_DB, Transaction } from '../../db/index';
 import { AlertTriangle, ArrowDownRight, ArrowUpRight, CheckCircle, Circle, FileClock, Gauge, Landmark, Lock, Minus, ShieldCheck, FileSpreadsheet, Scale, TrendingUp } from 'lucide-react';
-import { evaluateCovenantAuto, evaluateCovenantForStatement, standardRatios } from '../../lib/financialMetrics';
-import { parseNullableFinancialNumber } from '../../lib/numberParsing';
+import { evaluateCovenantAuto, evaluateCovenantForStatement, isPercentCovenant, resolveCovenantThreshold, standardRatios } from '../../lib/financialMetrics';
 
 interface Props {
   client: Client;
@@ -71,11 +70,6 @@ function covenantOperatorLabel(operator: Covenant_DB['operator']) {
   return 'N/A';
 }
 
-function isPercentCovenant(covenant: Covenant_DB) {
-  const text = `${covenant.name} ${covenant.formula} ${covenant.description || ''}`.toLowerCase();
-  return text.includes('%') || text.includes('capital') || text.includes('roa') || text.includes('roe') || text.includes('margen') || text.includes('margin');
-}
-
 function covenantValueLabel(value: number | null, covenant: Covenant_DB) {
   if (value === null || !Number.isFinite(value)) return 'N/A';
   if (isPercentCovenant(covenant) && Math.abs(value) <= 3) return `${(value * 100).toFixed(1)}%`;
@@ -84,13 +78,13 @@ function covenantValueLabel(value: number | null, covenant: Covenant_DB) {
 
 function covenantRequirementLabel(covenant: Covenant_DB) {
   if (covenant.operator === 'none' || !covenant.threshold) return 'Sin umbral';
-  const threshold = parseNullableFinancialNumber(covenant.threshold);
+  const threshold = resolveCovenantThreshold(covenant);
   const value = threshold === null ? covenant.threshold : covenantValueLabel(threshold, covenant);
   return `${covenantOperatorLabel(covenant.operator)} ${value}`;
 }
 
 function covenantHeadroom(value: number | null, covenant: Covenant_DB) {
-  const threshold = parseNullableFinancialNumber(covenant.threshold);
+  const threshold = resolveCovenantThreshold(covenant);
   if (value === null || threshold === null || covenant.operator === 'none') return null;
   if (covenant.operator === 'gte' || covenant.operator === 'gt') return value - threshold;
   if (covenant.operator === 'lte' || covenant.operator === 'lt') return threshold - value;
