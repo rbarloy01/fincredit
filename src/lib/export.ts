@@ -712,6 +712,16 @@ function accountSortRank(name: string, segment: string) {
   return 50;
 }
 
+// Broader than the rank-10 "primary income" bucket in accountSortRank: also
+// counts secondary/other income lines (e.g. "Otros ingresos por intereses")
+// so INGRESOS TOTALES doesn't silently drop real revenue. Still excludes
+// anything gasto-flavored and every subtotal/result line (Margen Financiero,
+// Resultado de Operación, Resultado Neto, etc. never contain "ingreso"/"venta").
+function isIncomeStatementRevenueLine(name: string) {
+  const n = nkey(name);
+  return /(ingreso|venta)/.test(n) && !/(gasto)/.test(n);
+}
+
 function rawValueByKey(stmt: FinancialStatement_DB, key: string) {
   const item = stmt.rawLineItems.find(i => `${i.statementType || 'otro'}||${i.name}` === key);
   return item?.value ?? null;
@@ -907,12 +917,13 @@ function buildSegmentedAnalysisSheet(
       ? totalRows.ACTIVO
       : rows.length + items.length + 1;
     const itemRows = items.map(([key, meta]) => ({ key, meta, row: addAnalysisRow(rows, meta.name, segment, key, periods, detailBaseRow) }));
-    // For Estado de Resultados, only pure revenue lines (rank 10) feed the
-    // "INGRESOS TOTALES" sum — gastos and subtotal rows like Margen Financiero
-    // or Resultado Neto are shown on their own row but must not be summed
-    // together with revenue, which would double-count and produce nonsense.
+    // For Estado de Resultados, only revenue-flavored lines (primary AND
+    // secondary/other income) feed the "INGRESOS TOTALES" sum — gastos and
+    // subtotal rows like Margen Financiero or Resultado Neto are shown on
+    // their own row but must not be summed together with revenue, which
+    // would double-count and produce nonsense.
     const detailRows = segment === 'Estado de Resultados'
-      ? itemRows.filter(({ meta }) => accountSortRank(meta.name, segment) === 10).map(({ row }) => row)
+      ? itemRows.filter(({ meta }) => isIncomeStatementRevenueLine(meta.name)).map(({ row }) => row)
       : itemRows.map(({ row }) => row);
     const denominatorRow = name === 'Balance General' && segment !== 'ACTIVO' && totalRows.ACTIVO
       ? totalRows.ACTIVO
