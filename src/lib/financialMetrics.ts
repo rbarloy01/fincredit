@@ -7,7 +7,8 @@ export type CovenantMovement = 'betterment' | 'deterioration' | 'stable' | 'new'
 
 export function isPercentCovenant(cov: Covenant_DB) {
   const text = `${cov.name} ${cov.formula} ${cov.description || ''}`.toLowerCase();
-  return text.includes('%') || text.includes('capital') || text.includes('roa') || text.includes('roe') || text.includes('margen') || text.includes('margin');
+  return text.includes('%') || text.includes('capital') || text.includes('roa') || text.includes('roe') || text.includes('margen') || text.includes('margin')
+    || text.includes('rentabilidad') || text.includes('eficiencia');
 }
 
 export interface RatioResult {

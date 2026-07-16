@@ -17,6 +17,8 @@ import {
   prioritizedLatestCovenantPerformance,
   rawAccountKey,
   resolveCovenantThreshold,
+  standardRatioFormula,
+  standardRatios,
 } from './financialMetrics';
 import { buildLoanTapeExportContexts, type LoanTapeExportContext } from './loanTapeAnalytics';
 import {
@@ -34,6 +36,10 @@ export interface SheetDef {
   colWidths?: number[];
   outlineColumns?: number[];
   wrapColumns?: number[];
+  // Green/red highlight for a numeric range — e.g. a validation row that should
+  // read ~0 but isn't expected to hit exact zero (source PDFs round differently
+  // sheet to sheet), so "within tolerance" is the real pass condition.
+  conditionalFormats?: Array<{ ref: string; tolerance: number }>;
 }
 
 export type VerticalBaseConfig = Record<string, string>;
@@ -360,6 +366,19 @@ export async function exportToExcel(sheets: SheetDef[], filename: string, target
       ws.views = [{ state: 'frozen', ySplit: firstHeaderRow, xSplit: sheet.name.includes('Balance') || sheet.name.includes('Estado') ? 2 : 0 }];
       ws.autoFilter = { from: { row: firstHeaderRow, column: 1 }, to: { row: firstHeaderRow, column: nCols } };
     }
+
+    (sheet.conditionalFormats || []).forEach(({ ref, tolerance }) => {
+      // ExcelJS's CellIsOperators type only covers 'equal'/'greaterThan'/'lessThan'/'between',
+      // so "outside tolerance" is expressed as an 'expression' rule instead of 'notBetween'.
+      const topLeftCell = ref.split(':')[0];
+      ws.addConditionalFormatting({
+        ref,
+        rules: [
+          { type: 'cellIs', operator: 'between', formulae: [-tolerance, tolerance], priority: 1, style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF92D050' } } } },
+          { type: 'expression', formulae: [`ABS(${topLeftCell})>${tolerance}`], priority: 2, style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFF0000' } } } },
+        ],
+      });
+    });
   }
 
   const buf = await wb.xlsx.writeBuffer();
@@ -1204,6 +1223,114 @@ export function buildER(statements: FinancialStatement_DB[], bases: VerticalBase
   return buildSegmentedAnalysisSheet(statements, 'Estado de Resultados', ['Estado de Resultados'], bases, concepts);
 }
 
+// 3b. Flujo de Efectivo — direct transcription of every classified cash-flow
+// line, in source order, with period-over-period Δ/Δ%. Deliberately does NOT
+// synthesize a grand total: Mexican cash-flow statements are usually structured
+// as Operación/Inversión/Financiamiento sub-totals feeding a net figure, and
+// naively SUM-ing every non-"total"-labeled row (the same trick buildBG/buildER
+// use for their single-total sections) would double-count whichever subtotal
+// lines don't literally contain "total"/"suma" in their name. Any subtotal or
+// net-flow line the source document itself reports still shows up here as its
+// own row, verbatim — it's just not re-derived.
+export function buildFlujoEfectivo(statements: FinancialStatement_DB[]): SheetDef {
+  const periods = normalizedPeriods(statements);
+  const keys = new Map<string, { name: string; sourceOrder: number }>();
+  let sourceOrder = 0;
+  periods.forEach(p => p.stmt.rawLineItems.forEach(item => {
+    if (exportSegment(item) !== 'Flujo de Efectivo') return;
+    const key = `${item.statementType || 'otro'}||${item.name}`;
+    if (!keys.has(key)) keys.set(key, { name: item.name, sourceOrder: sourceOrder++ });
+  }));
+  if (!keys.size || !periods.length) {
+    return {
+      name: 'Flujo de Efectivo',
+      rows: [
+        ['FLUJO DE EFECTIVO'],
+        [],
+        ['No se detectaron líneas de flujo de efectivo en los EFF cargados.'],
+        ['Si el cliente sí reporta un estado de flujo de efectivo, confirma que se haya clasificado como tal al subir el EFF.'],
+      ],
+      colWidths: [60],
+    };
+  }
+  const items = Array.from(keys.entries()).sort((a, b) => a[1].sourceOrder - b[1].sourceOrder);
+  const rows: SheetDef['rows'] = [
+    ['FLUJO DE EFECTIVO'],
+    ['Transcripción directa de las líneas reportadas en cada EFF, en el orden en que aparecen. Subtotales y el flujo neto ya vienen del estado de origen — no se recalculan aquí.'],
+    [],
+    ['Cuenta', ...periods.map(p => p.label), ...periods.slice(1).flatMap(p => [`Δ ${p.label}`, `Δ% ${p.label}`])],
+  ];
+  items.forEach(([key, meta]) => {
+    const rowNumber = rows.length + 1;
+    const row: SheetDef['rows'][0] = [meta.name, ...periods.map(p => rawValueByKey(p.stmt, key))];
+    periods.slice(1).forEach((_, j) => {
+      const prevCol = colName(2 + j);
+      const curCol = colName(3 + j);
+      row.push(`=IFERROR(${curCol}${rowNumber}-${prevCol}${rowNumber},"")`);
+      row.push(`=IFERROR((${curCol}${rowNumber}-${prevCol}${rowNumber})/ABS(${prevCol}${rowNumber}),"")`);
+    });
+    rows.push(row);
+  });
+  return {
+    name: 'Flujo de Efectivo',
+    rows,
+    colWidths: [42, ...Array(periods.length).fill(15), ...Array(Math.max(0, periods.length - 1) * 2).fill(12)],
+  };
+}
+
+// 3c. VALIDACIONES — cross-statement accounting-identity checks. Each check is
+// computed from the same account-resolution engine (getMetric) used everywhere
+// else in the app, so a check failing here means the resolved figures
+// genuinely don't tie out — not a re-derivation bug local to this sheet.
+export function buildValidaciones(statements: FinancialStatement_DB[], tolerance = 1000): SheetDef {
+  const periods = normalizedPeriods(statements);
+  if (!periods.length) return { name: 'Validaciones', rows: [['Sin periodos cargados']] };
+
+  const checks: Array<{ code: string; label: string; values: Array<number | null> }> = [
+    {
+      code: 'BG-2/3',
+      label: 'Total Activo − (Total Pasivo + Total Capital Contable)',
+      values: periods.map(p => {
+        const activo = getMetric(p.stmt, 'totalAssets');
+        const pasivo = getMetric(p.stmt, 'totalLiabilities');
+        const capital = getMetric(p.stmt, 'equity');
+        return activo === null || pasivo === null || capital === null ? null : activo - (pasivo + capital);
+      }),
+    },
+    {
+      code: 'ER-1',
+      label: 'Margen Financiero Ajustado − (Ingresos por Intereses − Gastos por Intereses)',
+      values: periods.map(p => {
+        const margin = getMetric(p.stmt, 'adjustedFinancialMargin');
+        const income = getMetric(p.stmt, 'interestIncome');
+        const expense = getMetric(p.stmt, 'interestExpense');
+        return margin === null || income === null || expense === null ? null : margin - (income - expense);
+      }),
+    },
+  ];
+
+  const rows: SheetDef['rows'] = [
+    ['VALIDACIONES'],
+    [`Diferencias dentro de ±${tolerance.toLocaleString('es-MX')} se marcan en verde; fuera de ese rango, en rojo. No se espera cero exacto porque los EFF de origen redondean distinto entre secciones — si un chequeo sale en rojo, revisa la cuenta faltante o mal capturada en ese periodo antes de ampliar la tolerancia.`],
+    [],
+    ['Chequeo', ...periods.map(p => p.label)],
+  ];
+  const conditionalFormats: Array<{ ref: string; tolerance: number }> = [];
+  checks.forEach(check => {
+    const rowNumber = rows.length + 1;
+    rows.push([`${check.code} | ${check.label}`, ...check.values]);
+    conditionalFormats.push({ ref: `B${rowNumber}:${colName(1 + periods.length)}${rowNumber}`, tolerance });
+  });
+
+  return {
+    name: 'Validaciones',
+    rows,
+    colWidths: [58, ...Array(periods.length).fill(14)],
+    wrapColumns: [1],
+    conditionalFormats,
+  };
+}
+
 // 4. VARIACION A CIERRES — YoY comparison from two most recent December periods
 export function buildVariacion(statements: FinancialStatement_DB[], clientName = ''): SheetDef {
   const sorted = [...statements].sort((a, b) => a.periodDate.localeCompare(b.periodDate));
@@ -1443,6 +1570,48 @@ export function buildCovenantsCalculados(
     rows,
     colWidths: [32, 24, 16, 48, 22, ...Array(periods.length).fill(14)],
     wrapColumns: [1, 2, 4, 5],
+  };
+}
+
+// INDICADORES — the full standard ratio set (independent of which ones happen
+// to be configured as client covenants), one row per ratio, every value a live
+// formula against the "Datos Covenant" sheet. Always built, not gated behind
+// the client having covenants configured — ratios are a standard deliverable.
+const INDICADOR_KEYS = [
+  'ifnb_financial_margin', 'ifnb_operating_profitability', 'ifnb_net_margin', 'ifnb_operating_efficiency',
+  'debt_ebitda', 'dscr', 'current_ratio', 'leverage', 'debt_equity', 'capitalization', 'adjusted_capitalization',
+  'roa', 'roe', 'past_due_portfolio', 'net_past_due_portfolio', 'past_due_coverage',
+  'debt_coverage_productive_assets', 'funding_cost', 'portfolio_yield', 'financial_spread',
+  'immediate_liquidity', 'past_due_to_equity',
+];
+
+export function buildIndicadores(statements: FinancialStatement_DB[], concepts: DefinedConcept[] = []): SheetDef {
+  const periods = normalizedPeriods(statements);
+  if (!periods.length) return { name: 'Indicadores', rows: [['Sin periodos cargados']] };
+  const rowMap = covenantDataRowMap(statements, concepts);
+  const byKey = new Map(standardRatios(periods.at(-1)!.stmt).map(r => [r.key, r]));
+
+  const rows: SheetDef['rows'] = [
+    ['INDICADORES FINANCIEROS'],
+    ['Cada indicador es una fórmula viva contra la hoja "Datos Covenant" — da clic en cualquier celda para ver de dónde sale.'],
+    [],
+    ['Indicador', 'Fórmula', ...periods.map(p => p.label)],
+  ];
+
+  INDICADOR_KEYS.forEach(key => {
+    const meta = byKey.get(key);
+    if (!meta) return;
+    const formula = standardRatioFormula(key);
+    const fmt = covenantNumFmt({ name: meta.label, formula, description: meta.formula } as Covenant_DB);
+    const values = periods.map((_, i) => fmtNum(formulaToExcelCellRefs(formula, colName(4 + i), rowMap), fmt));
+    rows.push([meta.label, meta.formula, ...values]);
+  });
+
+  return {
+    name: 'Indicadores',
+    rows,
+    colWidths: [34, 46, ...Array(periods.length).fill(13)],
+    wrapColumns: [2],
   };
 }
 
@@ -2073,11 +2242,6 @@ export function buildBlankShells(): SheetDef[] {
       colWidths: [40],
     },
     {
-      name: 'CF',
-      rows: [['FLUJO DE EFECTIVO — Plantilla'], [], ['Completar manualmente.']],
-      colWidths: [40],
-    },
-    {
       name: 'Fondeo',
       rows: [['ESTRUCTURA DE FONDEO — Plantilla'], [], ['Completar manualmente con líneas de crédito vigentes.']],
       colWidths: [40],
@@ -2120,10 +2284,13 @@ export async function exportEstadosFinancieros(
       buildEFFDashboard(statements, clientName),
       buildBG(statements, verticalBases, concepts, covenants),
       buildER(statements, verticalBases, concepts),
+      buildFlujoEfectivo(statements),
+      buildValidaciones(statements),
       buildDefinedConcepts(statements, concepts),
       buildCovenantDataSheet(statements, concepts),
       buildMonitoreo(covenants, statements, concepts),
       buildCovenantsCalculados(covenants, statements, concepts),
+      buildIndicadores(statements, concepts),
       buildVariacion(statements, clientName),
       ...buildBlankShells(),
     ], `EFF_${clientName}`, target);
