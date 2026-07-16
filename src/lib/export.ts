@@ -12,6 +12,7 @@ import {
   evaluateFormula,
   formulaLabel,
   getMetric,
+  isPercentCovenant,
   metricLabels,
   prioritizedLatestCovenantPerformance,
   rawAccountKey,
@@ -29,7 +30,7 @@ import { deliverDownloadToReservedTarget, type ReservedDownloadTarget } from './
 
 export interface SheetDef {
   name: string;
-  rows: (string | number | null | undefined)[][];
+  rows: (string | number | null | undefined | FormattedCell)[][];
   colWidths?: number[];
   outlineColumns?: number[];
   wrapColumns?: number[];
@@ -302,7 +303,14 @@ export async function exportToExcel(sheets: SheetDef[], filename: string, target
         if (firstHeaderRow < 0) firstHeaderRow = ri + 1;
       }
 
-      const exRow = ws.addRow(raw.map(c => {
+      const numFmtOverrides: Record<number, string> = {};
+      const exRow = ws.addRow(raw.map((c, ci) => {
+        if (c && typeof c === 'object' && (c as any).__fmtNum) {
+          const { raw: inner, fmt } = c as unknown as FormattedCell;
+          numFmtOverrides[ci + 1] = fmt;
+          if (typeof inner === 'string' && inner.startsWith('=')) return { formula: inner.slice(1), result: null } as any;
+          return inner ?? '';
+        }
         if (typeof c === 'string' && c.startsWith('=')) return { formula: c.slice(1), result: null } as any;
         return c ?? '';
       }));
@@ -328,6 +336,7 @@ export async function exportToExcel(sheets: SheetDef[], filename: string, target
           const isPct = lbl.includes('%') || lbl.includes('VAR') || lbl.includes('VERT') || lbl === 'ROA' || lbl === 'ROE';
           cell.numFmt = isPct ? '0.0%' : '#,##0;[Red](#,##0);-';
         }
+        if (numFmtOverrides[col]) cell.numFmt = numFmtOverrides[col];
         if (kind === 'headers') {
           cell.border = { bottom: { style: 'thin', color: { argb: 'FF6366F1' } } };
           cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
@@ -390,7 +399,10 @@ export function buildFichaContractual(
     [],
     ['C. COVENANTS FINANCIEROS'],
     ['Covenant', 'Fórmula legible', 'Operador', 'Umbral'],
-    ...financial.map(c => [c.name, formulaLabel(c.formula || c.name, metricLabels), c.operator, resolveCovenantThreshold(c)]),
+    ...financial.map(c => {
+      const threshold = resolveCovenantThreshold(c);
+      return [c.name, formulaLabel(c.formula || c.name, metricLabels), c.operator, threshold === null ? null : fmtNum(threshold, covenantNumFmt(c))];
+    }),
     [],
     ['D. CALENDARIO DE DOCUMENTOS'],
     ['Documento', 'Periodicidad'],
@@ -584,6 +596,25 @@ function formulaToExcelCellRefs(formula: string, dataCol: string, rowMap: Record
 
 function textFormula(value: string) {
   return value.startsWith('=') ? `'${value}` : value;
+}
+
+// exportToExcel's generic styling picks a cell's numFmt from its COLUMN HEADER
+// (does the header say "%"/"VAR"/"VERT"/"ROA"/"ROE"?). That works for tables
+// where every row in a column shares one unit, but covenant tables put a
+// different covenant — percent, ratio, or multiple — in every row of the same
+// period column, so the header can't tell you the row's actual scale. Wrapping
+// a value (or formula string) in fmtNum() forces its numFmt explicitly,
+// overriding the column-header guess for just that cell.
+interface FormattedCell {
+  __fmtNum: true;
+  raw: string | number | null;
+  fmt: string;
+}
+function fmtNum(raw: string | number | null, fmt: string): FormattedCell {
+  return { __fmtNum: true, raw, fmt };
+}
+function covenantNumFmt(cov: Covenant_DB) {
+  return isPercentCovenant(cov) ? '0.0%' : '#,##0.00;[Red](#,##0.00);-';
 }
 
 function covenantOperatorLabel(operator: Covenant_DB['operator']) {
@@ -1161,7 +1192,7 @@ export function buildBG(statements: FinancialStatement_DB[], bases: VerticalBase
         ...calculated.map(({ covenant, values }) => [
           covenant.name,
           'Valor',
-          ...values.flatMap(value => [value, null]),
+          ...values.flatMap(value => [fmtNum(value, covenantNumFmt(covenant)), null]),
         ]),
       ]
     : [];
@@ -1276,11 +1307,12 @@ export function buildMonitoreo(
   for (const cov of financial) {
     const valueRow = rows.length + 1;
     const formula = cov.formula || cov.name;
+    const fmt = covenantNumFmt(cov);
     const values = periods.map((p, i) => formulaToExcelCellRefs(cov.formulaByPeriod?.[p.stmt.period] || formula, colName(4 + i), rowMap));
     const threshold = resolveCovenantThreshold(cov);
     const facility = cov.transactionId ? transactionNames[cov.transactionId] || 'Facility sin nombre' : 'General / legacy';
-    rows.push([cov.name, facility, formulaLabel(formula, labels), cov.operator, threshold, ...values]);
-    rows.push(['', '', 'Cálculo automático con referencias internas; no editar las celdas de valor', '', 'UMBRAL', ...periods.map(() => threshold)]);
+    rows.push([cov.name, facility, formulaLabel(formula, labels), cov.operator, threshold === null ? null : fmtNum(threshold, fmt), ...values.map(v => fmtNum(v, fmt))]);
+    rows.push(['', '', 'Cálculo automático con referencias internas; no editar las celdas de valor', '', 'UMBRAL', ...periods.map(() => threshold === null ? null : fmtNum(threshold, fmt))]);
     if (cov.operator !== 'none' && threshold !== null) {
       rows.push([
         '',
@@ -1352,13 +1384,14 @@ export function buildCovenantsCalculados(
       return cov.operator === 'none' || threshold === null ? '=""' : covenantCompareFormula(`${col}${realRow}`, `${col}${limitRow}`, cov.operator);
     });
 
+    const fmt = covenantNumFmt(cov);
     rows.push([
       cov.name,
       facility,
       'Real',
       textFormula(formulaLabel(formula, labels)),
       'Datos Covenant',
-      ...valueFormulas,
+      ...valueFormulas.map(f => fmtNum(f, fmt)),
     ]);
     rows.push([
       cov.name,
@@ -1366,7 +1399,7 @@ export function buildCovenantsCalculados(
       `Límite ${opLabel || 'N/A'}`,
       textFormula(opLabel ? (covenantIsMinimum(cov.operator) ? '=Mínimo requerido' : '=Máximo permitido') : '=Sin límite contractual'),
       'Umbral covenant',
-      ...periods.map(() => threshold),
+      ...periods.map(() => threshold === null ? null : fmtNum(threshold, fmt)),
     ]);
     rows.push([
       cov.name,
@@ -1374,7 +1407,7 @@ export function buildCovenantsCalculados(
       'Holgura',
       textFormula(covenantIsMinimum(cov.operator) ? '=Real - Límite' : '=Límite - Real'),
       'Cálculo',
-      ...cushionFormulas,
+      ...cushionFormulas.map(f => fmtNum(f, fmt)),
     ]);
     rows.push([
       cov.name,
@@ -1383,30 +1416,6 @@ export function buildCovenantsCalculados(
       textFormula(opLabel ? `=IF(Real${opLabel}Límite,"CUMPLE","INCUMPLE")` : '=Sin prueba'),
       'Cálculo',
       ...statusFormulas,
-    ]);
-    rows.push([
-      cov.name,
-      facility,
-      'Fórmula Real visible',
-      'Texto visible',
-      'Auditoría',
-      ...valueFormulas.map(textFormula),
-    ]);
-    rows.push([
-      cov.name,
-      facility,
-      'Fórmula Holgura visible',
-      'Texto visible',
-      'Auditoría',
-      ...cushionFormulas.map(textFormula),
-    ]);
-    rows.push([
-      cov.name,
-      facility,
-      'Fórmula Cumple visible',
-      'Texto visible',
-      'Auditoría',
-      ...statusFormulas.map(textFormula),
     ]);
     rows.push([]);
   });
