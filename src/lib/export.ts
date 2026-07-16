@@ -253,14 +253,31 @@ export async function exportToPdf(pages: HTMLElement[], filename: string, target
 
 // ── Excel writer (ExcelJS) ────────────────────────────────────────────────────
 
-type RowKind = 'title' | 'subheading' | 'headers' | 'data' | 'blank';
+type RowKind = 'title' | 'subheading' | 'headers' | 'data' | 'total' | 'blank';
+
+// Axcess brand palette (matches the Axcess Portal app — ax-deep/ax-blue/ax-cyan
+// gradient, ink/muted text, ok green for totals).
+const AX = {
+  deep: '1430E6',
+  blue: '1B5BF5',
+  cyan: '16B7EA',
+  ink: '0E1B3D',
+  muted: '5D6B8A',
+  line: 'E1E7F5',
+  bg: 'F3F6FE',
+  okFill: 'E4F7EC',
+  ok: '128A48',
+  dangerFill: 'FDECEB',
+  danger: 'C2271C',
+};
 
 const XL = {
-  title:      { bg: '0F172A', fg: 'FFFFFF', bold: true,  sz: 14, h: 28 },
-  subheading: { bg: 'EEF2FF', fg: '312E81', bold: true,  sz: 10, h: 22 },
-  headers:    { bg: '312E81', fg: 'F8FAFC', bold: true,  sz: 9,  h: 19 },
-  data:       { bg: 'FFFFFF', fg: '1E293B', bold: false, sz: 9,  h: 15 },
-  blank:      { bg: 'FFFFFF', fg: '1E293B', bold: false, sz: 9,  h: 5  },
+  title:      { bg: AX.deep, fg: 'FFFFFF', bold: true,  sz: 14, h: 28 },
+  subheading: { bg: AX.bg,   fg: AX.deep,  bold: true,  sz: 10, h: 22 },
+  headers:    { bg: AX.blue, fg: 'FFFFFF', bold: true,  sz: 9,  h: 19 },
+  data:       { bg: 'FFFFFF', fg: AX.ink,  bold: false, sz: 9,  h: 15 },
+  total:      { bg: AX.okFill, fg: AX.ink, bold: true,  sz: 9,  h: 16 },
+  blank:      { bg: 'FFFFFF', fg: AX.ink,  bold: false, sz: 9,  h: 5  },
 };
 
 function rowKind(row: SheetDef['rows'][number], ri: number, prev: RowKind): RowKind {
@@ -268,7 +285,13 @@ function rowKind(row: SheetDef['rows'][number], ri: number, prev: RowKind): RowK
   const first = row[0];
   const solo = row.slice(1).every(c => c === null || c === undefined || c === '');
   if (ri === 0 && solo && typeof first === 'string') return 'title';
-  if (solo && typeof first === 'string' && (prev === 'blank' || prev === 'title')) return 'subheading';
+  if (solo && typeof first === 'string' && (prev === 'blank' || prev === 'title' || prev === 'headers' || prev === 'total')) return 'subheading';
+  // Total/subtotal rows (TOTAL ACTIVO, TOTAL PASIVO + CAPITAL, DIFERENCIA...,
+  // INGRESOS TOTALES, etc.) — checked before the 'headers' heuristic below,
+  // since a total row's formula cells are plain "=..." strings at this stage
+  // (not yet converted to formula objects), so it can otherwise satisfy
+  // "headers" purely by having several string-typed cells after a blank row.
+  if (typeof first === 'string' && /^(total|suma|diferencia|ingresos totales)/i.test(first.trim())) return 'total';
   const filled = row.filter(c => c !== null && c !== undefined && c !== '');
   if (filled.length >= 3 && filled.every(c => typeof c === 'string') &&
       (prev === 'blank' || prev === 'subheading' || prev === 'title')) return 'headers';
@@ -283,7 +306,7 @@ export async function exportToExcel(sheets: SheetDef[], filename: string, target
 
   for (const sheet of sheets) {
     const ws = wb.addWorksheet(sheet.name.slice(0, 31));
-    ws.properties.tabColor = { argb: sheet.name.includes('Dashboard') ? 'FF312E81' : 'FF64748B' };
+    ws.properties.tabColor = { argb: sheet.name.includes('Dashboard') ? 'FF' + AX.deep : 'FF' + AX.muted };
     const maxCols = Math.max(1, ...sheet.rows.map(r => r.length));
     const nCols = Math.max(maxCols, sheet.colWidths?.length ?? 0);
 
@@ -325,7 +348,7 @@ export async function exportToExcel(sheets: SheetDef[], filename: string, target
         const width = sheet.colWidths?.[col - 1] ?? 14;
         return Math.ceil(value.length / Math.max(8, width * 1.25));
       }));
-      exRow.height = kind === 'data' ? Math.min(72, Math.max(h, wrappedLineCount * 14)) : h;
+      exRow.height = (kind === 'data' || kind === 'total') ? Math.min(72, Math.max(h, wrappedLineCount * 14)) : h;
 
       exRow.eachCell({ includeEmpty: true }, (cell, col) => {
         if (col > nCols) return;
@@ -337,18 +360,21 @@ export async function exportToExcel(sheets: SheetDef[], filename: string, target
           horizontal: (kind === 'title' || kind === 'subheading' || !isNum) ? 'left' : 'right',
           wrapText: sheet.wrapColumns?.includes(col) || false,
         };
-        if (isNum && kind === 'data') {
+        if (isNum && (kind === 'data' || kind === 'total')) {
           const lbl = (headerLabels[col - 1] ?? '').toUpperCase();
           const isPct = lbl.includes('%') || lbl.includes('VAR') || lbl.includes('VERT') || lbl === 'ROA' || lbl === 'ROE';
           cell.numFmt = isPct ? '0.0%' : '#,##0;[Red](#,##0);-';
         }
         if (numFmtOverrides[col]) cell.numFmt = numFmtOverrides[col];
         if (kind === 'headers') {
-          cell.border = { bottom: { style: 'thin', color: { argb: 'FF6366F1' } } };
+          cell.border = { bottom: { style: 'thin', color: { argb: 'FF' + AX.cyan } } };
           cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
         }
         if (kind === 'data') {
           cell.border = { bottom: { style: 'hair', color: { argb: 'FFE2E8F0' } } };
+        }
+        if (kind === 'total') {
+          cell.border = { top: { style: 'thin', color: { argb: 'FF' + AX.ok } }, bottom: { style: 'hair', color: { argb: 'FFE2E8F0' } } };
         }
       });
 
@@ -374,8 +400,8 @@ export async function exportToExcel(sheets: SheetDef[], filename: string, target
       ws.addConditionalFormatting({
         ref,
         rules: [
-          { type: 'cellIs', operator: 'between', formulae: [-tolerance, tolerance], priority: 1, style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF92D050' } } } },
-          { type: 'expression', formulae: [`ABS(${topLeftCell})>${tolerance}`], priority: 2, style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFF0000' } } } },
+          { type: 'cellIs', operator: 'between', formulae: [-tolerance, tolerance], priority: 1, style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + AX.okFill } } } },
+          { type: 'expression', formulae: [`ABS(${topLeftCell})>${tolerance}`], priority: 2, style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + AX.dangerFill } } } },
         ],
       });
     });
@@ -697,7 +723,7 @@ function exportSegment(item: FinancialStatement_DB['rawLineItems'][number]) {
   const path = nkey(item.sectionPath || '');
   const name = nkey(item.name || '');
   const isCapitalName = /(capitalsocial|capitalcontable|patrimonio|resultadoacumulado|utilidadretenida|resultadodelejercicio)/.test(name);
-  const isPasivoName = /(pasivo|proveedor|acreedor|deuda|obligacion|prestamo|impuesto|seguro|social|imss|isr|iva|ptu|provision|cuentaporpagar|cxp)/.test(name);
+  const isPasivoName = /(pasivo|proveedor|acreedor|deuda|obligacion|prestamo|impuesto|seguro|social|imss|isr|iva|ptu|provision|cuentas?porpagar|cxp)/.test(name);
   if (type === 'estado_resultados' || path.includes('estadoresultado')) return 'Estado de Resultados';
   if (type === 'flujo_efectivo' || path.includes('flujoefectivo')) return 'Flujo de Efectivo';
   if (path.includes('manual') || path.includes('auditoria')) {
@@ -712,7 +738,7 @@ function exportSegment(item: FinancialStatement_DB['rawLineItems'][number]) {
   // "Pasivo y capital". Only explicit equity account names belong in CAPITAL.
   if (isPasivoName && !isCapitalName) return 'PASIVO';
   if (isCapitalName || name.includes('capital')) return 'CAPITAL';
-  if (/(activo|caja|banco|efectivo|cliente|cuentaporcobrar|inventario|propiedad|equipo|intangible)/.test(name)) return 'ACTIVO';
+  if (/(activo|caja|banco|efectivo|disponibilidad|cliente|cuentas?porcobrar|inventario|propiedad|equipo|intangible)/.test(name)) return 'ACTIVO';
   if (path.includes('pasivo')) return 'PASIVO';
   if (path.includes('capital') || path.includes('patrimonio')) return 'CAPITAL';
   if (path.includes('activo')) return 'ACTIVO';
@@ -723,9 +749,9 @@ function exportSegment(item: FinancialStatement_DB['rawLineItems'][number]) {
 function accountSortRank(name: string, segment: string) {
   const n = nkey(name);
   if (segment === 'ACTIVO') {
-    if (/(efectivo|caja|banco)/.test(n)) return 10;
+    if (/(efectivo|caja|banco|disponibilidad)/.test(n)) return 10;
     if (/(inversion|valores)/.test(n)) return 20;
-    if (/(cliente|cuentaporcobrar|cxc|derechodecobro|cartera|credito|vigente|vencida)/.test(n)) return 30;
+    if (/(cliente|cuentas?porcobrar|cxc|derechodecobro|cartera|credito|vigente|vencida)/.test(n)) return 30;
     if (/(estimacion|reserva|preventiva|deterioro)/.test(n)) return 35;
     if (/(inventario|iva|impuestoacreditable|pagosanticipados|anticipo)/.test(n)) return 40;
     if (/(propiedad|inmueble|mobiliario|equipo|activo fijo|activofijo)/.test(n)) return 60;
@@ -734,7 +760,7 @@ function accountSortRank(name: string, segment: string) {
     return 50;
   }
   if (segment === 'PASIVO') {
-    if (/(proveedor|cuentaporpagar|cxp|acreedor)/.test(n)) return 10;
+    if (/(proveedor|cuentas?porpagar|cxp|acreedor)/.test(n)) return 10;
     if (/(impuesto|seguro|social|imss|isr|iva|ptu|provision)/.test(n)) return 20;
     if (/(deuda|prestamo|credito|banco|linea|bursatil|arrendamiento)/.test(n)) return 30;
     if (/(largo|nocorriente|nocirculante)/.test(n)) return 60;
@@ -812,7 +838,15 @@ function horizontalDeltaCol(periodCount: number, priorPeriodIndex: number) {
 
 function isBalanceTotalAccount(name: string, segment: string) {
   if (segment === 'Estado de Resultados') return false;
-  return /(total|suma)/.test(nkey(name));
+  const n = nkey(name);
+  // Mexican balance sheets commonly report a second tier of subtotal under
+  // CAPITAL (Capital Contribuido / Capital Ganado, per NIF B-6) without the
+  // word "total" appearing anywhere in the label. Left unexcluded, these get
+  // summed as a "detail" row alongside the very rows that already make them
+  // up — e.g. Capital Contribuido = Capital Social + Aportaciones — silently
+  // doubling that portion of TOTAL CAPITAL CONTABLE.
+  if (/(capitalcontribuido|capitalganado)/.test(n)) return true;
+  return /(total|suma)/.test(n);
 }
 
 function totalLabelForSection(section: string) {
@@ -828,28 +862,72 @@ function sumFormulaForRows(rowNumbers: number[], valueCol: number) {
   return `=SUM(${rowNumbers.map(row => `${colName(valueCol)}${row}`).join(',')})`;
 }
 
+// Live SUM formulas are only trustworthy when the detail rows they add up are
+// a genuinely non-overlapping partition of the section. isBalanceTotalAccount
+// catches the common case ("total"/"suma" in the label), but a source can
+// still report a second-tier subtotal under a label that says neither — e.g.
+// "Capital Contribuido" already equals "Capital Social" + "Aportaciones", so
+// summing all three double-counts. There's no way to enumerate every such
+// label a source document might use, so this is the safety net: numerically
+// pre-check the sum against the source's own reported total, and if they
+// disagree by more than rounding-level noise, trust the source's figure
+// instead of a formula that's very likely double-counting something.
+function numericDetailSum(stmt: FinancialStatement_DB, detailKeys: string[]): number | null {
+  const values = detailKeys.map(key => rawValueByKey(stmt, key)).filter((v): v is number => v !== null);
+  return values.length ? values.reduce((sum, v) => sum + v, 0) : null;
+}
+
+function sumLooksTrustworthy(numericSum: number | null, base: number | null): boolean {
+  if (numericSum === null || base === null) return true;
+  const diff = Math.abs(numericSum - base);
+  return diff <= Math.max(1000, Math.abs(base) * 0.01);
+}
+
 function totalValueForSection(
   stmt: FinancialStatement_DB,
   section: string,
   valueCol: number,
   detailRows: number[],
+  detailKeys: string[],
   bases: VerticalBaseConfig = {},
   concepts: DefinedConcept[] = [],
 ) {
+  // Prefer a live =SUM(...) over the source's own reported total whenever there
+  // are detail rows to sum AND the sum actually ties out — a total should be
+  // auditable by clicking it, per the financial-consolidator skill's core rule
+  // ("every total MUST be a live formula, never a hardcoded number"). Falls
+  // back to the source-reported figure (or, for PASIVO, the Activo-Capital
+  // difference) when there are no detail rows, or when the sum disagrees with
+  // the source's own total enough to suggest a double-counted subtotal rather
+  // than rounding noise. Any resulting gap still shows up in the DIFERENCIA
+  // row below and in the Validaciones sheet.
+  //
+  // NOTE: verticalBaseValue() always returns TOTAL ACTIVO regardless of
+  // `section` — it's the %-vertical denominator (every BG section is shown as
+  // a % of total assets by convention), not "this section's own total". Each
+  // branch below computes its own correct reference value to sanity-check
+  // against instead of reusing it blindly.
   const detailSum = sumFormulaForRows(detailRows, valueCol);
-  const base = verticalBaseValue(stmt, section, bases, concepts);
+  const numericSum = numericDetailSum(stmt, detailKeys);
 
-  if (section === 'Estado de Resultados') return detailSum ?? base;
-  if (section === 'ACTIVO') return base ?? detailSum;
-  if (section === 'CAPITAL') return stmt.mappedData.equity || detailSum;
+  if (section === 'Estado de Resultados') return detailSum ?? verticalBaseValue(stmt, section, bases, concepts);
+  if (section === 'ACTIVO') {
+    const totalAssets = verticalBaseValue(stmt, section, bases, concepts);
+    return sumLooksTrustworthy(numericSum, totalAssets) ? detailSum ?? totalAssets : totalAssets ?? detailSum;
+  }
+  if (section === 'CAPITAL') {
+    const equity = stmt.mappedData.equity || null;
+    return sumLooksTrustworthy(numericSum, equity) ? detailSum ?? equity : equity ?? detailSum;
+  }
   if (section === 'PASIVO') {
     const totalAssets = verticalBaseValue(stmt, 'ACTIVO', bases, concepts);
     const equity = stmt.mappedData.equity || null;
-    if (totalAssets !== null && equity !== null) return totalAssets - equity;
-    return detailSum;
+    const expectedPasivo = totalAssets !== null && equity !== null ? totalAssets - equity : null;
+    if (detailSum !== null && sumLooksTrustworthy(numericSum, expectedPasivo)) return detailSum;
+    return expectedPasivo ?? detailSum;
   }
 
-  return detailSum ?? base;
+  return detailSum ?? verticalBaseValue(stmt, section, bases, concepts);
 }
 
 function addVerticalBaseRow(
@@ -857,6 +935,7 @@ function addVerticalBaseRow(
   section: string,
   periods: Array<{ label: string; stmt: FinancialStatement_DB }>,
   detailRows: number[],
+  detailKeys: string[],
   denominatorRowNumber?: number,
   bases: VerticalBaseConfig = {},
   concepts: DefinedConcept[] = [],
@@ -866,7 +945,7 @@ function addVerticalBaseRow(
   const denominatorRow = denominatorRowNumber || rowNumber;
   periods.forEach((p, i) => {
     const valueCol = valueColForAnalysisPeriod(i);
-    row.push(totalValueForSection(p.stmt, section, valueCol, detailRows, bases, concepts));
+    row.push(totalValueForSection(p.stmt, section, valueCol, detailRows, detailKeys, bases, concepts));
     row.push(`=IFERROR(${colName(valueCol)}${rowNumber}/${colName(valueCol)}$${denominatorRow},"")`);
   });
   periods.slice(1).forEach((_, i) => {
@@ -973,13 +1052,15 @@ function buildSegmentedAnalysisSheet(
     // subtotal rows like Margen Financiero or Resultado Neto are shown on
     // their own row but must not be summed together with revenue, which
     // would double-count and produce nonsense.
-    const detailRows = segment === 'Estado de Resultados'
-      ? itemRows.filter(({ meta }) => isIncomeStatementRevenueLine(meta.name)).map(({ row }) => row)
-      : itemRows.map(({ row }) => row);
+    const revenueFilteredRows = segment === 'Estado de Resultados'
+      ? itemRows.filter(({ meta }) => isIncomeStatementRevenueLine(meta.name))
+      : itemRows;
+    const detailRows = revenueFilteredRows.map(({ row }) => row);
+    const detailKeys = revenueFilteredRows.map(({ key }) => key);
     const denominatorRow = name === 'Balance General' && segment !== 'ACTIVO' && totalRows.ACTIVO
       ? totalRows.ACTIVO
       : undefined;
-    totalRows[segment] = addVerticalBaseRow(rows, segment, periods, detailRows, denominatorRow, bases, concepts);
+    totalRows[segment] = addVerticalBaseRow(rows, segment, periods, detailRows, detailKeys, denominatorRow, bases, concepts);
   });
   if (name === 'Balance General') addBalanceCheckRows(rows, periods, totalRows);
   if (footerRows.length > 0) {
