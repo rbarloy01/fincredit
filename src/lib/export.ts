@@ -40,6 +40,12 @@ export interface SheetDef {
   // read ~0 but isn't expected to hit exact zero (source PDFs round differently
   // sheet to sheet), so "within tolerance" is the real pass condition.
   conditionalFormats?: Array<{ ref: string; tolerance: number }>;
+  // ExcelJS has no native chart-object support (confirmed: nothing in its type
+  // defs or source beyond "don't break when a loaded file already has one") —
+  // charts here are pre-rendered to PNG on a canvas and embedded as pictures.
+  // col/row are 0-indexed anchor coordinates (ExcelJS image-anchor convention,
+  // unlike the 1-indexed cell references used everywhere else in this file).
+  images?: Array<{ base64: string; col: number; row: number; width: number; height: number }>;
 }
 
 export type VerticalBaseConfig = Record<string, string>;
@@ -404,6 +410,11 @@ export async function exportToExcel(sheets: SheetDef[], filename: string, target
           { type: 'expression', formulae: [`ABS(${topLeftCell})>${tolerance}`], priority: 2, style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + AX.dangerFill } } } },
         ],
       });
+    });
+
+    (sheet.images || []).forEach(img => {
+      const imageId = wb.addImage({ base64: img.base64, extension: 'png' });
+      ws.addImage(imageId, { tl: { col: img.col, row: img.row }, ext: { width: img.width, height: img.height } });
     });
   }
 
@@ -1654,6 +1665,182 @@ export function buildCovenantsCalculados(
   };
 }
 
+// CAGR only makes sense for absolute growth metrics (Ingresos, EBITDA,
+// Cartera, Activo, Utilidad, Capital) — a ratio like ICAP or DSCR isn't a
+// "quantity" that compounds, so it's kept separate from the ratio list below.
+const CAGR_METRIC_KEYS: Array<[string, string]> = [
+  ['revenue', 'Ingresos'],
+  ['ebitda', 'EBITDA'],
+  ['managedPortfolio', 'Cartera Administrada'],
+  ['totalAssets', 'Activo Total'],
+  ['netIncome', 'Utilidad Neta'],
+  ['equity', 'Capital Contable'],
+];
+
+function yearsBetween(startIso: string, endIso: string): number {
+  const start = new Date(startIso).getTime();
+  const end = new Date(endIso).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return 0;
+  return Math.max((end - start) / (365.25 * 24 * 60 * 60 * 1000), 0);
+}
+
+function buildCagrRows(periods: Array<{ label: string; stmt: FinancialStatement_DB }>, rowMap: Record<string, number>): SheetDef['rows'] {
+  if (periods.length < 2) return [];
+  const first = periods[0];
+  const last = periods.at(-1)!;
+  const years = yearsBetween(first.stmt.periodDate, last.stmt.periodDate);
+  const rows: SheetDef['rows'] = [
+    ['CRECIMIENTO (CAGR)'],
+    [`Tasa de crecimiento anual compuesta de ${first.label} a ${last.label} (~${years.toFixed(1)} años). Solo aplica a montos absolutos, no a razones.`],
+    [],
+    ['Métrica', `CAGR ${first.label} → ${last.label}`],
+  ];
+  CAGR_METRIC_KEYS.forEach(([key, label]) => {
+    const row = rowMap[key];
+    if (!row) return;
+    const startCell = `'Datos Covenant'!D$${row}`;
+    const endCell = `'Datos Covenant'!${colName(3 + periods.length)}$${row}`;
+    const formula = years > 0
+      ? `=IFERROR(IF(AND(ISNUMBER(${startCell}),ISNUMBER(${endCell}),${startCell}>0),(${endCell}/${startCell})^(1/${years})-1,"n/a"),"n/a")`
+      : '"n/a"';
+    rows.push([label, fmtNum(formula, '0.0%')]);
+  });
+  rows.push([]);
+  return rows;
+}
+
+// ExcelJS has no native chart-object API (verified against its type
+// definitions and source — the only "chart" references are about not
+// breaking when a *loaded* file already contains a chartsheet). Trend charts
+// are rendered on an offscreen canvas and embedded as PNG pictures instead.
+// Requires a real DOM (this module runs client-side, invoked from an export
+// button click), so it degrades to "no chart" rather than throwing if not.
+function renderTrendChartPng(title: string, labels: string[], values: Array<number | null>, isPercent: boolean): string | null {
+  if (typeof document === 'undefined') return null;
+  const width = 480;
+  const height = 260;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = '#' + AX.ink;
+  ctx.font = 'bold 13px Arial';
+  ctx.fillText(title, 10, 20);
+
+  const padding = { left: 55, right: 15, top: 32, bottom: 34 };
+  const plotW = width - padding.left - padding.right;
+  const plotH = height - padding.top - padding.bottom;
+  const n = values.length;
+
+  const present = values.filter((v): v is number => v !== null && Number.isFinite(v));
+  if (!present.length) {
+    ctx.fillStyle = '#' + AX.muted;
+    ctx.font = '11px Arial';
+    ctx.fillText('Sin datos suficientes', padding.left, padding.top + plotH / 2);
+    return canvas.toDataURL('image/png').split(',')[1];
+  }
+  let min = Math.min(...present);
+  let max = Math.max(...present);
+  if (min === max) {
+    const pad = Math.abs(min || 1) * 0.1;
+    min -= pad;
+    max += pad;
+  }
+  const range = max - min || 1;
+  const xAt = (i: number) => padding.left + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+  const yAt = (v: number) => padding.top + plotH - ((v - min) / range) * plotH;
+
+  ctx.strokeStyle = '#' + AX.line;
+  ctx.fillStyle = '#' + AX.muted;
+  ctx.font = '9px Arial';
+  ctx.lineWidth = 1;
+  const gridLines = 4;
+  for (let i = 0; i <= gridLines; i++) {
+    const y = padding.top + plotH - (i / gridLines) * plotH;
+    ctx.beginPath();
+    ctx.moveTo(padding.left, y);
+    ctx.lineTo(padding.left + plotW, y);
+    ctx.stroke();
+    const value = min + (i / gridLines) * range;
+    const label = isPercent ? `${(value * 100).toFixed(1)}%` : value.toLocaleString('es-MX', { maximumFractionDigits: 2 });
+    ctx.fillText(label, 4, y + 3);
+  }
+
+  ctx.strokeStyle = '#' + AX.blue;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  let started = false;
+  values.forEach((v, i) => {
+    if (v === null || !Number.isFinite(v)) { started = false; return; }
+    const x = xAt(i);
+    const y = yAt(v);
+    if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }
+  });
+  ctx.stroke();
+
+  ctx.fillStyle = '#' + AX.blue;
+  values.forEach((v, i) => {
+    if (v === null || !Number.isFinite(v)) return;
+    ctx.beginPath();
+    ctx.arc(xAt(i), yAt(v), 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  ctx.fillStyle = '#' + AX.muted;
+  ctx.font = '8px Arial';
+  ctx.textAlign = 'center';
+  const maxLabels = 6;
+  const step = Math.max(1, Math.ceil(n / maxLabels));
+  labels.forEach((lbl, i) => {
+    if (i % step !== 0 && i !== n - 1) return;
+    ctx.fillText(lbl, xAt(i), height - 12);
+  });
+  ctx.textAlign = 'left';
+
+  return canvas.toDataURL('image/png').split(',')[1];
+}
+
+// GRÁFICAS — one trend chart per standard ratio across all loaded periods,
+// laid out in a 2-column grid of embedded PNGs (see renderTrendChartPng: no
+// native chart objects exist in ExcelJS to attach to the live cells instead).
+export function buildGraficas(statements: FinancialStatement_DB[]): SheetDef {
+  const periods = normalizedPeriods(statements);
+  if (!periods.length) return { name: 'Gráficas', rows: [['Sin periodos cargados']] };
+  const labels = periods.map(p => p.label);
+  const latestRatios = standardRatios(periods.at(-1)!.stmt);
+  const byKey = new Map(latestRatios.map(r => [r.key, r]));
+  const rows: SheetDef['rows'] = [
+    ['GRÁFICAS — RAZONES Y COVENANTS'],
+    ['Tendencia de cada razón estándar a lo largo de los periodos cargados. Estas imágenes son una foto al generar el archivo — no se recalculan solas; vuelve a exportar tras cargar un nuevo periodo.'],
+    [],
+  ];
+  const startRow = rows.length;
+  const CHARTS_PER_ROW = 2;
+  const COL_STRIDE = 9;
+  const ROW_STRIDE = 14;
+  const images: SheetDef['images'] = [];
+  let chartIndex = 0;
+  INDICADOR_KEYS.forEach(key => {
+    const meta = byKey.get(key);
+    if (!meta) return;
+    const values = periods.map(p => standardRatios(p.stmt).find(r => r.key === key)?.value ?? null);
+    if (!values.some(v => v !== null)) return;
+    const isPercent = isPercentCovenant({ name: meta.label, formula: standardRatioFormula(key), description: meta.formula } as Covenant_DB);
+    const base64 = renderTrendChartPng(meta.label, labels, values, isPercent);
+    if (!base64) return;
+    const col = (chartIndex % CHARTS_PER_ROW) * COL_STRIDE;
+    const row = startRow + Math.floor(chartIndex / CHARTS_PER_ROW) * ROW_STRIDE;
+    images.push({ base64, col, row, width: 480, height: 260 });
+    chartIndex++;
+  });
+  if (!chartIndex) rows.push(['Sin razones con suficientes datos para graficar.']);
+  return { name: 'Gráficas', rows, colWidths: Array(20).fill(11), images };
+}
+
 // INDICADORES — the full standard ratio set (independent of which ones happen
 // to be configured as client covenants), one row per ratio, every value a live
 // formula against the "Datos Covenant" sheet. Always built, not gated behind
@@ -1676,6 +1863,8 @@ export function buildIndicadores(statements: FinancialStatement_DB[], concepts: 
     ['INDICADORES FINANCIEROS'],
     ['Cada indicador es una fórmula viva contra la hoja "Datos Covenant" — da clic en cualquier celda para ver de dónde sale.'],
     [],
+    ...buildCagrRows(periods, rowMap),
+    ['RAZONES'],
     ['Indicador', 'Fórmula', ...periods.map(p => p.label)],
   ];
 
@@ -2372,6 +2561,7 @@ export async function exportEstadosFinancieros(
       buildMonitoreo(covenants, statements, concepts),
       buildCovenantsCalculados(covenants, statements, concepts),
       buildIndicadores(statements, concepts),
+      buildGraficas(statements),
       buildVariacion(statements, clientName),
       ...buildBlankShells(),
     ], `EFF_${clientName}`, target);
