@@ -1374,6 +1374,18 @@ export function buildFlujoEfectivo(statements: FinancialStatement_DB[]): SheetDe
 // computed from the same account-resolution engine (getMetric) used everywhere
 // else in the app, so a check failing here means the resolved figures
 // genuinely don't tie out — not a re-derivation bug local to this sheet.
+// "Margen Financiero Ajustado" (per NIF/CNBV reporting for regulated Mexican
+// lenders) is Margen Financiero (Ingresos - Gastos por Intereses) minus the
+// PERIOD's credit-loss provision expense — a P&L line, distinct from
+// loanLossReserves (the cumulative balance-sheet reserve getMetric already
+// exposes, restricted to statementType 'balance_general'). There's no shared
+// metric for the P&L version, so this looks it up locally rather than
+// expanding getMetric's surface for a check used only here.
+function periodProvisionExpense(stmt: FinancialStatement_DB): number {
+  const item = stmt.rawLineItems.find(i => i.statementType === 'estado_resultados' && /estimacionpreventiva/.test(nkey(i.name)));
+  return item ? Math.abs(item.value) : 0;
+}
+
 export function buildValidaciones(statements: FinancialStatement_DB[], tolerance = 1000): SheetDef {
   const periods = normalizedPeriods(statements);
   if (!periods.length) return { name: 'Validaciones', rows: [['Sin periodos cargados']] };
@@ -1391,12 +1403,14 @@ export function buildValidaciones(statements: FinancialStatement_DB[], tolerance
     },
     {
       code: 'ER-1',
-      label: 'Margen Financiero Ajustado − (Ingresos por Intereses − Gastos por Intereses)',
+      label: 'Margen Financiero Ajustado − (Ingresos por Intereses − Gastos por Intereses − Estimación Preventiva del periodo)',
       values: periods.map(p => {
         const margin = getMetric(p.stmt, 'adjustedFinancialMargin');
         const income = getMetric(p.stmt, 'interestIncome');
         const expense = getMetric(p.stmt, 'interestExpense');
-        return margin === null || income === null || expense === null ? null : margin - (income - expense);
+        if (margin === null || income === null || expense === null) return null;
+        const provision = periodProvisionExpense(p.stmt);
+        return margin - (income - expense - provision);
       }),
     },
   ];
