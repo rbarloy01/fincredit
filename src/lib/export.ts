@@ -339,10 +339,12 @@ export async function exportToExcel(sheets: SheetDef[], filename: string, target
       }
 
       const numFmtOverrides: Record<number, string> = {};
+      const noteOverrides: Record<number, string> = {};
       const exRow = ws.addRow(raw.map((c, ci) => {
         if (c && typeof c === 'object' && (c as any).__fmtNum) {
-          const { raw: inner, fmt } = c as unknown as FormattedCell;
+          const { raw: inner, fmt, note } = c as unknown as FormattedCell;
           numFmtOverrides[ci + 1] = fmt;
+          if (note) noteOverrides[ci + 1] = note;
           if (typeof inner === 'string' && inner.startsWith('=')) return { formula: inner.slice(1), result: null } as any;
           return inner ?? '';
         }
@@ -372,6 +374,7 @@ export async function exportToExcel(sheets: SheetDef[], filename: string, target
           cell.numFmt = isPct ? '0.0%' : '#,##0;[Red](#,##0);-';
         }
         if (numFmtOverrides[col]) cell.numFmt = numFmtOverrides[col];
+        if (noteOverrides[col]) cell.note = noteOverrides[col];
         if (kind === 'headers') {
           cell.border = { bottom: { style: 'thin', color: { argb: 'FF' + AX.cyan } } };
           cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
@@ -665,9 +668,10 @@ interface FormattedCell {
   __fmtNum: true;
   raw: string | number | null;
   fmt: string;
+  note?: string;
 }
-function fmtNum(raw: string | number | null, fmt: string): FormattedCell {
-  return { __fmtNum: true, raw, fmt };
+function fmtNum(raw: string | number | null, fmt: string, note?: string): FormattedCell {
+  return { __fmtNum: true, raw, fmt, note };
 }
 function covenantNumFmt(cov: Covenant_DB) {
   return isPercentCovenant(cov) ? '0.0%' : '#,##0.00;[Red](#,##0.00);-';
@@ -894,6 +898,21 @@ function sumLooksTrustworthy(numericSum: number | null, base: number | null): bo
   return diff <= Math.max(1000, Math.abs(base) * 0.01);
 }
 
+// When the safety net falls back to the source-reported figure, say so on the
+// cell itself (as an Excel note) instead of silently looking identical to
+// "nothing changed" — the missing/extra amount is exactly what an analyst
+// needs to go find in the original EFF.
+function fallbackNote(reference: number | null, numericSum: number | null): string | undefined {
+  if (reference === null || numericSum === null) return undefined;
+  const gap = reference - numericSum;
+  if (Math.abs(gap) <= Math.max(1000, Math.abs(reference) * 0.01)) return undefined;
+  const formatted = Math.abs(gap).toLocaleString('es-MX', { maximumFractionDigits: 0 });
+  const direction = gap > 0
+    ? `falta clasificar aprox. $${formatted} de cuentas`
+    : `hay aprox. $${formatted} de cuentas de más (posible doble conteo)`;
+  return `Este total viene directo del EFF de origen, no de la suma de las cuentas de arriba: la suma del detalle ${direction} respecto al total reportado. Revisa el EFF original de este periodo para encontrar la cuenta faltante o mal clasificada.`;
+}
+
 function totalValueForSection(
   stmt: FinancialStatement_DB,
   section: string,
@@ -902,7 +921,7 @@ function totalValueForSection(
   detailKeys: string[],
   bases: VerticalBaseConfig = {},
   concepts: DefinedConcept[] = [],
-) {
+): { value: string | number | null; note?: string } {
   // Prefer a live =SUM(...) over the source's own reported total whenever there
   // are detail rows to sum AND the sum actually ties out — a total should be
   // auditable by clicking it, per the financial-consolidator skill's core rule
@@ -921,24 +940,26 @@ function totalValueForSection(
   const detailSum = sumFormulaForRows(detailRows, valueCol);
   const numericSum = numericDetailSum(stmt, detailKeys);
 
-  if (section === 'Estado de Resultados') return detailSum ?? verticalBaseValue(stmt, section, bases, concepts);
+  if (section === 'Estado de Resultados') return { value: detailSum ?? verticalBaseValue(stmt, section, bases, concepts) };
   if (section === 'ACTIVO') {
     const totalAssets = verticalBaseValue(stmt, section, bases, concepts);
-    return sumLooksTrustworthy(numericSum, totalAssets) ? detailSum ?? totalAssets : totalAssets ?? detailSum;
+    if (sumLooksTrustworthy(numericSum, totalAssets)) return { value: detailSum ?? totalAssets };
+    return { value: totalAssets ?? detailSum, note: fallbackNote(totalAssets, numericSum) };
   }
   if (section === 'CAPITAL') {
     const equity = stmt.mappedData.equity || null;
-    return sumLooksTrustworthy(numericSum, equity) ? detailSum ?? equity : equity ?? detailSum;
+    if (sumLooksTrustworthy(numericSum, equity)) return { value: detailSum ?? equity };
+    return { value: equity ?? detailSum, note: fallbackNote(equity, numericSum) };
   }
   if (section === 'PASIVO') {
     const totalAssets = verticalBaseValue(stmt, 'ACTIVO', bases, concepts);
     const equity = stmt.mappedData.equity || null;
     const expectedPasivo = totalAssets !== null && equity !== null ? totalAssets - equity : null;
-    if (detailSum !== null && sumLooksTrustworthy(numericSum, expectedPasivo)) return detailSum;
-    return expectedPasivo ?? detailSum;
+    if (detailSum !== null && sumLooksTrustworthy(numericSum, expectedPasivo)) return { value: detailSum };
+    return { value: expectedPasivo ?? detailSum, note: fallbackNote(expectedPasivo, numericSum) };
   }
 
-  return detailSum ?? verticalBaseValue(stmt, section, bases, concepts);
+  return { value: detailSum ?? verticalBaseValue(stmt, section, bases, concepts) };
 }
 
 function addVerticalBaseRow(
@@ -956,7 +977,8 @@ function addVerticalBaseRow(
   const denominatorRow = denominatorRowNumber || rowNumber;
   periods.forEach((p, i) => {
     const valueCol = valueColForAnalysisPeriod(i);
-    row.push(totalValueForSection(p.stmt, section, valueCol, detailRows, detailKeys, bases, concepts));
+    const { value, note } = totalValueForSection(p.stmt, section, valueCol, detailRows, detailKeys, bases, concepts);
+    row.push(note ? fmtNum(value, '#,##0;[Red](#,##0);-', note) : value);
     row.push(`=IFERROR(${colName(valueCol)}${rowNumber}/${colName(valueCol)}$${denominatorRow},"")`);
   });
   periods.slice(1).forEach((_, i) => {
