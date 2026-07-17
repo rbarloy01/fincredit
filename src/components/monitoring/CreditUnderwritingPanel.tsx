@@ -3,6 +3,7 @@ import { Client, Covenant_DB, FinancialStatement_DB, LoanTape_DB, Transaction } 
 import { AlertTriangle, ArrowDownRight, ArrowUpRight, Brain, CheckCircle, Circle, FileClock, Gauge, Landmark, Lock, Minus, ShieldCheck, FileSpreadsheet, Scale, TrendingUp } from 'lucide-react';
 import { evaluateCovenantAuto, evaluateCovenantForStatement, isPercentCovenant, resolveCovenantThreshold, standardRatios } from '../../lib/financialMetrics';
 import { predictCreditRisk } from '../../lib/creditRiskModel';
+import { forecastCovenants } from '../../lib/covenantForecastModel';
 
 interface Props {
   client: Client;
@@ -198,6 +199,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
   ];
   const readiness = readinessChecks.filter(x => x.done).length;
   const creditRisk = predictCreditRisk(sortedStatements, covenants);
+  const covenantForecasts = forecastCovenants(covenants, sortedStatements);
 
   return (
     <div className="space-y-6">
@@ -295,6 +297,66 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
               ))}
             </div>
           </>
+        )}
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-2xl p-6">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-5">
+          <div>
+            <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest flex items-center gap-2">
+              <Brain className="w-4 h-4 text-indigo-600" />Pronóstico de incumplimiento (ML)
+            </h3>
+            <p className="text-xs text-slate-500 font-bold mt-1">
+              Regresión lineal sobre el historial de cada covenant para proyectar el siguiente periodo y estimar probabilidad de incumplimiento (distribución normal sobre el residual histórico).
+            </p>
+          </div>
+          <span className="text-xs font-black text-slate-500 bg-slate-100 rounded-full px-3 py-1">
+            {covenantForecasts.length} covenant{covenantForecasts.length === 1 ? '' : 's'} con historial suficiente
+          </span>
+        </div>
+        {covenantForecasts.length === 0 ? (
+          <p className="text-sm text-slate-400 font-bold bg-slate-50 border border-slate-100 rounded-xl px-4 py-5 text-center">
+            Se necesitan al menos 3 periodos calculables por covenant para activar el pronóstico.
+          </p>
+        ) : (
+          <div className="overflow-x-auto border border-slate-100 rounded-xl">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-50">
+                <tr>
+                  <th className="text-left px-4 py-3 font-black text-slate-500 uppercase tracking-widest">Covenant</th>
+                  <th className="text-right px-4 py-3 font-black text-slate-500 uppercase tracking-widest">Último valor</th>
+                  <th className="text-right px-4 py-3 font-black text-slate-500 uppercase tracking-widest">Proyección siguiente periodo</th>
+                  <th className="text-center px-4 py-3 font-black text-slate-500 uppercase tracking-widest">Tendencia</th>
+                  <th className="text-right px-4 py-3 font-black text-slate-500 uppercase tracking-widest">Prob. incumplimiento</th>
+                  <th className="text-center px-4 py-3 font-black text-slate-500 uppercase tracking-widest">Confianza</th>
+                </tr>
+              </thead>
+              <tbody>
+                {covenantForecasts.map(f => (
+                  <tr key={f.covenantId} className="border-t border-slate-100">
+                    <td className="px-4 py-3 font-black text-slate-900">{f.covenantName}</td>
+                    <td className="px-4 py-3 text-right font-mono font-black text-slate-700">{compactNumber(f.lastValue)}</td>
+                    <td className="px-4 py-3 text-right font-mono font-black text-slate-900">{compactNumber(f.predictedNextValue)}</td>
+                    <td className="px-4 py-3 text-center">
+                      <span className={`inline-flex items-center gap-1 text-[10px] font-black uppercase rounded-full px-2.5 py-1 ${
+                        f.trend === 'deteriorando' ? 'bg-rose-100 text-rose-800' :
+                        f.trend === 'mejorando' ? 'bg-emerald-100 text-emerald-800' :
+                        'bg-slate-100 text-slate-600'
+                      }`}>
+                        {f.trend}
+                      </span>
+                    </td>
+                    <td className={`px-4 py-3 text-right font-mono font-black ${
+                      f.breachProbability >= 0.5 ? 'text-rose-700' : f.breachProbability >= 0.2 ? 'text-amber-700' : 'text-emerald-700'
+                    }`}>
+                      {pct(f.breachProbability)}
+                    </td>
+                    <td className="px-4 py-3 text-center text-[10px] font-black uppercase text-slate-500">{f.confidence}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 

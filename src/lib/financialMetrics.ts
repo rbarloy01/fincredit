@@ -169,6 +169,42 @@ export function accountOptions(statements: FinancialStatement_DB[]) {
   return rows;
 }
 
+// Character-trigram Dice similarity (the same technique behind PostgreSQL's
+// pg_trgm fuzzy search) — an unsupervised, untrained fallback that "learns"
+// only from the two strings being compared, so it needs no labeled training
+// data to auto-match an account name FinMonitor has never seen phrased that
+// way before. It only fires once exact/contains/wordSet all fail, and scores
+// below every other tier, so it can only ever win a match no rule caught.
+function charTrigrams(value: string): Map<string, number> {
+  const grams = new Map<string, number>();
+  const padded = `  ${value}  `;
+  for (let i = 0; i < padded.length - 2; i++) {
+    const gram = padded.slice(i, i + 3);
+    grams.set(gram, (grams.get(gram) || 0) + 1);
+  }
+  return grams;
+}
+
+function trigramSimilarity(a: string, b: string): number {
+  if (!a || !b) return 0;
+  const gramsA = charTrigrams(a);
+  const gramsB = charTrigrams(b);
+  let intersection = 0;
+  gramsA.forEach((count, gram) => {
+    const other = gramsB.get(gram);
+    if (other) intersection += Math.min(count, other);
+  });
+  let totalA = 0;
+  gramsA.forEach(count => { totalA += count; });
+  let totalB = 0;
+  gramsB.forEach(count => { totalB += count; });
+  const total = totalA + totalB;
+  return total === 0 ? 0 : (2 * intersection) / total;
+}
+
+const FUZZY_MATCH_MIN_LENGTH = 6;
+const FUZZY_MATCH_THRESHOLD = 0.55;
+
 function findRaw(stmt: FinancialStatement_DB, names: string[], types?: string[]): number | null {
   const aliases = names
     .map((name, index) => ({ value: norm(name), words: wordSet(name), index }))
@@ -197,8 +233,13 @@ function findRaw(stmt: FinancialStatement_DB, names: string[], types?: string[])
         [...alias.words].every(w => itemWords.has(w)) ||
         ([...itemWords].every(w => alias.words.has(w)) && itemWords.size >= alias.words.size * 0.6)
       );
-      if (!exact && !contains && !reverseContains && !wordMatch) return;
-      let score = exact ? 1000 : contains ? 700 : reverseContains ? 450 : 300;
+      const fuzzySimilarity = !exact && !contains && !reverseContains && !wordMatch
+        && alias.value.length >= FUZZY_MATCH_MIN_LENGTH && n.length >= FUZZY_MATCH_MIN_LENGTH
+        ? trigramSimilarity(alias.value, n)
+        : 0;
+      const fuzzyMatch = fuzzySimilarity >= FUZZY_MATCH_THRESHOLD;
+      if (!exact && !contains && !reverseContains && !wordMatch && !fuzzyMatch) return;
+      let score = exact ? 1000 : contains ? 700 : reverseContains ? 450 : wordMatch ? 300 : 150 + fuzzySimilarity * 100;
       score += Math.max(0, 120 - alias.index);
       if (n.includes('total') || n.includes('subtotal') || section.includes('total')) score += 80;
       if (n.includes('neto') || n.includes('neta')) score += 35;
