@@ -1,7 +1,0 @@
-{
-  "name": "FinAnalyzer - AI Financial Modeling & Covenants",
-  "description": "A high-end financial analysis tool that extracts data from statements using Gemini AI, builds historical models, and monitors debt covenants across multiple company profiles.",
-  "requestFramePermissions": [
-    "camera"
-  ]
-}
