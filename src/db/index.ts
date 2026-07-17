@@ -916,7 +916,8 @@ export const db = {
   },
 
   async getUserByEmail(email: string): Promise<User | undefined> {
-    const { data } = await supabase.from('profiles').select('*').eq('email', email.toLowerCase()).maybeSingle();
+    const { data, error } = await supabase.from('profiles').select('*').eq('email', email.toLowerCase()).maybeSingle();
+    if (error) err('getUserByEmail', error);
     if (!data) return undefined;
     return { id: data.id, name: data.name, email: data.email || '', role: data.role, createdAt: data.created_at };
   },
@@ -987,7 +988,8 @@ export const db = {
   },
 
   async getClientById(id: string): Promise<Client | undefined> {
-    const { data } = await supabase.from('clients').select('*').eq('id', id).maybeSingle();
+    const { data, error } = await supabase.from('clients').select('*').eq('id', id).maybeSingle();
+    if (error) err('getClientById', error);
     return data ? toClient(data) : undefined;
   },
 
@@ -1304,7 +1306,8 @@ export const db = {
   },
 
   async getTransactionById(id: string): Promise<Transaction | undefined> {
-    const { data } = await supabase.from('transactions').select('*').eq('id', id).maybeSingle();
+    const { data, error } = await supabase.from('transactions').select('*').eq('id', id).maybeSingle();
+    if (error) err('getTransactionById', error);
     return data ? toTransaction(data) : undefined;
   },
 
@@ -1408,7 +1411,8 @@ export const db = {
   },
 
   async getCovenantById(id: string): Promise<Covenant_DB | undefined> {
-    const { data } = await supabase.from('covenants').select('*').eq('id', id).maybeSingle();
+    const { data, error } = await supabase.from('covenants').select('*').eq('id', id).maybeSingle();
+    if (error) err('getCovenantById', error);
     return data ? toCovenant(data) : undefined;
   },
 
@@ -1524,7 +1528,8 @@ export const db = {
   },
 
   async getSourceDocument(id: string): Promise<SourceDocument | undefined> {
-    const { data } = await supabase.from('documents').select('*').eq('id', id).maybeSingle();
+    const { data, error } = await supabase.from('documents').select('*').eq('id', id).maybeSingle();
+    if (error) err('getSourceDocument', error);
     return data ? toSourceDocument(data) : undefined;
   },
 
@@ -1573,7 +1578,8 @@ export const db = {
   },
 
   async getStatementById(id: string): Promise<FinancialStatement_DB | undefined> {
-    const { data } = await supabase.from('financial_statements').select('*').eq('id', id).maybeSingle();
+    const { data, error } = await supabase.from('financial_statements').select('*').eq('id', id).maybeSingle();
+    if (error) err('getStatementById', error);
     return data ? toStatement(data) : undefined;
   },
 
@@ -1640,7 +1646,8 @@ export const db = {
   },
 
   async getLoanTapeById(id: string): Promise<LoanTape_DB | undefined> {
-    const { data } = await supabase.from('loan_tapes').select('*').eq('id', id).maybeSingle();
+    const { data, error } = await supabase.from('loan_tapes').select('*').eq('id', id).maybeSingle();
+    if (error) err('getLoanTapeById', error);
     return data ? toLoanTape(data) : undefined;
   },
 

@@ -1,6 +1,7 @@
 import path from 'path';
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 import https from 'node:https';
 
 function readBody(req: any): Promise<string> {
@@ -154,8 +155,36 @@ async function requireManager(req: any, supabaseUrl: string, serviceKey: string)
   return { ok: true, status: 200, user };
 }
 
+// Runs a Vercel serverless handler (api/**.ts, default-exported `(req, res)`)
+// as-is inside Vite's dev middleware, instead of re-implementing its logic —
+// re-implementations are exactly what let /api/benchmarking silently 404 in
+// dev for a whole session. ssrLoadModule goes through Vite's own resolver,
+// so the handler's `../foo.js` imports resolve to the sibling `foo.ts` files
+// the same way the rest of the app's TS graph does. Vercel's runtime adds
+// `res.status()`/`res.json()` and pre-parses `req.body`, which raw Node
+// req/res objects don't have — this fills in just enough of that shim.
+async function callVercelHandler(server: any, modulePath: string, req: any, res: any) {
+  const mod = await server.ssrLoadModule(modulePath);
+  if (typeof res.status !== 'function') {
+    res.status = (code: number) => { res.statusCode = code; return res; };
+  }
+  if (typeof res.json !== 'function') {
+    res.json = (data: unknown) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(data)); return res; };
+  }
+  if (req.body === undefined) {
+    const raw = req.method === 'GET' || req.method === 'HEAD' ? '' : await readBody(req);
+    req.body = raw ? parseJson(raw, raw) : {};
+  }
+  await mod.default(req, res);
+}
+
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
+    // Vercel injects .env vars straight into process.env for serverless
+    // functions; Vite's own loadEnv() doesn't touch process.env, so bridge it
+    // here — every api/**.ts handler invoked via callVercelHandler reads its
+    // config from process.env, same as it does in production.
+    Object.assign(process.env, env);
     const buildId = env.VERCEL_GIT_COMMIT_SHA || env.VERCEL_DEPLOYMENT_ID || `${Date.now()}`;
     return {
       root: path.resolve(__dirname),
@@ -163,7 +192,7 @@ export default defineConfig(({ mode }) => {
         port: 4175,
         host: '0.0.0.0',
       },
-      plugins: [react(), {
+      plugins: [react(), tailwindcss(), {
         name: 'local-openai-proxy',
         configureServer(server) {
           server.middlewares.use('/api/openai/responses', async (req, res) => {
@@ -397,6 +426,33 @@ export default defineConfig(({ mode }) => {
             } catch (error: any) {
               res.statusCode = 500;
               res.end(JSON.stringify({ error: error?.message || 'Benchmarking API error' }));
+            }
+          });
+
+          server.middlewares.use('/api/documents/process', async (req, res) => {
+            try {
+              await callVercelHandler(server, '/api/documents/process.ts', req, res);
+            } catch (error: any) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: error?.message || 'Document processing error' }));
+            }
+          });
+
+          server.middlewares.use('/api/drive/sync', async (req, res) => {
+            try {
+              await callVercelHandler(server, '/api/drive/sync.ts', req, res);
+            } catch (error: any) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: error?.message || 'Drive sync error' }));
+            }
+          });
+
+          server.middlewares.use('/api/review-items/approve', async (req, res) => {
+            try {
+              await callVercelHandler(server, '/api/review-items/approve.ts', req, res);
+            } catch (error: any) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: error?.message || 'Review item approval error' }));
             }
           });
         }
