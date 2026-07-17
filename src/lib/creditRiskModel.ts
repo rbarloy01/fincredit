@@ -169,11 +169,11 @@ export function scoreCreditRisk(
     'low';
 
   const drivers = [
-    features.covenantBreachRate > 0 ? `${Math.round(features.covenantBreachRate * 100)}% of tested covenants are breached` : '',
-    features.dscr !== null && features.dscr < 1.25 ? `DSCR is tight at ${features.dscr.toFixed(2)}x` : '',
-    features.debtEbitda !== null && features.debtEbitda > 4 ? `Debt/EBITDA is elevated at ${features.debtEbitda.toFixed(2)}x` : '',
-    features.pastDuePortfolio !== null && features.pastDuePortfolio > 0.08 ? `Past due portfolio is ${Math.round(features.pastDuePortfolio * 100)}%` : '',
-    features.revenueGrowth !== null && features.revenueGrowth < -0.1 ? `Revenue declined ${Math.round(Math.abs(features.revenueGrowth) * 100)}%` : '',
+    features.covenantBreachRate > 0 ? `${Math.round(features.covenantBreachRate * 100)}% de los covenants evaluados están incumplidos` : '',
+    features.dscr !== null && features.dscr < 1.25 ? `DSCR ajustado en ${features.dscr.toFixed(2)}x` : '',
+    features.debtEbitda !== null && features.debtEbitda > 4 ? `Deuda/EBITDA elevada en ${features.debtEbitda.toFixed(2)}x` : '',
+    features.pastDuePortfolio !== null && features.pastDuePortfolio > 0.08 ? `Cartera vencida en ${Math.round(features.pastDuePortfolio * 100)}%` : '',
+    features.revenueGrowth !== null && features.revenueGrowth < -0.1 ? `Ingresos cayeron ${Math.round(Math.abs(features.revenueGrowth) * 100)}%` : '',
   ].filter(Boolean);
 
   return {
@@ -181,7 +181,7 @@ export function scoreCreditRisk(
     riskBand,
     score,
     features,
-    drivers: drivers.length ? drivers : ['No single risk driver dominates the model output'],
+    drivers: drivers.length ? drivers : ['Ningún factor domina el resultado del modelo'],
   };
 }
 

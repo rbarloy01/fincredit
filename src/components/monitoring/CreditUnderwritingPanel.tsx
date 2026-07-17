@@ -1,7 +1,8 @@
 import React from 'react';
 import { Client, Covenant_DB, FinancialStatement_DB, LoanTape_DB, Transaction } from '../../db/index';
-import { AlertTriangle, ArrowDownRight, ArrowUpRight, CheckCircle, Circle, FileClock, Gauge, Landmark, Lock, Minus, ShieldCheck, FileSpreadsheet, Scale, TrendingUp } from 'lucide-react';
+import { AlertTriangle, ArrowDownRight, ArrowUpRight, Brain, CheckCircle, Circle, FileClock, Gauge, Landmark, Lock, Minus, ShieldCheck, FileSpreadsheet, Scale, TrendingUp } from 'lucide-react';
 import { evaluateCovenantAuto, evaluateCovenantForStatement, isPercentCovenant, resolveCovenantThreshold, standardRatios } from '../../lib/financialMetrics';
+import { predictCreditRisk } from '../../lib/creditRiskModel';
 
 interface Props {
   client: Client;
@@ -41,6 +42,18 @@ function statusClass(status: string) {
   if (status === 'incumple') return 'bg-rose-50 text-rose-800 border-rose-200';
   if (status === 'alerta') return 'bg-amber-50 text-amber-800 border-amber-200';
   return 'bg-emerald-50 text-emerald-800 border-emerald-200';
+}
+
+function riskBandClass(band: 'low' | 'medium' | 'high') {
+  if (band === 'high') return 'bg-rose-100 text-rose-800 border-rose-200';
+  if (band === 'medium') return 'bg-amber-100 text-amber-800 border-amber-200';
+  return 'bg-emerald-100 text-emerald-800 border-emerald-200';
+}
+
+function riskBandLabel(band: 'low' | 'medium' | 'high') {
+  if (band === 'high') return 'Riesgo alto';
+  if (band === 'medium') return 'Riesgo medio';
+  return 'Riesgo bajo';
 }
 
 function strongStatusClass(status: string) {
@@ -184,6 +197,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
     { done: covenantResults.length > 0 && testedCovenants === covenantResults.length, label: 'Covenants calculables/manuales' },
   ];
   const readiness = readinessChecks.filter(x => x.done).length;
+  const creditRisk = predictCreditRisk(sortedStatements, covenants);
 
   return (
     <div className="space-y-6">
@@ -238,6 +252,50 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
           <p className="text-3xl font-black text-indigo-800 mt-2">{complianceScore === null ? 'N/A' : `${complianceScore}%`}</p>
           <p className="text-xs text-indigo-500 font-bold mt-1">{testedCovenants}/{covenantResults.length} covenants evaluables</p>
         </div>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-2xl p-6">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-5">
+          <div>
+            <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest flex items-center gap-2">
+              <Brain className="w-4 h-4 text-indigo-600" />Riesgo de crédito (modelo ML)
+            </h3>
+            <p className="text-xs text-slate-500 font-bold mt-1">
+              Regresión logística sobre DSCR, Deuda/EBITDA, liquidez, capitalización, cartera vencida, crecimiento y breach rate de covenants.
+              Pesos por defecto, aún no calibrados con historial de incumplimientos reales.
+            </p>
+          </div>
+          <span className={`text-xs font-black uppercase rounded-full border px-3 py-1 ${riskBandClass(creditRisk.riskBand)}`}>
+            {riskBandLabel(creditRisk.riskBand)}
+          </span>
+        </div>
+        {sortedStatements.length === 0 ? (
+          <p className="text-sm text-slate-400 font-bold bg-slate-50 border border-slate-100 rounded-xl px-4 py-5 text-center">
+            Carga EFF para activar el modelo de riesgo de crédito.
+          </p>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+              <div className="rounded-xl bg-slate-50 p-4">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Probabilidad de incumplimiento</p>
+                <p className="text-2xl font-black text-slate-900 mt-1">{pct(creditRisk.probabilityOfDefault)}</p>
+              </div>
+              <div className="rounded-xl bg-slate-50 p-4">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Score</p>
+                <p className="text-2xl font-black text-slate-900 mt-1">{creditRisk.score}/1000</p>
+              </div>
+              <div className="rounded-xl bg-slate-50 p-4">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Nivel de riesgo</p>
+                <p className="text-2xl font-black text-slate-900 mt-1">{riskBandLabel(creditRisk.riskBand)}</p>
+              </div>
+            </div>
+            <div className="space-y-2">
+              {creditRisk.drivers.map((driver, i) => (
+                <p key={i} className="text-sm font-bold text-slate-600 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">{driver}</p>
+              ))}
+            </div>
+          </>
+        )}
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-4 gap-4">

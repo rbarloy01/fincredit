@@ -1685,6 +1685,11 @@ export const db = {
     return toInstitutionalLiability(row);
   },
 
+  async checkInstitutionalLiabilitiesSchema(): Promise<boolean> {
+    const { error } = await probeSelect('institutional_liabilities', 'id');
+    return !(error && isMissingSchemaError(error, 'institutional_liabilities'));
+  },
+
   async getInstitutionalLiabilities(clientId: string): Promise<InstitutionalLiability_DB[]> {
     const { data, error } = await supabase.from('institutional_liabilities').select('*').eq('client_id', clientId).order('created_at', { ascending: true });
     if (error) {

@@ -85,12 +85,17 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [uploadWarning, setUploadWarning] = useState<string | null>(null);
+  const [schemaReady, setSchemaReady] = useState<boolean | null>(null);
 
   const load = async () => {
     setLoading(true);
     try {
-      const rows = await db.getInstitutionalLiabilities(clientId);
+      const [rows, ready] = await Promise.all([
+        db.getInstitutionalLiabilities(clientId),
+        db.checkInstitutionalLiabilitiesSchema(),
+      ]);
       setLiabilities(rows);
+      setSchemaReady(ready);
       onLiabilitiesChange?.(rows);
     } finally {
       setLoading(false);
@@ -108,6 +113,7 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
 
   const handleSave = async () => {
     if (!form.lenderName.trim()) { alert('El acreedor / institución es obligatorio.'); return; }
+    if (schemaReady === false) { setModalOpen(false); return; }
     setBusy(editingId ? 'Guardando cambios...' : 'Agregando pasivo...');
     try {
       if (editingId) {
@@ -136,6 +142,7 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
   };
 
   const handleFileUpload = async (file: File) => {
+    if (schemaReady === false) return;
     if (!file.name.endsWith('.xlsx') && !file.name.endsWith('.xls') && !file.name.endsWith('.csv')) {
       alert('Solo se aceptan archivos Excel (.xlsx, .xls) o CSV.');
       return;
@@ -198,11 +205,11 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
           <p className="text-sm text-slate-500 mt-0.5">Quién le presta dinero a este cliente: líneas de crédito, préstamos y bonos con instituciones.</p>
         </div>
         <div className="flex items-center gap-2">
-          <label className="flex items-center gap-1.5 text-xs font-black text-slate-700 bg-white border border-slate-200 hover:border-indigo-300 px-3 py-2 rounded-xl cursor-pointer transition-colors">
+          <label className={`flex items-center gap-1.5 text-xs font-black text-slate-700 bg-white border border-slate-200 hover:border-indigo-300 px-3 py-2 rounded-xl transition-colors ${schemaReady === false ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}>
             <Upload className="w-3.5 h-3.5" /> Subir Excel/CSV
-            <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleFileUpload(f); e.target.value = ''; }} />
+            <input type="file" accept=".xlsx,.xls,.csv" className="hidden" disabled={schemaReady === false} onChange={e => { const f = e.target.files?.[0]; if (f) handleFileUpload(f); e.target.value = ''; }} />
           </label>
-          <button onClick={openNew} className="flex items-center gap-1.5 text-xs font-black text-white bg-indigo-600 hover:bg-indigo-700 px-3 py-2 rounded-xl transition-colors">
+          <button onClick={openNew} disabled={schemaReady === false} className="flex items-center gap-1.5 text-xs font-black text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed px-3 py-2 rounded-xl transition-colors">
             <Plus className="w-3.5 h-3.5" /> Agregar
           </button>
           <button onClick={handleExport} disabled={!liabilities.length} className="flex items-center gap-1.5 text-xs font-black text-slate-700 bg-white border border-slate-200 hover:border-indigo-300 disabled:opacity-40 px-3 py-2 rounded-xl transition-colors">
@@ -210,6 +217,19 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
           </button>
         </div>
       </div>
+
+      {schemaReady === false && (
+        <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 text-amber-900 text-xs font-semibold px-4 py-3.5 rounded-xl">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="font-black">Falta aplicar una migración en Supabase</p>
+            <p className="mt-1 opacity-90">
+              La tabla <code className="font-mono bg-amber-100 px-1 rounded">institutional_liabilities</code> todavía no existe en la base de datos.
+              Corre <code className="font-mono bg-amber-100 px-1 rounded">database/20260716_institutional_liabilities.sql</code> en el editor SQL de Supabase y vuelve a cargar esta pestaña para poder agregar o subir pasivos.
+            </p>
+          </div>
+        </div>
+      )}
 
       {uploadWarning && (
         <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs font-semibold px-4 py-3 rounded-xl">
