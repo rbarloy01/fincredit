@@ -166,6 +166,32 @@ CREATE TABLE IF NOT EXISTS loan_tapes (
   upload_date    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- ── Institutional Liabilities (Pasivos Institucionales) ─────────────────────
+-- Mirror of loan_tapes for the other side of the balance sheet: who is lending
+-- money TO the client (banks, development banks, institutional investors).
+-- One row per facility/credit line — a client's funding sources are a short,
+-- human-scale list, unlike a retail loan tape's thousands of borrower rows.
+CREATE TABLE IF NOT EXISTS institutional_liabilities (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  client_id         UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  source_document_id UUID,
+  lender_name       TEXT NOT NULL,
+  liability_type    TEXT DEFAULT 'linea_credito', -- linea_credito | prestamo_simple | bono | otro
+  original_amount   NUMERIC,
+  current_balance   NUMERIC,
+  currency          TEXT DEFAULT 'MXN',
+  interest_rate     NUMERIC,           -- all-in annual rate as a decimal (0.12 = 12%), for calculations
+  rate_description  TEXT,              -- human-readable formula, e.g. "TIIE + 350 pb"
+  origination_date  DATE,
+  maturity_date     DATE,
+  amortization      TEXT,              -- bullet | mensual | trimestral | otro
+  guarantee         TEXT,
+  notes             TEXT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS institutional_liabilities_client_id_idx ON institutional_liabilities(client_id);
+
 -- ── Source Documents / Private Upload Registry ──────────────────────────────
 CREATE TABLE IF NOT EXISTS documents (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -202,6 +228,10 @@ ALTER TABLE financial_statements
 
 ALTER TABLE loan_tapes
   ADD CONSTRAINT loan_tapes_source_document_id_fkey
+  FOREIGN KEY (source_document_id) REFERENCES documents(id) ON DELETE SET NULL;
+
+ALTER TABLE institutional_liabilities
+  ADD CONSTRAINT institutional_liabilities_source_document_id_fkey
   FOREIGN KEY (source_document_id) REFERENCES documents(id) ON DELETE SET NULL;
 
 -- ── SaaS Monitoring Core ─────────────────────────────────────────────────────
@@ -309,6 +339,7 @@ ALTER TABLE covenants             ENABLE ROW LEVEL SECURITY;
 ALTER TABLE covenant_annotations  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE financial_statements  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE loan_tapes            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE institutional_liabilities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE monitoring_periods    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE document_requirements ENABLE ROW LEVEL SECURITY;
 ALTER TABLE crm_contacts          ENABLE ROW LEVEL SECURITY;
@@ -485,6 +516,11 @@ CREATE POLICY "client_child_org_scoped_all" ON financial_statements
   WITH CHECK (public.client_in_current_org(client_id));
 
 CREATE POLICY "client_child_org_scoped_all" ON loan_tapes
+  FOR ALL TO authenticated
+  USING (public.client_in_current_org(client_id))
+  WITH CHECK (public.client_in_current_org(client_id));
+
+CREATE POLICY "client_child_org_scoped_all" ON institutional_liabilities
   FOR ALL TO authenticated
   USING (public.client_in_current_org(client_id))
   WITH CHECK (public.client_in_current_org(client_id));

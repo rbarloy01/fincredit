@@ -231,12 +231,36 @@ export interface SourceDocument {
   fileName: string;
   mimeType: string;
   sizeBytes: number;
-  documentType: 'financial_statement' | 'loan_tape' | 'contract' | 'other' | 'unknown';
+  documentType: 'financial_statement' | 'loan_tape' | 'institutional_liability' | 'contract' | 'other' | 'unknown';
   storageBucket?: string;
   storagePath?: string;
   extractionStatus: string;
   uploadedBy?: string;
   createdAt: string;
+}
+
+// Pasivos Institucionales — the mirror of LoanTape_DB for the other side of the
+// balance sheet: who is lending money TO the client, not who the client lends to.
+// One row per facility/credit line rather than one row per uploaded file, since
+// a client's institutional funding sources are a short, human-scale list.
+export interface InstitutionalLiability_DB {
+  id: string;
+  clientId: string;
+  sourceDocumentId?: string;
+  lenderName: string;
+  liabilityType: 'linea_credito' | 'prestamo_simple' | 'bono' | 'otro';
+  originalAmount: number | null;
+  currentBalance: number | null;
+  currency: string;
+  interestRate: number | null; // all-in annual rate as a decimal (0.12 = 12%)
+  rateDescription?: string; // human-readable formula, e.g. "TIIE + 350 pb"
+  originationDate?: string;
+  maturityDate?: string;
+  amortization?: string;
+  guarantee?: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type RolloutGuardFeature = 'crm' | 'lifecycle';
@@ -647,6 +671,26 @@ function toLoanTape(r: any): LoanTape_DB {
     uploadDate: r.upload_date, fileName: r.file_name || '',
     tapeType: r.tape_type || 'credito', extractedData: r.extracted_data,
     analystState: r.analyst_state || undefined,
+  };
+}
+
+function toInstitutionalLiability(r: any): InstitutionalLiability_DB {
+  return {
+    id: r.id, clientId: r.client_id, sourceDocumentId: r.source_document_id || undefined,
+    lenderName: r.lender_name,
+    liabilityType: r.liability_type || 'linea_credito',
+    originalAmount: r.original_amount === null || r.original_amount === undefined ? null : Number(r.original_amount),
+    currentBalance: r.current_balance === null || r.current_balance === undefined ? null : Number(r.current_balance),
+    currency: r.currency || 'MXN',
+    interestRate: r.interest_rate === null || r.interest_rate === undefined ? null : Number(r.interest_rate),
+    rateDescription: r.rate_description || undefined,
+    originationDate: r.origination_date || undefined,
+    maturityDate: r.maturity_date || undefined,
+    amortization: r.amortization || undefined,
+    guarantee: r.guarantee || undefined,
+    notes: r.notes || undefined,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
   };
 }
 
@@ -1618,5 +1662,76 @@ export const db = {
   async deleteLoanTape(id: string): Promise<void> {
     const { error } = await supabase.from('loan_tapes').delete().eq('id', id);
     if (error) err('deleteLoanTape', error);
+  },
+
+  // ── Institutional Liabilities (Pasivos Institucionales) ─────────────────────
+  async createInstitutionalLiability(data: Omit<InstitutionalLiability_DB, 'id' | 'createdAt' | 'updatedAt'>): Promise<InstitutionalLiability_DB> {
+    const insertPayload: any = {
+      client_id: data.clientId, source_document_id: data.sourceDocumentId || null,
+      lender_name: data.lenderName, liability_type: data.liabilityType,
+      original_amount: data.originalAmount, current_balance: data.currentBalance,
+      currency: data.currency, interest_rate: data.interestRate, rate_description: data.rateDescription || null,
+      origination_date: data.originationDate || null, maturity_date: data.maturityDate || null,
+      amortization: data.amortization || null, guarantee: data.guarantee || null, notes: data.notes || null,
+    };
+    let { data: row, error } = await supabase.from('institutional_liabilities').insert(insertPayload).select().single();
+    if (error && isMissingSchemaError(error, 'source_document_id')) {
+      delete insertPayload.source_document_id;
+      const retry = await supabase.from('institutional_liabilities').insert(insertPayload).select().single();
+      row = retry.data;
+      error = retry.error;
+    }
+    if (error) err('createInstitutionalLiability', error);
+    return toInstitutionalLiability(row);
+  },
+
+  async getInstitutionalLiabilities(clientId: string): Promise<InstitutionalLiability_DB[]> {
+    const { data, error } = await supabase.from('institutional_liabilities').select('*').eq('client_id', clientId).order('created_at', { ascending: true });
+    if (error) {
+      if (isMissingSchemaError(error, 'institutional_liabilities')) return [];
+      err('getInstitutionalLiabilities', error);
+    }
+    return (data || []).map(toInstitutionalLiability);
+  },
+
+  async getInstitutionalLiabilitiesForClients(clientIds: string[]): Promise<Record<string, InstitutionalLiability_DB[]>> {
+    if (!clientIds.length) return {};
+    const { data, error } = await supabase
+      .from('institutional_liabilities')
+      .select('*')
+      .in('client_id', clientIds)
+      .order('created_at', { ascending: true });
+    if (error) {
+      if (isMissingSchemaError(error, 'institutional_liabilities')) return {};
+      err('getInstitutionalLiabilitiesForClients', error);
+    }
+    return (data || []).map(toInstitutionalLiability).reduce((acc, item) => {
+      (acc[item.clientId] ||= []).push(item);
+      return acc;
+    }, {} as Record<string, InstitutionalLiability_DB[]>);
+  },
+
+  async updateInstitutionalLiability(id: string, updates: Partial<InstitutionalLiability_DB>): Promise<void> {
+    const row: any = {};
+    if (updates.lenderName !== undefined) row.lender_name = updates.lenderName;
+    if (updates.liabilityType !== undefined) row.liability_type = updates.liabilityType;
+    if (updates.originalAmount !== undefined) row.original_amount = updates.originalAmount;
+    if (updates.currentBalance !== undefined) row.current_balance = updates.currentBalance;
+    if (updates.currency !== undefined) row.currency = updates.currency;
+    if (updates.interestRate !== undefined) row.interest_rate = updates.interestRate;
+    if (updates.rateDescription !== undefined) row.rate_description = updates.rateDescription || null;
+    if (updates.originationDate !== undefined) row.origination_date = updates.originationDate || null;
+    if (updates.maturityDate !== undefined) row.maturity_date = updates.maturityDate || null;
+    if (updates.amortization !== undefined) row.amortization = updates.amortization || null;
+    if (updates.guarantee !== undefined) row.guarantee = updates.guarantee || null;
+    if (updates.notes !== undefined) row.notes = updates.notes || null;
+    row.updated_at = new Date().toISOString();
+    const { error } = await supabase.from('institutional_liabilities').update(row).eq('id', id);
+    if (error) err('updateInstitutionalLiability', error);
+  },
+
+  async deleteInstitutionalLiability(id: string): Promise<void> {
+    const { error } = await supabase.from('institutional_liabilities').delete().eq('id', id);
+    if (error) err('deleteInstitutionalLiability', error);
   },
 };

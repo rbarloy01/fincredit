@@ -5,7 +5,7 @@ import ExcelJS from 'exceljs';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import type {
-  Client, Transaction, Covenant_DB, FinancialStatement_DB, LoanTape_DB,
+  Client, Transaction, Covenant_DB, FinancialStatement_DB, LoanTape_DB, InstitutionalLiability_DB,
 } from '../db/index';
 import {
   buildCovenantAnalystInsight,
@@ -21,6 +21,9 @@ import {
   standardRatios,
 } from './financialMetrics';
 import { buildLoanTapeExportContexts, type LoanTapeExportContext } from './loanTapeAnalytics';
+import {
+  buildLiabilitiesSummary, buildLenderConcentration, buildMaturityLadder, LIABILITY_TYPE_LABELS,
+} from './institutionalLiabilitiesAnalytics';
 import {
   normalizeLoanTapeAnalystState,
   type LoanTapeWorkspaceBlock,
@@ -1875,6 +1878,136 @@ export function buildGraficas(statements: FinancialStatement_DB[]): SheetDef {
   });
   if (!chartIndex) rows.push(['Sin razones con suficientes datos para graficar.']);
   return { name: 'Gráficas', rows, colWidths: Array(20).fill(11), images };
+}
+
+// Categorical bar chart (lender concentration, maturity ladder) — same
+// canvas-to-PNG approach as renderTrendChartPng, since ExcelJS still has no
+// native chart support, just a different mark (bars instead of a line).
+function renderCategoryBarChartPng(title: string, categories: string[], values: number[]): string | null {
+  if (typeof document === 'undefined') return null;
+  const width = 480;
+  const height = 260;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = '#' + AX.ink;
+  ctx.font = 'bold 13px Arial';
+  ctx.fillText(title, 10, 20);
+
+  const padding = { left: 70, right: 15, top: 32, bottom: 46 };
+  const plotW = width - padding.left - padding.right;
+  const plotH = height - padding.top - padding.bottom;
+  const n = categories.length;
+  if (!n) {
+    ctx.fillStyle = '#' + AX.muted;
+    ctx.font = '11px Arial';
+    ctx.fillText('Sin datos suficientes', padding.left, padding.top + plotH / 2);
+    return canvas.toDataURL('image/png').split(',')[1];
+  }
+  const max = Math.max(...values, 1);
+
+  ctx.strokeStyle = '#' + AX.line;
+  ctx.fillStyle = '#' + AX.muted;
+  ctx.font = '9px Arial';
+  const gridLines = 4;
+  for (let i = 0; i <= gridLines; i++) {
+    const y = padding.top + plotH - (i / gridLines) * plotH;
+    ctx.beginPath();
+    ctx.moveTo(padding.left, y);
+    ctx.lineTo(padding.left + plotW, y);
+    ctx.stroke();
+    const value = (i / gridLines) * max;
+    ctx.fillText(value.toLocaleString('es-MX', { maximumFractionDigits: 0 }), 4, y + 3);
+  }
+
+  const barGap = 8;
+  const barWidth = Math.max(4, plotW / n - barGap);
+  ctx.fillStyle = '#' + AX.blue;
+  ctx.textAlign = 'center';
+  categories.forEach((cat, i) => {
+    const value = values[i] ?? 0;
+    const barHeight = (value / max) * plotH;
+    const x = padding.left + i * (plotW / n) + (plotW / n - barWidth) / 2;
+    const y = padding.top + plotH - barHeight;
+    ctx.fillStyle = '#' + AX.blue;
+    ctx.fillRect(x, y, barWidth, barHeight);
+    ctx.fillStyle = '#' + AX.muted;
+    ctx.font = '8px Arial';
+    const label = cat.length > 14 ? `${cat.slice(0, 12)}...` : cat;
+    ctx.fillText(label, x + barWidth / 2, height - 30);
+  });
+  ctx.textAlign = 'left';
+
+  return canvas.toDataURL('image/png').split(',')[1];
+}
+
+// PASIVOS INSTITUCIONALES — who lends money TO the client (the mirror of the
+// Loan Tape's "who the client lends to"). One row per facility, so this is a
+// plain table + summary + charts rather than the loan-tape's file-based
+// standardize/analyze pipeline.
+export function buildInstitutionalLiabilities(liabilities: InstitutionalLiability_DB[]): SheetDef {
+  if (!liabilities.length) {
+    return { name: 'Pasivos Institucionales', rows: [['PASIVOS INSTITUCIONALES'], [], ['Sin pasivos institucionales registrados para este cliente.']], colWidths: [50] };
+  }
+
+  const summary = buildLiabilitiesSummary(liabilities);
+  const lenderRows = buildLenderConcentration(liabilities);
+  const maturityRows = buildMaturityLadder(liabilities);
+
+  const rows: SheetDef['rows'] = [
+    ['PASIVOS INSTITUCIONALES'],
+    ['Quién le presta dinero a este cliente: líneas de crédito, préstamos y bonos con instituciones.'],
+    [],
+    ['RESUMEN'],
+    ['Saldo total', fmtNum(summary.totalCurrentBalance, '#,##0;[Red](#,##0);-')],
+    ['Monto original total', fmtNum(summary.totalOriginalAmount, '#,##0;[Red](#,##0);-')],
+    ['Tasa promedio ponderada', summary.weightedAverageRate === null ? 'N/A' : fmtNum(summary.weightedAverageRate, '0.0%')],
+    ['Utilización promedio (saldo/monto original)', summary.averageUtilization === null ? 'N/A' : fmtNum(summary.averageUtilization, '0.0%')],
+    ['Número de acreedores', summary.lenderCount],
+    ['Próximo vencimiento', summary.nextMaturity ? `${summary.nextMaturity.lenderName} — ${summary.nextMaturity.maturityDate}` : 'N/A'],
+    [],
+    ['DETALLE POR ACREEDOR/FACILIDAD'],
+    ['Acreedor', 'Tipo', 'Moneda', 'Monto Original', 'Saldo Actual', 'Tasa', 'Referencia Tasa', 'Originación', 'Vencimiento', 'Amortización', 'Garantía', 'Notas'],
+    ...liabilities.map(l => [
+      l.lenderName,
+      LIABILITY_TYPE_LABELS[l.liabilityType] || l.liabilityType,
+      l.currency,
+      l.originalAmount === null ? null : fmtNum(l.originalAmount, '#,##0;[Red](#,##0);-'),
+      l.currentBalance === null ? null : fmtNum(l.currentBalance, '#,##0;[Red](#,##0);-'),
+      l.interestRate === null ? null : fmtNum(l.interestRate, '0.0%'),
+      l.rateDescription || '',
+      l.originationDate || '',
+      l.maturityDate || '',
+      l.amortization || '',
+      l.guarantee || '',
+      l.notes || '',
+    ]),
+  ];
+
+  const chartsStartRow = rows.length + 1;
+  const images: SheetDef['images'] = [];
+  const lenderChart = renderCategoryBarChartPng('Concentración por Acreedor', lenderRows.slice(0, 8).map(r => r.key), lenderRows.slice(0, 8).map(r => r.currentBalance));
+  if (lenderChart) images.push({ base64: lenderChart, col: 0, row: chartsStartRow, width: 480, height: 260 });
+  const maturityChart = renderCategoryBarChartPng('Calendario de Vencimientos', maturityRows.map(r => r.year === 0 ? 'Sin fecha' : String(r.year)), maturityRows.map(r => r.currentBalance));
+  if (maturityChart) images.push({ base64: maturityChart, col: 9, row: chartsStartRow, width: 480, height: 260 });
+  rows.push([], [], ['GRÁFICAS'], ...Array(13).fill([]));
+
+  return {
+    name: 'Pasivos Institucionales',
+    rows,
+    colWidths: [26, 20, 10, 16, 16, 10, 20, 14, 14, 16, 24, 30],
+    wrapColumns: [11, 12],
+    images,
+  };
+}
+
+export async function exportInstitutionalLiabilities(liabilities: InstitutionalLiability_DB[], clientName: string): Promise<void> {
+  await exportToExcel([buildInstitutionalLiabilities(liabilities)], `Pasivos_Institucionales_${clientName}`);
 }
 
 // INDICADORES — the full standard ratio set (independent of which ones happen

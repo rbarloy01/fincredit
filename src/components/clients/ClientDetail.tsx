@@ -1,5 +1,5 @@
 import React, { Suspense, useState, useEffect, useRef } from 'react';
-import { db, Client, Transaction, FinancialStatement_DB, Covenant_DB, LoanTape_DB, CustomField } from '../../db/index';
+import { db, Client, Transaction, FinancialStatement_DB, Covenant_DB, LoanTape_DB, InstitutionalLiability_DB, CustomField } from '../../db/index';
 import { Session } from '../../services/auth';
 import { AISettings } from '../../services/ai';
 import { ChevronLeft, Building2, Download, FileText, Trash2, Pencil } from 'lucide-react';
@@ -16,6 +16,7 @@ import { loadExportModule } from '../../lib/exportLoader';
 
 const FinancialPanel = lazyWithChunkRetry(() => import('../financials/FinancialPanel'), 'financial-panel');
 const LoanTapePanel = lazyWithChunkRetry(() => import('../loantape/LoanTapePanel'), 'loan-tape-panel');
+const InstitutionalLiabilitiesPanel = lazyWithChunkRetry(() => import('../liabilities/InstitutionalLiabilitiesPanel'), 'institutional-liabilities-panel');
 const ClientReportView = lazyWithChunkRetry(() => import('../report/ReportView'), 'client-report-view');
 const CrmPanel = lazyWithChunkRetry(() => import('../crm/CrmPanel'), 'crm-panel');
 
@@ -28,7 +29,7 @@ interface Props {
   onEdit?: (client: Client) => void;
 }
 
-type Tab = 'monitor' | 'crm' | 'resumen' | 'company_overview' | 'transacciones' | 'estados' | 'auditoria' | 'loantape' | 'cov_financiero' | 'hacer_no_hacer' | 'reporte';
+type Tab = 'monitor' | 'crm' | 'resumen' | 'company_overview' | 'transacciones' | 'estados' | 'auditoria' | 'loantape' | 'pasivos_institucionales' | 'cov_financiero' | 'hacer_no_hacer' | 'reporte';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'monitor', label: 'Underwriting' },
@@ -39,6 +40,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'estados', label: 'Estados Financieros' },
   { id: 'auditoria', label: 'Auditoría' },
   { id: 'loantape', label: 'Loan Tape' },
+  { id: 'pasivos_institucionales', label: 'Pasivos Institucionales' },
   { id: 'cov_financiero', label: 'Covenants Financieros' },
   { id: 'hacer_no_hacer', label: 'Hacer / No Hacer' },
   { id: 'reporte', label: 'Reporte' },
@@ -244,6 +246,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
   const [statements, setStatements] = useState<FinancialStatement_DB[]>([]);
   const [covenants, setCovenants] = useState<Covenant_DB[]>([]);
   const [loanTapes, setLoanTapes] = useState<LoanTape_DB[]>([]);
+  const [institutionalLiabilities, setInstitutionalLiabilities] = useState<InstitutionalLiability_DB[]>([]);
   const [customFields, setCustomFields] = useState<CustomField[]>([]);
   const [activeTab, setActiveTab] = useState<Tab>('monitor');
   const [loading, setLoading] = useState(true);
@@ -252,12 +255,13 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
   const loadData = async () => {
     setLoading(true);
     try {
-      const [c, txs, stmts, covs, tapes, fields] = await Promise.all([
+      const [c, txs, stmts, covs, tapes, liabilities, fields] = await Promise.all([
         db.getClientById(clientId),
         db.getTransactions(clientId),
         db.getStatements(clientId),
         db.getCovenants(clientId),
         db.getLoanTapes(clientId),
+        db.getInstitutionalLiabilities(clientId),
         db.getCustomFields(clientId),
       ]);
       if (c) setClient(c);
@@ -265,6 +269,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
       setStatements(stmts);
       setCovenants(covs);
       setLoanTapes(tapes);
+      setInstitutionalLiabilities(liabilities);
       setCustomFields(fields);
       void Promise.all([
         db.getClientSetting(clientId, `finmonitor_defined_concepts_${clientId}`, []),
@@ -445,6 +450,13 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
               session={session}
               aiSettings={aiSettings}
               onTapesChange={setLoanTapes}
+            />
+          )}
+          {activeTab === 'pasivos_institucionales' && (
+            <InstitutionalLiabilitiesPanel
+              clientId={clientId}
+              clientName={client.name}
+              onLiabilitiesChange={setInstitutionalLiabilities}
             />
           )}
           {activeTab === 'auditoria' && (
