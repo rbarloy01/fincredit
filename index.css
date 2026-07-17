@@ -1,3 +1,14 @@
+@import "tailwindcss";
+
+/* Matches the trueblue/bluebonnet custom colors that used to live in the
+   cdn.tailwindcss.com <script> config in index.html, so bg-trueblue,
+   text-bluebonnet, etc. keep generating the same utility classes now that
+   Tailwind runs as a real build instead of the runtime CDN script. */
+@theme {
+  --color-trueblue: #0066E6;
+  --color-bluebonnet: #0018E6;
+}
+
 body {
   margin: 0;
   background:
