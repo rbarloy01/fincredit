@@ -250,6 +250,24 @@ function findRaw(stmt: FinancialStatement_DB, names: string[], types?: string[])
   return best?.value ?? null;
 }
 
+// findRaw's fuzzy tiers (reverseContains, wordMatch) match on character/word
+// *coverage*, so dropping one qualifying word from a longer alias (e.g.
+// "margen financiero ajustado" -> "Margen Financiero") still clears their
+// ~60% threshold. That's fine for most aliases, but wrong when the dropped
+// word is the one thing distinguishing two real, different accounts — like
+// the risk-adjusted margin vs. the plain one. This bypasses the fuzzy tiers
+// entirely and requires a literal substring match on the qualifying word.
+function findRawRequiringSubstring(stmt: FinancialStatement_DB, requiredSubstrings: string[], types?: string[]): number | null {
+  const needles = requiredSubstrings.map(norm);
+  const match = rawLineItems(stmt).find(item => {
+    const typeOk = !types || types.includes(item.statementType || 'otro');
+    if (!typeOk) return false;
+    const n = norm(item.name);
+    return needles.some(needle => n.includes(needle));
+  });
+  return match?.value ?? null;
+}
+
 function firstValue(...values: Array<number | null | undefined>): number | null {
   const found = values.find(value => value !== null && value !== undefined);
   return found ?? null;
@@ -277,7 +295,13 @@ export function getMetric(stmt: FinancialStatement_DB, key: string): number | nu
     case 'interestIncome': return firstValue(findConsolidatedMetricValue(stmt, 'interestIncome'), raw(['ingresos por intereses', 'intereses cobrados', 'ingreso por interes', ...metricAliases('interestIncome')], ['estado_resultados']));
     case 'feeIncome': return firstValue(findConsolidatedMetricValue(stmt, 'feeIncome'), raw(['ingresos por comisiones', 'comisiones cobradas', 'ingreso por comision', ...metricAliases('feeIncome')], ['estado_resultados']));
     case 'coreBusinessIncome': return firstValue(findConsolidatedMetricValue(stmt, 'coreBusinessIncome'), addValues(getMetric(stmt, 'interestIncome'), getMetric(stmt, 'feeIncome')), getMetric(stmt, 'revenue'));
-    case 'adjustedFinancialMargin': return firstValue(raw(['margen financiero ajustado por riesgos crediticios', 'margen financiero ajustado', 'margen financiero aj', ...metricAliases('adjustedFinancialMargin')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'adjustedFinancialMargin'));
+    // Even the full alias "margen financiero ajustado" fuzzy-matches a plain
+    // "Margen Financiero" line via findRaw's reverseContains/wordMatch tiers
+    // (dropping just the word "ajustado" still clears their ~60% coverage
+    // threshold) — silently substituting the unadjusted margin for the
+    // risk-adjusted one. This metric has no legitimate unadjusted fallback
+    // (unlike adjustedOperatingIncome below), so require "ajustad" literally.
+    case 'adjustedFinancialMargin': return firstValue(findRawRequiringSubstring(stmt, ['ajustad', ...metricAliases('adjustedFinancialMargin')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'adjustedFinancialMargin'));
     case 'adjustedOperatingIncome': return firstValue(raw(['utilidad o perdida de operacion', 'utilidad o pérdida de operación', 'utilidad de operacion', 'utilidad operativa ajustada', 'utilidad operacion ajustada', 'utilidad de operacion ajustada', 'resultado de operacion', ...metricAliases('adjustedOperatingIncome')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'adjustedOperatingIncome'));
     case 'adminSellingOperatingExpenses': return absoluteValue(firstValue(raw(['gastos de operacion total', 'gastos de operación total', 'gastos de operacion (total)', 'gastos de administracion venta y operacion', 'gastos adm venta opn', 'gastos administrativos', 'gastos de operacion', ...metricAliases('adminSellingOperatingExpenses')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'adminSellingOperatingExpenses')));
     case 'ebitda': return firstValue(m.ebitda, findConsolidatedMetricValue(stmt, 'ebitda'), raw(['ebitda', ...metricAliases('ebitda')], ['estado_resultados']), raw(['utilidad operacion', 'utilidad de operacion', 'resultado de operacion', 'utilidad antes de intereses'], ['estado_resultados']));

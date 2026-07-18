@@ -111,7 +111,7 @@ export const BASE_CONSOLIDATION_RULES: AccountConsolidationRule[] = [
   { id: 'sys-interest-income', metric: 'interestIncome', label: METRIC_LABELS.interestIncome, aliases: ['ingresos por intereses', 'intereses cobrados', 'intereses de cartera', 'intereses ganados', 'ingreso por interes'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
   { id: 'sys-fee-income', metric: 'feeIncome', label: METRIC_LABELS.feeIncome, aliases: ['ingresos por comisiones', 'comisiones cobradas', 'comisiones y tarifas', 'ingreso por comision', 'comision por apertura', 'comisiones por administracion'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
   { id: 'sys-core-income', metric: 'coreBusinessIncome', label: METRIC_LABELS.coreBusinessIncome, aliases: ['ingresos core', 'ingresos del core', 'ingresos del negocio', 'ingresos de la operacion', 'ingresos financieros y comisiones'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
-  { id: 'sys-adjusted-financial-margin', metric: 'adjustedFinancialMargin', label: METRIC_LABELS.adjustedFinancialMargin, aliases: ['margen financiero ajustado', 'margen financiero aj', 'margen financiero ajust'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
+  { id: 'sys-adjusted-financial-margin', metric: 'adjustedFinancialMargin', label: METRIC_LABELS.adjustedFinancialMargin, aliases: ['margen financiero ajustado'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
   { id: 'sys-adjusted-operating-income', metric: 'adjustedOperatingIncome', label: METRIC_LABELS.adjustedOperatingIncome, aliases: ['utilidad operativa ajustada', 'utilidad operacion ajustada', 'utilidad de operacion ajustada', 'utilidad operacional ajustada', 'resultados de la operacion', 'resultado de la operacion', 'resultados de operacion'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
   { id: 'sys-admin-selling-opex', metric: 'adminSellingOperatingExpenses', label: METRIC_LABELS.adminSellingOperatingExpenses, aliases: ['gastos de administracion venta y operacion', 'gastos adm venta y opn', 'gastos de administracion y venta', 'gastos administrativos', 'gastos de operacion', 'gastos operativos', 'gastos de administracion y promocion'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
   { id: 'sys-ebitda', metric: 'ebitda', label: METRIC_LABELS.ebitda, aliases: ['ebitda', 'utilidad de operacion', 'resultado de operacion'], statementType: 'estado_resultados', source: 'system', updatedAt: 'system' },
@@ -235,6 +235,20 @@ function asRawLineItems(value: unknown): FinancialStatement_DB['rawLineItems'] {
   return [];
 }
 
+// A raw item name shorter than an alias only counts as a match if it covers
+// most of the alias's length. Without this guard, a short unrelated item
+// like "Ingresos Financieros" (interest earned on cash, a COSTOS FINANCIEROS
+// line) matches the much longer compound alias "ingresos financieros y
+// comisiones" (meant to capture the NBFI's core revenue line) purely because
+// it's a textual prefix — silently substituting a tiny value for the real
+// core business income and blowing up every downstream margin ratio.
+const REVERSE_MATCH_MIN_COVERAGE = 0.75;
+
+function matchesAlias(itemName: string, alias: string): boolean {
+  if (itemName.includes(alias)) return true;
+  return alias.includes(itemName) && itemName.length >= alias.length * REVERSE_MATCH_MIN_COVERAGE;
+}
+
 export function findConsolidatedMetricValue(stmt: FinancialStatement_DB, metric: ConsolidationMetric): number | null {
   const rules = loadConsolidationRules().filter(r => r.metric === metric);
   const items = asRawLineItems((stmt as any).rawLineItems);
@@ -243,7 +257,7 @@ export function findConsolidatedMetricValue(stmt: FinancialStatement_DB, metric:
     const found = items.find(item => {
       const typeOk = !rule.statementType || rule.statementType === 'any' || rule.statementType === item.statementType;
       const itemName = cleanText(item.name);
-      return typeOk && aliases.some(alias => itemName.includes(alias) || alias.includes(itemName));
+      return typeOk && aliases.some(alias => matchesAlias(itemName, alias));
     });
     if (found) return found.value;
   }
@@ -253,10 +267,7 @@ export function findConsolidatedMetricValue(stmt: FinancialStatement_DB, metric:
 export function inferMetricForAccount(name: string, statementType?: string | null): ConsolidationMetric | '' {
   const cleaned = cleanText(name);
   const candidates = loadConsolidationRules().filter(rule => !rule.statementType || rule.statementType === 'any' || !statementType || rule.statementType === statementType);
-  const hit = candidates.find(rule => rule.aliases.some(alias => {
-    const a = cleanText(alias);
-    return cleaned.includes(a) || a.includes(cleaned);
-  }));
+  const hit = candidates.find(rule => rule.aliases.some(alias => matchesAlias(cleaned, cleanText(alias))));
   return hit?.metric || '';
 }
 

@@ -50,6 +50,34 @@ test('fuzzy trigram fallback resolves an account name no exact/contains/word-set
   assert.equal(getMetric(withTypo, 'availableInvestments'), 12345);
 });
 
+test('coreBusinessIncome falls back to revenue instead of matching an unrelated short "Ingresos Financieros" line', () => {
+  // Real FRONT CAPITAL bug: a small interest-on-cash line under COSTOS
+  // FINANCIEROS was matching the "ingresos financieros y comisiones" alias
+  // via an unguarded reverse-substring check, tanking every margin ratio.
+  const stmt = statement('2023-05', '2023-05-31', { revenue: undefined as unknown as number }, [
+    { name: 'Total INGRESOS NETOS', value: 7562881, statementType: 'estado_resultados', sectionPath: 'Estado de Resultados > INGRESOS' },
+    { name: 'Ingresos Financieros', value: 6141, statementType: 'estado_resultados', sectionPath: 'Estado de Resultados > COSTOS FINANCIEROS' },
+  ]);
+  assert.equal(getMetric(stmt, 'coreBusinessIncome'), 7562881);
+});
+
+test('adjustedFinancialMargin does not match a plain non-risk-adjusted "Margen Financiero" line', () => {
+  // Real SOLVENKA bug: "Margen Financiero" (unadjusted) fuzzy-matched the
+  // "margen financiero ajustado" alias, inflating the financial-margin ratio
+  // to 211x. This metric has no legitimate unadjusted fallback, so it should
+  // report missing rather than substitute the wrong figure.
+  const stmt = statement('2023-12', '2023-12-31', {}, [
+    { name: 'Margen Financiero', value: 121135734, statementType: 'estado_resultados' },
+    { name: 'Intereses Ganados', value: 572873, statementType: 'estado_resultados' },
+  ]);
+  assert.equal(getMetric(stmt, 'adjustedFinancialMargin'), null);
+
+  const withAdjusted = statement('2023-12', '2023-12-31', {}, [
+    { name: 'Margen Financiero Ajustado', value: 34261871, statementType: 'estado_resultados' },
+  ]);
+  assert.equal(getMetric(withAdjusted, 'adjustedFinancialMargin'), 34261871);
+});
+
 function dscrCovenant(operator: Covenant_DB['operator'], threshold: string): Covenant_DB {
   return {
     id: 'cov-dscr',
