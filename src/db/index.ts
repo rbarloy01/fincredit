@@ -263,6 +263,21 @@ export interface InstitutionalLiability_DB {
   updatedAt: string;
 }
 
+// Company-level (not facility/transaction-level) default risk assessment.
+// zScore/classification are entered manually — no calculation formula is
+// implemented yet.
+export interface CompanyDefaultAssessment_DB {
+  id: string;
+  clientId: string;
+  zScore: number | null;
+  classification?: string;
+  isDefault: boolean;
+  defaultDate?: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type RolloutGuardFeature = 'crm' | 'lifecycle';
 
 export interface RolloutMigrationStatus {
@@ -688,6 +703,20 @@ function toInstitutionalLiability(r: any): InstitutionalLiability_DB {
     maturityDate: r.maturity_date || undefined,
     amortization: r.amortization || undefined,
     guarantee: r.guarantee || undefined,
+    notes: r.notes || undefined,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+function toCompanyDefaultAssessment(r: any): CompanyDefaultAssessment_DB {
+  return {
+    id: r.id,
+    clientId: r.client_id,
+    zScore: r.z_score === null || r.z_score === undefined ? null : Number(r.z_score),
+    classification: r.classification || undefined,
+    isDefault: Boolean(r.is_default),
+    defaultDate: r.default_date || undefined,
     notes: r.notes || undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
@@ -1745,5 +1774,44 @@ export const db = {
   async deleteInstitutionalLiability(id: string): Promise<void> {
     const { error } = await supabase.from('institutional_liabilities').delete().eq('id', id);
     if (error) err('deleteInstitutionalLiability', error);
+  },
+
+  // ── Company Default Assessments (Z-Score) ───────────────────────────────────
+  async checkCompanyDefaultAssessmentsSchema(): Promise<boolean> {
+    const { error } = await probeSelect('company_default_assessments', 'id');
+    return !(error && isMissingSchemaError(error, 'company_default_assessments'));
+  },
+
+  async getCompanyDefaultAssessments(clientIds: string[]): Promise<Record<string, CompanyDefaultAssessment_DB>> {
+    if (!clientIds.length) return {};
+    const { data, error } = await supabase
+      .from('company_default_assessments')
+      .select('*')
+      .in('client_id', clientIds);
+    if (error) {
+      if (isMissingSchemaError(error, 'company_default_assessments')) return {};
+      err('getCompanyDefaultAssessments', error);
+    }
+    return (data || []).map(toCompanyDefaultAssessment).reduce((acc, item) => {
+      acc[item.clientId] = item;
+      return acc;
+    }, {} as Record<string, CompanyDefaultAssessment_DB>);
+  },
+
+  // One row per client — inserts if missing, otherwise patches the existing row.
+  async upsertCompanyDefaultAssessment(clientId: string, updates: Partial<Omit<CompanyDefaultAssessment_DB, 'id' | 'clientId' | 'createdAt' | 'updatedAt'>>): Promise<CompanyDefaultAssessment_DB> {
+    const row: any = { client_id: clientId, updated_at: new Date().toISOString() };
+    if (updates.zScore !== undefined) row.z_score = updates.zScore;
+    if (updates.classification !== undefined) row.classification = updates.classification || null;
+    if (updates.isDefault !== undefined) row.is_default = updates.isDefault;
+    if (updates.defaultDate !== undefined) row.default_date = updates.defaultDate || null;
+    if (updates.notes !== undefined) row.notes = updates.notes || null;
+    const { data, error } = await supabase
+      .from('company_default_assessments')
+      .upsert(row, { onConflict: 'client_id' })
+      .select()
+      .single();
+    if (error) err('upsertCompanyDefaultAssessment', error);
+    return toCompanyDefaultAssessment(data);
   },
 };

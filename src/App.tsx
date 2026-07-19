@@ -4,7 +4,7 @@ import LoginPage from './components/auth/LoginPage';
 import ClientList from './components/clients/ClientList';
 import { Client, CustomField, db, RolloutGuardFeature, RolloutGuardResult } from './db/index';
 import { AISettings, loadAISettings } from './services/ai';
-import { Activity, AlertTriangle, BarChart3, Building2, ClipboardList, Inbox, Layers3, Settings, LogOut, RefreshCw, ShieldCheck, Moon, Sun, Sparkles } from 'lucide-react';
+import { Activity, AlertTriangle, BarChart3, Building2, ClipboardList, Inbox, Layers3, Settings, LogOut, RefreshCw, ShieldAlert, ShieldCheck, Moon, Sun, Sparkles } from 'lucide-react';
 import { isSupabaseConfigured, supabaseConfigError } from './lib/supabase';
 import { lazyWithChunkRetry, resetChunkRetryStateForCurrentBuild } from './lib/lazyWithChunkRetry';
 
@@ -16,8 +16,9 @@ const AccountConsolidationPage = lazyWithChunkRetry(() => import('./components/c
 const IngestionInboxPage = lazyWithChunkRetry(() => import('./components/ingestion/IngestionInboxPage'), 'ingestion');
 const LifecyclePage = lazyWithChunkRetry(() => import('./components/lifecycle/LifecyclePage'), 'lifecycle');
 const CrmDashboardPage = lazyWithChunkRetry(() => import('./components/crm/CrmDashboardPage'), 'crm-dashboard');
+const CompanyDefaultPage = lazyWithChunkRetry(() => import('./components/zscore/CompanyDefaultPage'), 'zscore');
 
-type Route = 'clients' | 'client_new' | 'client_edit' | 'client_detail' | 'crm' | 'benchmarking' | 'consolidation' | 'lifecycle' | 'ingestion' | 'settings';
+type Route = 'clients' | 'client_new' | 'client_edit' | 'client_detail' | 'crm' | 'benchmarking' | 'consolidation' | 'lifecycle' | 'zscore' | 'ingestion' | 'settings';
 
 resetChunkRetryStateForCurrentBuild();
 
@@ -308,6 +309,7 @@ const App: React.FC = () => {
     { id: 'benchmarking' as Route, label: 'Benchmarking', icon: BarChart3 },
     { id: 'consolidation' as Route, label: 'Consolidación', icon: Layers3 },
     { id: 'lifecycle' as Route, label: 'Línea de vida', icon: Activity },
+    { id: 'zscore' as Route, label: 'Z-Score', icon: ShieldAlert },
     ...(session.role === 'manager' ? [{ id: 'ingestion' as Route, label: 'Ingestion', icon: Inbox }] : []),
     ...(session.role === 'manager' ? [{ id: 'settings' as Route, label: 'Configuración', icon: Settings }] : []),
   ];
@@ -446,6 +448,10 @@ const App: React.FC = () => {
             <RolloutGuardedRoute feature="lifecycle" title="Línea de vida">
               <LifecyclePage />
             </RolloutGuardedRoute>
+          )}
+
+          {route === 'zscore' && (
+            <CompanyDefaultPage />
           )}
 
           {route === 'ingestion' && session.role === 'manager' && (
