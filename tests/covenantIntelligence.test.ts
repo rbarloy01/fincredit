@@ -78,6 +78,26 @@ test('adjustedFinancialMargin does not match a plain non-risk-adjusted "Margen F
   assert.equal(getMetric(withAdjusted, 'adjustedFinancialMargin'), 34261871);
 });
 
+test('"Otros ingresos de la operación" does not get treated as core business income', () => {
+  // Real LIQUIDEZ CORPORATIVA bug: a residual/miscellaneous income line
+  // textually contains the "ingresos de la operacion" alias as a suffix
+  // ("Otros " + alias), so an unqualified substring/word-set match picked it
+  // over the real interest+fee income (167M), tanking every margin ratio.
+  const stmt = statement('2024-04', '2024-04-30', { revenue: undefined as unknown as number }, [
+    { name: 'Ingresos por intereses', value: 157736847, statementType: 'estado_resultados' },
+    { name: 'Comisiones Cobradas', value: 9322758, statementType: 'estado_resultados' },
+    { name: 'Otros ingresos de la operación', value: 1297337, statementType: 'estado_resultados' },
+  ]);
+  assert.equal(getMetric(stmt, 'coreBusinessIncome'), 167059605);
+
+  // A genuine "ingresos de la operacion" line (no "otros" prefix) should
+  // still match normally.
+  const withGenuineMatch = statement('2024-04', '2024-04-30', { revenue: undefined as unknown as number }, [
+    { name: 'Ingresos de la operación', value: 555555, statementType: 'estado_resultados' },
+  ]);
+  assert.equal(getMetric(withGenuineMatch, 'coreBusinessIncome'), 555555);
+});
+
 function dscrCovenant(operator: Covenant_DB['operator'], threshold: string): Covenant_DB {
   return {
     id: 'cov-dscr',

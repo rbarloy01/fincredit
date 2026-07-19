@@ -205,6 +205,17 @@ function trigramSimilarity(a: string, b: string): number {
 const FUZZY_MATCH_MIN_LENGTH = 6;
 const FUZZY_MATCH_THRESHOLD = 0.55;
 
+// Spanish accounting convention: an "otros/otras"-prefixed line ("Otros
+// ingresos de la operación") is explicitly a residual/miscellaneous account,
+// distinct from the primary concept it textually contains ("ingresos de la
+// operación"). A plain substring/word-superset check can't tell the
+// difference, so it treats "other operating income" as if it were core
+// operating income. Guard the two match directions where the item is the
+// superset (contains the alias, or has all the alias's words plus more).
+function hasMiscellaneousPrefix(value: string): boolean {
+  return value.startsWith('otros') || value.startsWith('otras');
+}
+
 function findRaw(stmt: FinancialStatement_DB, names: string[], types?: string[]): number | null {
   const aliases = names
     .map((name, index) => ({ value: norm(name), words: wordSet(name), index }))
@@ -216,9 +227,12 @@ function findRaw(stmt: FinancialStatement_DB, names: string[], types?: string[])
     const section = norm(item.sectionPath || '');
     const typeOk = !types || types.includes(item.statementType || 'otro');
     if (!typeOk) return;
+    const itemIsMiscellaneous = hasMiscellaneousPrefix(n);
     aliases.forEach(alias => {
+      const aliasIsMiscellaneous = hasMiscellaneousPrefix(alias.value);
+      const blockMiscellaneous = itemIsMiscellaneous && !aliasIsMiscellaneous;
       const exact = n === alias.value;
-      const contains = n.includes(alias.value);
+      const contains = !blockMiscellaneous && n.includes(alias.value);
       // Only treat "alias contains item" as a match when the item name is a genuine
       // abbreviation of the alias (close in length) — otherwise a short generic
       // account like "TOTAL ACTIVO" spuriously matches a longer, more specific
@@ -230,10 +244,10 @@ function findRaw(stmt: FinancialStatement_DB, names: string[], types?: string[])
       // smaller side must cover the larger closely enough to avoid short generic
       // phrases fuzzy-matching much longer, unrelated ones.
       const wordMatch = !exact && !contains && !reverseContains && alias.words.size >= 2 && itemWords.size >= 2 && (
-        [...alias.words].every(w => itemWords.has(w)) ||
+        (!blockMiscellaneous && [...alias.words].every(w => itemWords.has(w))) ||
         ([...itemWords].every(w => alias.words.has(w)) && itemWords.size >= alias.words.size * 0.6)
       );
-      const fuzzySimilarity = !exact && !contains && !reverseContains && !wordMatch
+      const fuzzySimilarity = !exact && !contains && !reverseContains && !wordMatch && !blockMiscellaneous
         && alias.value.length >= FUZZY_MATCH_MIN_LENGTH && n.length >= FUZZY_MATCH_MIN_LENGTH
         ? trigramSimilarity(alias.value, n)
         : 0;

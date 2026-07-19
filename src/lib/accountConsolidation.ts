@@ -244,7 +244,19 @@ function asRawLineItems(value: unknown): FinancialStatement_DB['rawLineItems'] {
 // core business income and blowing up every downstream margin ratio.
 const REVERSE_MATCH_MIN_COVERAGE = 0.75;
 
+// "Otros ingresos de la operación" (miscellaneous/other operating income) is
+// a real, distinct account — Spanish accounting convention uses "otros/otras"
+// specifically to mean "not the primary version of this." But it textually
+// contains the alias "ingresos de la operacion" as a suffix, so an unqualified
+// substring check treats the residual/other-income line as if it were THE
+// core operating income. Block that unless the alias itself is also
+// "otros/otras"-qualified.
+function isMiscellaneousPrefixed(name: string): boolean {
+  return name.startsWith('otros') || name.startsWith('otras');
+}
+
 function matchesAlias(itemName: string, alias: string): boolean {
+  if (isMiscellaneousPrefixed(itemName) && !isMiscellaneousPrefixed(alias)) return false;
   if (itemName.includes(alias)) return true;
   return alias.includes(itemName) && itemName.length >= alias.length * REVERSE_MATCH_MIN_COVERAGE;
 }

@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "lint": "tsc --noEmit",
     "test": "npm run lint && esbuild tests/*.test.ts --bundle --platform=node --format=esm --define:import.meta.env.VITE_SUPABASE_URL='\"http://localhost\"' --define:import.meta.env.VITE_SUPABASE_ANON_KEY='\"test-key\"' --outdir=/tmp/finmonitor-tests && node --test /tmp/finmonitor-tests/*.js",
-    "verify:numbers": "esbuild scripts/verify-number-normalization.ts --bundle --platform=node --format=cjs --define:import.meta.env.VITE_SUPABASE_URL='\"http://localhost\"' --define:import.meta.env.VITE_SUPABASE_ANON_KEY='\"verification-key\"' --outfile=/tmp/finmonitor-number-verification.cjs && node /tmp/finmonitor-number-verification.cjs"
+    "verify:numbers": "esbuild scripts/verify-number-normalization.ts --bundle --platform=node --format=cjs --define:import.meta.env.VITE_SUPABASE_URL='\"http://localhost\"' --define:import.meta.env.VITE_SUPABASE_ANON_KEY='\"verification-key\"' --outfile=/tmp/finmonitor-number-verification.cjs && node /tmp/finmonitor-number-verification.cjs",
+    "audit:calculations": "esbuild scripts/audit-financial-calculations.ts --bundle --platform=node --format=cjs --define:import.meta.env.VITE_SUPABASE_URL='\"http://localhost\"' --define:import.meta.env.VITE_SUPABASE_ANON_KEY='\"audit-key\"' --outfile=/tmp/finmonitor-audit.cjs && node /tmp/finmonitor-audit.cjs"
   },
   "dependencies": {
     "@google/genai": "^1.41.0",
