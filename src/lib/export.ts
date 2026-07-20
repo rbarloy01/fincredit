@@ -909,19 +909,22 @@ function sumLooksTrustworthy(numericSum: number | null, base: number | null): bo
   return diff <= Math.max(1000, Math.abs(base) * 0.01);
 }
 
-// When the safety net falls back to the source-reported figure, say so on the
-// cell itself (as an Excel note) instead of silently looking identical to
-// "nothing changed" — the missing/extra amount is exactly what an analyst
-// needs to go find in the original EFF.
-function fallbackNote(reference: number | null, numericSum: number | null): string | undefined {
+// The total cell is always a live =SUM of the classified detail rows. When
+// that sum diverges from the figure the source EFF actually reported, flag it
+// on the cell (as an Excel note) — the gap is exactly what an analyst needs to
+// go reconcile, but the total itself stays a real, auditable sum rather than a
+// hardcoded number. The full extracted-vs-summed breakdown lives in the
+// Auditoría module.
+function divergenceNote(reference: number | null, numericSum: number | null): string | undefined {
   if (reference === null || numericSum === null) return undefined;
   const gap = reference - numericSum;
   if (Math.abs(gap) <= Math.max(1000, Math.abs(reference) * 0.01)) return undefined;
   const formatted = Math.abs(gap).toLocaleString('es-MX', { maximumFractionDigits: 0 });
+  const referenceFormatted = reference.toLocaleString('es-MX', { maximumFractionDigits: 0 });
   const direction = gap > 0
-    ? `falta clasificar aprox. $${formatted} de cuentas`
-    : `hay aprox. $${formatted} de cuentas de más (posible doble conteo)`;
-  return `Este total viene directo del EFF de origen, no de la suma de las cuentas de arriba: la suma del detalle ${direction} respecto al total reportado. Revisa el EFF original de este periodo para encontrar la cuenta faltante o mal clasificada.`;
+    ? `faltan aprox. $${formatted} por clasificar (revisa la hoja "Cuentas Sin Clasificar")`
+    : `hay aprox. $${formatted} de más, posible doble conteo`;
+  return `Este total es la SUMA en vivo de las cuentas clasificadas de arriba. El EFF de origen reportó $${referenceFormatted}: respecto a esa cifra ${direction}. Reconcilia la diferencia en la pestaña Auditoría del cliente.`;
 }
 
 function totalValueForSection(
@@ -933,48 +936,41 @@ function totalValueForSection(
   bases: VerticalBaseConfig = {},
   concepts: DefinedConcept[] = [],
 ): { value: string | number | null; note?: string } {
-  // Prefer a live =SUM(...) over the source's own reported total whenever there
-  // are detail rows to sum AND the sum actually ties out — a total should be
-  // auditable by clicking it, per the financial-consolidator skill's core rule
-  // ("every total MUST be a live formula, never a hardcoded number"). Falls
-  // back to the source-reported figure (or, for PASIVO, the Activo-Capital
-  // difference) when there are no detail rows, or when the sum disagrees with
-  // the source's own total enough to suggest a double-counted subtotal rather
-  // than rounding noise. Any resulting gap still shows up in the DIFERENCIA
-  // row below and in the Validaciones sheet.
+  // The total is ALWAYS the live =SUM(...) of the classified detail rows when
+  // any exist — a total must be auditable by clicking it, per the
+  // financial-consolidator skill's core rule ("every total MUST be a live
+  // formula, never a hardcoded number"). We deliberately do NOT fall back to
+  // the source's reported literal when the sum doesn't tie out: the user asked
+  // for the accounts to be summed properly even when the sum diverges from
+  // what was extracted, and for that divergence to be surfaced (as a cell note
+  // here, and in full in the Auditoría reconciliation view) rather than
+  // silently replaced. Only when there are zero detail rows to sum do we fall
+  // back to the source figure.
   //
   // NOTE: verticalBaseValue() always returns TOTAL ACTIVO regardless of
   // `section` — it's the %-vertical denominator (every BG section is shown as
   // a % of total assets by convention), not "this section's own total". Each
-  // branch below computes its own correct reference value to sanity-check
-  // against instead of reusing it blindly.
+  // branch computes its own correct reference value purely to annotate the
+  // divergence, never to override the sum.
   const detailSum = sumFormulaForRows(detailRows, valueCol);
   const numericSum = numericDetailSum(stmt, detailKeys);
 
-  if (section === 'Estado de Resultados') {
-    const totalRevenue = verticalBaseValue(stmt, section, bases, concepts);
-    if (sumLooksTrustworthy(numericSum, totalRevenue)) return { value: detailSum ?? totalRevenue };
-    return { value: totalRevenue ?? detailSum, note: fallbackNote(totalRevenue, numericSum) };
-  }
-  if (section === 'ACTIVO') {
-    const totalAssets = verticalBaseValue(stmt, section, bases, concepts);
-    if (sumLooksTrustworthy(numericSum, totalAssets)) return { value: detailSum ?? totalAssets };
-    return { value: totalAssets ?? detailSum, note: fallbackNote(totalAssets, numericSum) };
-  }
-  if (section === 'CAPITAL') {
-    const equity = stmt.mappedData.equity || null;
-    if (sumLooksTrustworthy(numericSum, equity)) return { value: detailSum ?? equity };
-    return { value: equity ?? detailSum, note: fallbackNote(equity, numericSum) };
-  }
+  let reference: number | null;
   if (section === 'PASIVO') {
     const totalAssets = verticalBaseValue(stmt, 'ACTIVO', bases, concepts);
     const equity = stmt.mappedData.equity || null;
-    const expectedPasivo = totalAssets !== null && equity !== null ? totalAssets - equity : null;
-    if (detailSum !== null && sumLooksTrustworthy(numericSum, expectedPasivo)) return { value: detailSum };
-    return { value: expectedPasivo ?? detailSum, note: fallbackNote(expectedPasivo, numericSum) };
+    reference = totalAssets !== null && equity !== null ? totalAssets - equity : null;
+  } else if (section === 'CAPITAL') {
+    reference = stmt.mappedData.equity || null;
+  } else {
+    // ACTIVO, Estado de Resultados, and any other single-total section.
+    reference = verticalBaseValue(stmt, section, bases, concepts);
   }
 
-  return { value: detailSum ?? verticalBaseValue(stmt, section, bases, concepts) };
+  if (detailSum !== null) {
+    return { value: detailSum, note: divergenceNote(reference, numericSum) };
+  }
+  return { value: reference };
 }
 
 export interface SectionReconciliationResult {
