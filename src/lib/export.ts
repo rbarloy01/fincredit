@@ -89,6 +89,13 @@ function safeFilePart(value: string): string {
 function downloadBlob(blob: Blob, filename: string, target?: ReservedDownloadTarget) {
   const url = URL.createObjectURL(blob);
   const deliveredToReservedTarget = deliverDownloadToReservedTarget(target, url, filename);
+  // Only fire our own <a download> click when the reserved popup tab didn't
+  // already take delivery — otherwise both the popup's self-click script and
+  // this one fire for the same blob/filename, downloading the file twice.
+  if (deliveredToReservedTarget) {
+    window.setTimeout(() => URL.revokeObjectURL(url), 300000);
+    return;
+  }
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
@@ -99,11 +106,12 @@ function downloadBlob(blob: Blob, filename: string, target?: ReservedDownloadTar
   window.setTimeout(() => {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, deliveredToReservedTarget ? 300000 : 60000);
+  }, 60000);
 }
 
 function downloadDataUrl(dataUrl: string, filename: string, target?: ReservedDownloadTarget) {
-  deliverDownloadToReservedTarget(target, dataUrl, filename);
+  const deliveredToReservedTarget = deliverDownloadToReservedTarget(target, dataUrl, filename);
+  if (deliveredToReservedTarget) return;
   const a = document.createElement('a');
   a.href = dataUrl;
   a.download = filename;
@@ -943,7 +951,11 @@ function totalValueForSection(
   const detailSum = sumFormulaForRows(detailRows, valueCol);
   const numericSum = numericDetailSum(stmt, detailKeys);
 
-  if (section === 'Estado de Resultados') return { value: detailSum ?? verticalBaseValue(stmt, section, bases, concepts) };
+  if (section === 'Estado de Resultados') {
+    const totalRevenue = verticalBaseValue(stmt, section, bases, concepts);
+    if (sumLooksTrustworthy(numericSum, totalRevenue)) return { value: detailSum ?? totalRevenue };
+    return { value: totalRevenue ?? detailSum, note: fallbackNote(totalRevenue, numericSum) };
+  }
   if (section === 'ACTIVO') {
     const totalAssets = verticalBaseValue(stmt, section, bases, concepts);
     if (sumLooksTrustworthy(numericSum, totalAssets)) return { value: detailSum ?? totalAssets };
@@ -963,6 +975,83 @@ function totalValueForSection(
   }
 
   return { value: detailSum ?? verticalBaseValue(stmt, section, bases, concepts) };
+}
+
+export interface SectionReconciliationResult {
+  section: 'ACTIVO' | 'PASIVO' | 'CAPITAL' | 'Estado de Resultados';
+  extractedTotal: number | null;
+  computedSum: number | null;
+  detailCount: number;
+  trustworthy: boolean;
+  gap: number | null;
+}
+
+export interface StatementReconciliation {
+  statementId: string;
+  period: string;
+  periodDate: string;
+  sections: SectionReconciliationResult[];
+  balanceCheck: { totalActivo: number | null; totalPasivoMasCapital: number | null; diferencia: number | null };
+}
+
+// Numeric-only counterpart to totalValueForSection() — same reference-value
+// and trustworthy-sum logic, but returns plain numbers instead of Excel
+// formula strings tied to in-progress row numbers, so it can run outside the
+// sheet-building process (e.g. for an in-app reconciliation view). Reusing
+// the exact same helpers (verticalBaseValue/numericDetailSum/
+// sumLooksTrustworthy) guarantees this never disagrees with the Excel export.
+export function computeStatementReconciliation(
+  stmt: FinancialStatement_DB,
+  bases: VerticalBaseConfig = {},
+  concepts: DefinedConcept[] = [],
+): StatementReconciliation {
+  const itemsBySegment = new Map<string, Array<{ name: string; statementType?: string | null }>>();
+  (stmt.rawLineItems || []).forEach(item => {
+    const segment = exportSegment(item);
+    if (!itemsBySegment.has(segment)) itemsBySegment.set(segment, []);
+    itemsBySegment.get(segment)!.push({ name: item.name, statementType: item.statementType });
+  });
+
+  const detailKeysFor = (segment: string, extraFilter?: (name: string) => boolean) =>
+    (itemsBySegment.get(segment) || [])
+      .filter(item => !isBalanceTotalAccount(item.name, segment))
+      .filter(item => !extraFilter || extraFilter(item.name))
+      .map(item => `${item.statementType || 'otro'}||${item.name}`);
+
+  const sectionResult = (
+    section: SectionReconciliationResult['section'],
+    detailKeys: string[],
+    extractedTotal: number | null,
+  ): SectionReconciliationResult => {
+    const numericSum = numericDetailSum(stmt, detailKeys);
+    const trustworthy = sumLooksTrustworthy(numericSum, extractedTotal);
+    const gap = extractedTotal !== null && numericSum !== null ? extractedTotal - numericSum : null;
+    return { section, extractedTotal, computedSum: numericSum, detailCount: detailKeys.length, trustworthy, gap };
+  };
+
+  const totalActivo = verticalBaseValue(stmt, 'ACTIVO', bases, concepts);
+  const equity = stmt.mappedData.equity || null;
+  const totalRevenue = verticalBaseValue(stmt, 'Estado de Resultados', bases, concepts);
+
+  const sections: SectionReconciliationResult[] = [
+    sectionResult('ACTIVO', detailKeysFor('ACTIVO'), totalActivo),
+    sectionResult('PASIVO', detailKeysFor('PASIVO'), totalActivo !== null && equity !== null ? totalActivo - equity : null),
+    sectionResult('CAPITAL', detailKeysFor('CAPITAL'), equity),
+    sectionResult('Estado de Resultados', detailKeysFor('Estado de Resultados', isIncomeStatementRevenueLine), totalRevenue),
+  ];
+
+  const pasivoSum = sections.find(s => s.section === 'PASIVO')?.computedSum ?? null;
+  const capitalSum = sections.find(s => s.section === 'CAPITAL')?.computedSum ?? null;
+  const totalPasivoMasCapital = pasivoSum !== null && capitalSum !== null ? pasivoSum + capitalSum : null;
+  const diferencia = totalActivo !== null && totalPasivoMasCapital !== null ? totalActivo - totalPasivoMasCapital : null;
+
+  return {
+    statementId: stmt.id,
+    period: stmt.period,
+    periodDate: stmt.periodDate,
+    sections,
+    balanceCheck: { totalActivo, totalPasivoMasCapital, diferencia },
+  };
 }
 
 function addVerticalBaseRow(
@@ -1392,6 +1481,63 @@ export function buildFlujoEfectivo(statements: FinancialStatement_DB[]): SheetDe
     name: 'Flujo de Efectivo',
     rows,
     colWidths: [42, ...Array(periods.length).fill(15), ...Array(Math.max(0, periods.length - 1) * 2).fill(12)],
+  };
+}
+
+// 3c. Cuentas Sin Clasificar — every raw line item exportSegment() couldn't
+// place into ACTIVO/PASIVO/CAPITAL/Estado de Resultados/Flujo de Efectivo
+// (segment === 'Otros': untyped/legacy rows, or explicit "otros" overrides
+// from the Auditoría tab). These used to be silently dropped from every
+// sheet — buildBG/buildER/buildFlujoEfectivo only pull the segments they
+// each care about. Kept here, visibly, until reclassified in the app.
+export function buildCuentasSinClasificar(statements: FinancialStatement_DB[]): SheetDef {
+  const periods = normalizedPeriods(statements);
+  type UnclassifiedItem = { name: string; statementType: string; sectionPath: string; sourceOrder: number };
+  const keys = new Map<string, UnclassifiedItem>();
+  let sourceOrder = 0;
+  periods.forEach(p => p.stmt.rawLineItems.forEach(item => {
+    if (exportSegment(item) !== 'Otros') return;
+    const key = `${item.statementType || 'otro'}||${item.sectionPath || ''}||${item.name}`;
+    if (!keys.has(key)) {
+      keys.set(key, {
+        name: item.name,
+        statementType: item.statementType || 'sin tipo',
+        sectionPath: item.sectionPath || '',
+        sourceOrder: sourceOrder++,
+      });
+    }
+  }));
+  if (!keys.size || !periods.length) {
+    return {
+      name: 'Cuentas Sin Clasificar',
+      rows: [
+        ['CUENTAS SIN CLASIFICAR'],
+        [],
+        ['No hay cuentas sin clasificar en los EFF cargados.'],
+      ],
+      colWidths: [60],
+    };
+  }
+  const items = Array.from(keys.entries()).sort((a, b) => a[1].sourceOrder - b[1].sourceOrder);
+  const rows: SheetDef['rows'] = [
+    ['CUENTAS SIN CLASIFICAR'],
+    ['Cuentas que no se pudieron ubicar en Balance General, Estado de Resultados ni Flujo de Efectivo — por eso no aparecen sumadas en ninguna otra hoja. Clasifícalas en la pestaña Auditoría del cliente para que se incorporen a los totales.'],
+    [],
+    ['Cuenta', 'Tipo original', 'Sección detectada', ...periods.map(p => p.label)],
+  ];
+  items.forEach(([, meta]) => {
+    rows.push([meta.name, meta.statementType, meta.sectionPath, ...periods.map(p => {
+      const item = p.stmt.rawLineItems.find(i =>
+        i.name === meta.name
+        && (i.statementType || 'sin tipo') === meta.statementType
+        && (i.sectionPath || '') === meta.sectionPath);
+      return item?.value ?? null;
+    })]);
+  });
+  return {
+    name: 'Cuentas Sin Clasificar',
+    rows,
+    colWidths: [42, 18, 30, ...Array(periods.length).fill(15)],
   };
 }
 
@@ -2724,6 +2870,7 @@ export async function exportEstadosFinancieros(
       buildBG(statements, verticalBases, concepts, covenants),
       buildER(statements, verticalBases, concepts),
       buildFlujoEfectivo(statements),
+      buildCuentasSinClasificar(statements),
       buildValidaciones(statements),
       buildDefinedConcepts(statements, concepts),
       buildCovenantDataSheet(statements, concepts),

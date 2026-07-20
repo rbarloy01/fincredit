@@ -461,6 +461,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
           )}
           {activeTab === 'auditoria' && (
             <AuditPanel
+              clientId={clientId}
               statements={statements}
               onStatementsChange={setStatements}
             />
