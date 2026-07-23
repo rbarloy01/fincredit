@@ -6,6 +6,7 @@ import {
   TrendingUp, CheckCircle, AlertTriangle, XCircle, X, Trash2
 } from 'lucide-react';
 import { parseNullableFinancialNumber } from '../../lib/numberParsing';
+import { getMetric } from '../../lib/financialMetrics';
 
 const nanoid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
@@ -42,9 +43,16 @@ function evaluateCovenant(cov: Covenant_DB, statements: FinancialStatement_DB[])
   // Simple formula evaluation
   const formula = cov.formula.toLowerCase();
   if (formula.includes('deuda') && formula.includes('ebitda')) {
-    value = m.ebitda !== 0 ? m.totalDebt / m.ebitda : null;
+    // Route EBITDA through getMetric so it falls back to the raw "utilidad de
+    // operación" when mapped_data.ebitda is 0 — otherwise Deuda/EBITDA reads as
+    // null for every IFNB whose EBITDA never got computed at ingestion.
+    const ebitda = getMetric(latest, 'ebitda');
+    const totalDebt = getMetric(latest, 'totalDebt');
+    value = ebitda && totalDebt !== null ? totalDebt / ebitda : null;
   } else if (formula.includes('dscr') || (formula.includes('ebitda') && formula.includes('interes'))) {
-    value = m.interestExpense !== 0 ? m.ebitda / m.interestExpense : null;
+    const ebitda = getMetric(latest, 'ebitda');
+    const interestExpense = getMetric(latest, 'interestExpense');
+    value = interestExpense && ebitda !== null ? ebitda / interestExpense : null;
   } else if (formula.includes('corriente') || formula.includes('liquidez')) {
     value = m.currentLiabilities !== 0 ? m.currentAssets / m.currentLiabilities : null;
   } else if (formula.includes('capital') || formula.includes('equity')) {

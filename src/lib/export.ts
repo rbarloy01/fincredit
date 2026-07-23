@@ -760,6 +760,24 @@ function exportSegment(item: FinancialStatement_DB['rawLineItems'][number]) {
     if (path.includes('flujoefectivo')) return 'Flujo de Efectivo';
     if (path.includes('otros')) return 'Otros';
   }
+  // The source's own explicit ACTIVO / PASIVO / CAPITAL section heading is
+  // authoritative — honor it before falling back to the name heuristics below,
+  // which otherwise misfile lines by wording alone: "ISR/IVA acreditable" (an
+  // asset) lands in PASIVO because the regex catches "isr"/"iva", and "Cuentas
+  // por cobrar capital" (a receivable) lands in CAPITAL because the name
+  // contains "capital" — inflating equity and breaking the balance check. A
+  // combined "Pasivo y Capital" heading names two segments at once, so it stays
+  // ambiguous and drops through to the heuristics instead of guessing.
+  const pathActivo = path.includes('activo');
+  const pathPasivo = path.includes('pasivo');
+  const pathCapital = path.includes('capital') || path.includes('patrimonio');
+  const explicitSegments = (pathActivo ? 1 : 0) + (pathPasivo ? 1 : 0) + (pathCapital ? 1 : 0);
+  if (explicitSegments === 1) {
+    if (pathActivo) return 'ACTIVO';
+    if (pathPasivo) return 'PASIVO';
+    return 'CAPITAL';
+  }
+
   // Liability wording takes precedence over a generic "capital" mention, as in
   // "Pasivo y capital". Only explicit equity account names belong in CAPITAL.
   if (isPasivoName && !isCapitalName) return 'PASIVO';
@@ -1238,7 +1256,7 @@ export function buildEFFDashboard(statements: FinancialStatement_DB[], clientNam
     [],
     ['KPIs últimos estados', 'Valor'],
     ['Ingresos', latest?.mappedData.revenue ?? null],
-    ['EBITDA / Utilidad operativa', latest?.mappedData.ebitda ?? null],
+    ['EBITDA / Utilidad operativa', latest ? getMetric(latest, 'ebitda') : null],
     ['Utilidad neta', latest?.mappedData.netIncome ?? null],
     ['Activo total', latest?.mappedData.totalAssets ?? null],
     ['Deuda total', latest?.mappedData.totalDebt ?? null],

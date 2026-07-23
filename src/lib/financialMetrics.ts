@@ -287,6 +287,16 @@ function firstValue(...values: Array<number | null | undefined>): number | null 
   return found ?? null;
 }
 
+// Treat an exact 0 as "not present" so a downstream firstValue() fallback can
+// fire. Used for mapped fields where 0 is an extraction artifact rather than a
+// real reported figure — notably mapped_data.ebitda, which the ingestion prompt
+// computes as revenue − cogs − operatingExpenses; for IFNBs/SOFOMes (structured
+// around financial margin) those three are all 0, so a 0 EBITDA really means
+// "never computed", and the raw "utilidad de operación" fallback should win.
+function nz(value: number | null | undefined): number | null {
+  return value === null || value === undefined || value === 0 ? null : value;
+}
+
 function addValues(...values: Array<number | null>): number | null {
   const present = values.filter((value): value is number => value !== null);
   return present.length ? present.reduce((sum, value) => sum + value, 0) : null;
@@ -318,7 +328,7 @@ export function getMetric(stmt: FinancialStatement_DB, key: string): number | nu
     case 'adjustedFinancialMargin': return firstValue(findRawRequiringSubstring(stmt, ['ajustad', ...metricAliases('adjustedFinancialMargin')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'adjustedFinancialMargin'));
     case 'adjustedOperatingIncome': return firstValue(raw(['utilidad o perdida de operacion', 'utilidad o pérdida de operación', 'utilidad de operacion', 'utilidad operativa ajustada', 'utilidad operacion ajustada', 'utilidad de operacion ajustada', 'resultado de operacion', ...metricAliases('adjustedOperatingIncome')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'adjustedOperatingIncome'));
     case 'adminSellingOperatingExpenses': return absoluteValue(firstValue(raw(['gastos de operacion total', 'gastos de operación total', 'gastos de operacion (total)', 'gastos de administracion venta y operacion', 'gastos adm venta opn', 'gastos administrativos', 'gastos de operacion', ...metricAliases('adminSellingOperatingExpenses')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'adminSellingOperatingExpenses')));
-    case 'ebitda': return firstValue(m.ebitda, findConsolidatedMetricValue(stmt, 'ebitda'), raw(['ebitda', ...metricAliases('ebitda')], ['estado_resultados']), raw(['utilidad operacion', 'utilidad de operacion', 'resultado de operacion', 'utilidad antes de intereses'], ['estado_resultados']));
+    case 'ebitda': return firstValue(nz(m.ebitda), findConsolidatedMetricValue(stmt, 'ebitda'), raw(['ebitda', ...metricAliases('ebitda')], ['estado_resultados']), raw(['utilidad operacion', 'utilidad de operacion', 'resultado de operacion', 'utilidad antes de intereses'], ['estado_resultados']));
     case 'interestExpense': return absoluteValue(firstValue(m.interestExpense, raw(['gastos por intereses', 'gasto por intereses', 'gasto financiero', 'intereses pagados', 'intereses devengados', 'resultado integral de financiamiento', ...metricAliases('interestExpense')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'interestExpense')));
     case 'netIncome': return firstValue(m.netIncome, findConsolidatedMetricValue(stmt, 'netIncome'), raw(['utilidad neta', 'resultado neto', 'utilidad o perdida', 'utilidad (o perdida)', 'perdida del ejercicio', ...metricAliases('netIncome')], ['estado_resultados']));
     case 'currentAssets': return firstValue(m.currentAssets, findConsolidatedMetricValue(stmt, 'currentAssets'), raw(['activo circulante', 'activo corriente', 'total activo a corto plazo', 'activo a corto plazo', ...metricAliases('currentAssets')], ['balance_general']));
