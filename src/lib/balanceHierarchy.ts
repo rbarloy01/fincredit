@@ -120,7 +120,7 @@ function classifyFlat(section: string, lines: BalanceLine[], valueOf: (key: stri
 // subtotal line — the line whose stripped name matches the node's last segment —
 // and its children are the node's other lines. The grand total's children are
 // the immediate sub-groups' subtotal lines.
-function classifyNested(section: string, lines: BalanceLine[], _valueOf: (key: string) => number | null): SectionClassification {
+function classifyNested(section: string, lines: BalanceLine[], valueOf: (key: string) => number | null): SectionClassification {
   const childrenByKey = new Map<string, string[]>();
   const grand = lines.find(l => l.rel.length === 0 && isSectionGrandTotal(l.name, section));
   const grandKey = grand ? grand.key : null;
@@ -134,21 +134,30 @@ function classifyNested(section: string, lines: BalanceLine[], _valueOf: (key: s
     nodes.get(path)!.push(l);
   }
 
-  const immediateGroupSubtotals: string[] = [];
+  const immediateGroupChildren: string[] = [];
   for (const [path, nodeLines] of nodes) {
     const segs = path ? path.split(' > ') : [];
     const lastSeg = segs.length ? nkey(segs[segs.length - 1]) : '';
-    // The node's own subtotal: the line naming the node itself.
-    const subtotal = nodeLines.find(l => strippedName(l.name) === lastSeg) || null;
+    // The node's own subtotal: first the line naming the node itself, else the
+    // line whose value equals the sum of the others in the node (handles names
+    // the match misses, e.g. "Total Activo Fijo, Neto"). Never fall back to an
+    // arbitrary first line — a wrong pick used to yield a bogus grand-total SUM.
+    let subtotal = nodeLines.find(l => strippedName(l.name) === lastSeg) || null;
+    if (!subtotal && nodeLines.length >= 3) {
+      subtotal = nodeLines.find(cand => childrenTie(nodeLines.filter(l => l !== cand).map(l => valueOf(l.key)), valueOf(cand.key))) || null;
+    }
     const children = nodeLines.filter(l => l !== subtotal).map(l => l.key);
     if (subtotal && children.length) childrenByKey.set(subtotal.key, children);
-    // Depth-1 nodes contribute their subtotal to the grand total.
+    // Depth-1 nodes feed the grand total: via their subtotal when identified,
+    // otherwise via their individual lines (childrenTie gates the grand SUM, so
+    // an over-inclusive set simply falls back to the source literal).
     if (segs.length === 1) {
-      immediateGroupSubtotals.push(subtotal ? subtotal.key : (nodeLines[0]?.key ?? ''));
+      if (subtotal) immediateGroupChildren.push(subtotal.key);
+      else immediateGroupChildren.push(...nodeLines.map(l => l.key));
     }
   }
 
-  const grandChildren = immediateGroupSubtotals.filter(Boolean);
+  const grandChildren = immediateGroupChildren.filter(Boolean);
   if (grandKey && grandChildren.length >= 1) childrenByKey.set(grandKey, grandChildren);
   return { grandKey, childrenByKey };
 }
