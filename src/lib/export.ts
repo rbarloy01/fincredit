@@ -893,6 +893,26 @@ function isBalanceTotalAccount(name: string, segment: string) {
   return /(total|suma)/.test(n);
 }
 
+// True when the line IS the source's own grand total for the given section
+// (e.g. "TOTAL ACTIVO"). Used by the faithful CNBV renderer to place the
+// section total on the source's own line rather than a synthesized SUM.
+function isSectionGrandTotalName(name: string, section: string): boolean {
+  const n = nkey(name);
+  if (isCombinedGrandTotalName(name)) return false;
+  if (section === 'ACTIVO') return /^(totalactivo|sumadelactivo|activostotales)/.test(n);
+  if (section === 'PASIVO') return /^(totalpasivo|sumadelpasivo|pasivototal)/.test(n) && !/capital|patrimonio/.test(n);
+  if (section === 'CAPITAL') return /(totalcapitalcontable|totalcapital|sumadelcapital|totalpatrimonio|totaldelcapital)/.test(n) && !/pasivo/.test(n);
+  return false;
+}
+
+// "TOTAL PASIVO Y CAPITAL CONTABLE" style lines — the grand-grand total that
+// equals TOTAL ACTIVO. Redundant with the balance-check row, and misclassified
+// by name, so the faithful renderer drops it from display.
+function isCombinedGrandTotalName(name: string): boolean {
+  const n = nkey(name);
+  return /totalpasivoycapital|totalpasivomascapital|sumapasivoycapital|totaldepasivoycapital/.test(n);
+}
+
 function totalLabelForSection(section: string) {
   if (section === 'ACTIVO') return 'TOTAL ACTIVO';
   if (section === 'PASIVO') return 'TOTAL PASIVO';
@@ -1225,9 +1245,38 @@ function buildSegmentedAnalysisSheet(
     const key = `${item.statementType || 'otro'}||${item.name}`;
     if (!keys.has(key)) keys.set(key, { name: item.name, segment, sourceOrder: sourceOrder++ });
   }));
+  // Faithful mode: when the source EFF reports its own section totals (CNBV /
+  // audited statements), we CANNOT reliably re-sum a flat item list that mixes
+  // subtotals, net-of-contra lines and grand totals in inconsistent order — a
+  // synthesized SUM double-counts or drops figures. So we reproduce the balance
+  // exactly as the source presents it: original order, its own subtotal/total
+  // lines kept in place, and the section total taken from the source's own
+  // "TOTAL ACTIVO/PASIVO/CAPITAL" line (a literal, visible in any viewer). Flat
+  // management statements with no reported totals (e.g. ASTRO) keep the
+  // synthesized live-SUM behavior below.
+  const faithful = name === 'Balance General' && periods.some(p => reportedSectionTotal(p.stmt, 'ACTIVO') !== null);
+
   const rows: SheetDef['rows'] = [statementHeaders(periods)];
   const totalRows: Record<string, number> = {};
   segments.forEach(segment => {
+    if (faithful) {
+      const items = Array.from(keys.entries())
+        .filter(([, meta]) => meta.segment === segment)
+        .filter(([, meta]) => !isCombinedGrandTotalName(meta.name))
+        .sort((a, b) => a[1].sourceOrder - b[1].sourceOrder);
+      if (!items.length) return;
+      rows.push([segment]);
+      const firstItemRow = rows.length + 1;
+      const grandIdx = items.findIndex(([, meta]) => isSectionGrandTotalName(meta.name, segment));
+      const sectionTotalRow = grandIdx >= 0 ? firstItemRow + grandIdx : firstItemRow + items.length - 1;
+      // % vertical base: total assets (the reported ACTIVO total row once known,
+      // else this section's own total row).
+      const baseRow = totalRows.ACTIVO || sectionTotalRow;
+      items.forEach(([key, meta]) => addAnalysisRow(rows, meta.name, segment, key, periods, baseRow));
+      totalRows[segment] = sectionTotalRow;
+      return;
+    }
+
     const items = Array.from(keys.entries())
       .filter(([, meta]) => meta.segment === segment)
       .filter(([, meta]) => !isBalanceTotalAccount(meta.name, segment))
