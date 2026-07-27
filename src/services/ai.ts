@@ -45,7 +45,8 @@ export function saveAISettings(s: AISettings) {
 
 export type StatementType = 'balance_general' | 'estado_resultados' | 'flujo_efectivo' | 'otro';
 
-export interface RawLineItem { name: string; value: number; source?: string; sectionPath?: string | null; statementType?: StatementType; }
+export type LineItemRole = 'detail' | 'subtotal' | 'total';
+export interface RawLineItem { name: string; value: number; source?: string; sectionPath?: string | null; statementType?: StatementType; role?: LineItemRole; parent?: string | null; }
 
 export interface ExtractedStatement {
   period: string;
@@ -131,12 +132,18 @@ function normalizeFinancialLineItem(item: any): RawLineItem | null {
   const value = parseFinancialNumber(item.value, Number.NaN);
   if (!Number.isFinite(value)) return null;
 
+  const role: LineItemRole | undefined =
+    item.role === 'total' || item.role === 'subtotal' || item.role === 'detail' ? item.role : undefined;
+  const parent = typeof item.parent === 'string' && item.parent.trim() ? item.parent.trim() : null;
+
   return {
     name,
     value,
     source: item.source,
     sectionPath: item.sectionPath || null,
     statementType,
+    role,
+    parent,
   };
 }
 
@@ -193,6 +200,8 @@ function mergeFinancialLineItems(items: RawLineItem[]): RawLineItem[] {
       value: existingValue === incomingValue ? existingValue : existingValue + incomingValue,
       sectionPath: existing.sectionPath || item.sectionPath || null,
       source: existing.source || item.source,
+      role: existing.role || item.role,
+      parent: existing.parent ?? item.parent ?? null,
     });
   }
   return Array.from(byAccount.values());

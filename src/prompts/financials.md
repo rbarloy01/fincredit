@@ -102,20 +102,35 @@ Estas cuentas son comunes en IFNBs. Clasifícalas así:
 
 ---
 
-## PASO 5 — Tipos de fila
+## PASO 5 — Tipos de fila y JERARQUÍA (crítico para armar el Excel)
 
-Detecta el tipo de cada fila:
+Para CADA línea con valor, además del `name`/`value`/`sectionPath`, marca su rol y su padre:
 
 - **Encabezado de sección**: texto sin valor numérico, generalmente en mayúsculas o negrita
   Ejemplos: "ACTIVO CIRCULANTE", "PASIVOS A LARGO PLAZO", "INGRESOS OPERATIVOS"
   → **NO incluir en rawLineItems** (son agrupadores, no líneas de datos)
 
-- **Subtotal / Total**: tiene un valor que suma las filas anteriores de su sección
-  Ejemplos: "Total Activo Circulante", "TOTAL PASIVO", "Utilidad Bruta"
-  → **SÍ incluir** con el valor que aparece en el documento
+- **Total de sección** (`role: "total"`): el gran total de ACTIVO, PASIVO o CAPITAL.
+  Ejemplos: "TOTAL ACTIVO", "ACTIVOS TOTALES", "TOTAL PASIVO", "TOTAL CAPITAL CONTABLE".
+  Su `parent` es `null`.
 
-- **Dato / línea de detalle**: cuenta específica con valor numérico
-  → **SÍ incluir** siempre
+- **Subtotal** (`role: "subtotal"`): una suma intermedia de un grupo.
+  Ejemplos: "Total Activo Circulante", "Total Cartera de Crédito", "Cartera de Crédito (Neto)", "Capital Contribuido", "Utilidad Bruta".
+  Su `parent` es el `name` EXACTO del subtotal/total inmediato al que se suma (o `null` si suma directo al total de sección).
+
+- **Dato / detalle** (`role: "detail"`): cuenta hoja específica.
+  Su `parent` es el `name` EXACTO del subtotal/total inmediato que lo contiene (o `null` si suma directo al total de sección).
+
+### Regla de oro de la jerarquía (VERIFÍCALA antes de responder)
+Para cada línea con `role` "total" o "subtotal", su `value` DEBE ser igual a la suma de los `value` de todas las líneas cuyo `parent` es su `name`. Es decir: `parent` conecta cada hijo con su suma. Si el documento reporta un subtotal que NO coincide con la suma de sus componentes visibles, respeta el número del documento y aun así asigna los `parent` correctos (no inventes líneas para cuadrar).
+
+- `parent` SIEMPRE debe ser el `name` exacto de otra línea presente en el MISMO estado y MISMA sección, o `null`.
+- No crees ciclos: una línea nunca es su propio ancestro.
+- Ejemplo (ACTIVO):
+  - "Total Cartera de Crédito Vigente" → `role:"detail"`, `parent:"Cartera de Crédito (Neto)"`
+  - "Estimación Preventiva" → `role:"detail"`, `parent:"Cartera de Crédito (Neto)"`
+  - "Cartera de Crédito (Neto)" → `role:"subtotal"`, `parent:null` (suma directo a TOTAL ACTIVO)
+  - "TOTAL ACTIVO" → `role:"total"`, `parent:null`
 
 ---
 
@@ -172,7 +187,9 @@ Si el documento tiene columnas comparativas (por ejemplo, "Mar 2025" y "Dic 2024
           "statementType": "balance_general|estado_resultados",
           "name": "nombre exacto de la cuenta tal como aparece",
           "value": 123456.78,
-          "sectionPath": "ruta visual de sección, o null"
+          "sectionPath": "ruta visual de sección, o null",
+          "role": "detail|subtotal|total",
+          "parent": "name exacto del subtotal/total que suma esta línea, o null"
         }
       ]
     }
@@ -183,6 +200,7 @@ Si el documento tiene columnas comparativas (por ejemplo, "Mar 2025" y "Dic 2024
 ### Notas del esquema
 - `statements` siempre es un array, incluso con un solo período
 - `rawLineItems` incluye subtotales/totales pero NO encabezados de sección sin valor
+- `role` y `parent` son OBLIGATORIOS en cada línea (ver Paso 5); son la jerarquía con la que se arma el Excel
 - `statementType` solo puede ser `balance_general` o `estado_resultados`
 - Ordena los períodos del más antiguo al más reciente
 - Si solo hay un período y el documento no especifica fecha, usa la fecha más probable

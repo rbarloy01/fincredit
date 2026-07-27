@@ -178,7 +178,7 @@ export interface FinancialStatement_DB {
   periodDate: string;
   uploadDate: string;
   fileName: string;
-  rawLineItems: Array<{ name: string; value: number; source?: string; sectionPath?: string | null; statementType?: 'balance_general' | 'estado_resultados' | 'flujo_efectivo' | 'otro' }>;
+  rawLineItems: Array<{ name: string; value: number; source?: string; sectionPath?: string | null; statementType?: 'balance_general' | 'estado_resultados' | 'flujo_efectivo' | 'otro'; role?: 'detail' | 'subtotal' | 'total'; parent?: string | null }>;
   mappedData: {
     revenue: number; cogs: number; operatingExpenses: number; ebitda: number;
     interestExpense: number; netIncome: number; currentAssets: number;

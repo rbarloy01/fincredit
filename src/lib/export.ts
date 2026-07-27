@@ -1523,7 +1523,7 @@ function buildHierarchicalBG(
     if (seen.has(scoped)) return;
     seen.add(scoped);
     if (!linesBySegment.has(segment)) linesBySegment.set(segment, []);
-    linesBySegment.get(segment)!.push({ key, name: item.name, rel: relBelowSection(item.sectionPath, segment) });
+    linesBySegment.get(segment)!.push({ key, name: item.name, rel: relBelowSection(item.sectionPath, segment), role: item.role, parent: item.parent });
   }));
 
   // Pass 1 — assign a worksheet row number to every line (header is row 1).
@@ -1564,7 +1564,7 @@ function buildHierarchicalBG(
       if (seenP.has(scoped)) return;
       seenP.add(scoped);
       if (!linesForPeriod.has(segment)) linesForPeriod.set(segment, []);
-      linesForPeriod.get(segment)!.push({ key, name: item.name, rel: relBelowSection(item.sectionPath, segment) });
+      linesForPeriod.get(segment)!.push({ key, name: item.name, rel: relBelowSection(item.sectionPath, segment), role: item.role, parent: item.parent });
     });
     segments.forEach(segment => {
       classification.set(`${segment}#${i}`, classifyBalanceSection(segment, linesForPeriod.get(segment) || [], key => rawValueByKey(p.stmt, key)));
@@ -1642,7 +1642,9 @@ export function buildBG(statements: FinancialStatement_DB[], bases: VerticalBase
   // When the source reports its own section totals, build a real hierarchy with
   // =SUM subtotals/totals; otherwise fall back to the synthesized single-total
   // sheet (flat management statements like ASTRO).
-  const hasSourceTotals = periods.some(p => reportedSectionTotal(p.stmt, 'ACTIVO') !== null);
+  const hasSourceTotals = periods.some(p =>
+    reportedSectionTotal(p.stmt, 'ACTIVO') !== null ||
+    p.stmt.rawLineItems.some(it => it.role === 'total' || it.role === 'subtotal'));
   return hasSourceTotals
     ? buildHierarchicalBG(statements, segments, footerRows)
     : buildSegmentedAnalysisSheet(statements, 'Balance General', segments, bases, concepts, footerRows);

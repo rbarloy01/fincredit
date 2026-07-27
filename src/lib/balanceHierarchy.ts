@@ -28,6 +28,11 @@ export interface BalanceLine {
   name: string;
   /** sectionPath segments BELOW the section, e.g. ["Activos circulantes"]. */
   rel: string[];
+  /** Explicit role from extraction (when available): detail | subtotal | total. */
+  role?: 'detail' | 'subtotal' | 'total';
+  /** Explicit parent NAME from extraction: the subtotal/total this line sums
+   * into, or null/empty when it rolls straight into the section grand total. */
+  parent?: string | null;
 }
 
 export interface SectionClassification {
@@ -148,11 +153,44 @@ function classifyNested(section: string, lines: BalanceLine[], _valueOf: (key: s
   return { grandKey, childrenByKey };
 }
 
+// EXPLICIT ROLES: the extraction tagged each line with role + parent, giving a
+// deterministic parent-pointer tree. Grand total = the line whose role is
+// "total"; a subtotal's children = every line whose parent name points at it;
+// lines with no parent roll straight into the grand total. This is preferred
+// over the heuristics whenever the data carries roles.
+function classifyFromRoles(section: string, lines: BalanceLine[]): SectionClassification {
+  const childrenByKey = new Map<string, string[]>();
+  const byName = new Map<string, string>(); // nkey(name) -> key
+  lines.forEach(l => { if (!byName.has(nkey(l.name))) byName.set(nkey(l.name), l.key); });
+
+  const grand = lines.find(l => l.role === 'total' && isSectionGrandTotal(l.name, section))
+    || lines.find(l => l.role === 'total');
+  const grandKey = grand ? grand.key : null;
+
+  const add = (parentKey: string, childKey: string) => {
+    if (!childrenByKey.has(parentKey)) childrenByKey.set(parentKey, []);
+    childrenByKey.get(parentKey)!.push(childKey);
+  };
+
+  lines.forEach(l => {
+    if (grand && l.key === grand.key) return;
+    const parentName = l.parent && l.parent.trim() ? nkey(l.parent) : '';
+    const parentKey = parentName ? byName.get(parentName) : (grandKey || undefined);
+    // Guard against a line pointing at itself.
+    if (parentKey && parentKey !== l.key) add(parentKey, l.key);
+  });
+
+  return { grandKey, childrenByKey };
+}
+
 export function classifyBalanceSection(
   section: string,
   lines: BalanceLine[],
   valueOf: (key: string) => number | null,
 ): SectionClassification {
+  if (lines.some(l => l.role === 'total' || l.role === 'subtotal' || l.role === 'detail')) {
+    return classifyFromRoles(section, lines);
+  }
   const nested = lines.some(l => l.rel.length >= 1);
   return nested ? classifyNested(section, lines, valueOf) : classifyFlat(section, lines, valueOf);
 }
