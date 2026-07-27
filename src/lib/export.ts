@@ -945,6 +945,43 @@ function divergenceNote(reference: number | null, numericSum: number | null): st
   return `Este total es la SUMA en vivo de las cuentas clasificadas de arriba. El EFF de origen reportó $${referenceFormatted}: respecto a esa cifra ${direction}. Reconcilia la diferencia en la pestaña Auditoría del cliente.`;
 }
 
+// The section total the source EFF itself reported (the "TOTAL ACTIVO" /
+// "TOTAL PASIVO" / "TOTAL CAPITAL CONTABLE" line), read straight from the raw
+// items. In CNBV/audited SOFOM statements this figure is authoritative and
+// frequently CANNOT be reconstructed by summing the visible detail lines: the
+// source mixes leaves, subtotals and net-of-contra lines in one flat list
+// (e.g. "CARTERA DE CREDITO (NETO)" already nets "ESTIMACIÓN PREVENTIVA", and
+// a lone "TOTAL INVERSIONES EN VALORES" has no detail beneath it), so a naive
+// SUM double-counts some rows and drops others. Returns null when the source
+// didn't report an explicit total for the section.
+function reportedSectionTotal(stmt: FinancialStatement_DB, section: string): number | null {
+  const match = (include: RegExp, exclude?: RegExp) => {
+    for (const it of stmt.rawLineItems || []) {
+      const n = nkey(it.name);
+      if (exclude && exclude.test(n)) continue;
+      if (include.test(n) && typeof it.value === 'number') return it.value;
+    }
+    return null;
+  };
+  if (section === 'ACTIVO') return match(/^(totalactivo|sumadelactivo|activostotales)/, /pasivo|capital|patrimonio/);
+  if (section === 'PASIVO') return match(/^(totalpasivo|sumadelpasivo|pasivototal)/, /capital|patrimonio/);
+  if (section === 'CAPITAL') return match(/(totalcapitalcontable|totalcapital|sumadelcapital|totalpatrimonio|totaldelcapital)/, /pasivo/);
+  return null;
+}
+
+// Note for the case where the itemized SUM can't reconstruct the source's
+// reported total, so the reported figure is used for the total row instead.
+function reportedTotalNote(reported: number, numericSum: number | null): string | undefined {
+  // Only annotate when the itemized lines genuinely don't re-sum to the
+  // reported total; when they reconcile, the reported figure needs no caveat.
+  if (numericSum === null) return undefined;
+  const gapValue = Math.abs(reported - numericSum);
+  if (gapValue <= Math.max(1000, Math.abs(reported) * 0.01)) return undefined;
+  const reportedFormatted = reported.toLocaleString('es-MX', { maximumFractionDigits: 0 });
+  const gap = gapValue.toLocaleString('es-MX', { maximumFractionDigits: 0 });
+  return `Total reportado por el EFF de origen ($${reportedFormatted}). Las cuentas de detalle suman aprox. $${gap} distinto — típico en estados dictaminados (CNBV) que reportan subtotales y líneas netas que no se re-suman línea por línea. Desglose en la pestaña Auditoría.`;
+}
+
 function totalValueForSection(
   stmt: FinancialStatement_DB,
   section: string,
@@ -954,37 +991,53 @@ function totalValueForSection(
   bases: VerticalBaseConfig = {},
   concepts: DefinedConcept[] = [],
 ): { value: string | number | null; note?: string } {
-  // The total is ALWAYS the live =SUM(...) of the classified detail rows when
-  // any exist — a total must be auditable by clicking it, per the
-  // financial-consolidator skill's core rule ("every total MUST be a live
-  // formula, never a hardcoded number"). We deliberately do NOT fall back to
-  // the source's reported literal when the sum doesn't tie out: the user asked
-  // for the accounts to be summed properly even when the sum diverges from
-  // what was extracted, and for that divergence to be surfaced (as a cell note
-  // here, and in full in the Auditoría reconciliation view) rather than
-  // silently replaced. Only when there are zero detail rows to sum do we fall
-  // back to the source figure.
-  //
-  // NOTE: verticalBaseValue() always returns TOTAL ACTIVO regardless of
-  // `section` — it's the %-vertical denominator (every BG section is shown as
-  // a % of total assets by convention), not "this section's own total". Each
-  // branch computes its own correct reference value purely to annotate the
-  // divergence, never to override the sum.
+  // Preference order for the total:
+  //   1. Live =SUM(detail) when it actually reconstructs the source's own
+  //      reported total (auditable by clicking, per the financial-consolidator
+  //      rule) — the normal case for flat statements like the SOFOM management
+  //      accounts.
+  //   2. The source's reported total when the SUM can't reconstruct it — the
+  //      normal case for CNBV/audited statements whose flat item list mixes
+  //      leaves, subtotals and net-of-contra lines (summing them double-counts
+  //      or drops figures). A correct reported total beats a wrong live sum.
+  //   3. The derived reference (mapped totals) only when the source reported no
+  //      explicit total line.
   const detailSum = sumFormulaForRows(detailRows, valueCol);
   const numericSum = numericDetailSum(stmt, detailKeys);
 
-  let reference: number | null;
-  if (section === 'PASIVO') {
-    const totalAssets = verticalBaseValue(stmt, 'ACTIVO', bases, concepts);
-    const equity = stmt.mappedData.equity || null;
-    reference = totalAssets !== null && equity !== null ? totalAssets - equity : null;
-  } else if (section === 'CAPITAL') {
-    reference = stmt.mappedData.equity || null;
-  } else {
-    // ACTIVO, Estado de Resultados, and any other single-total section.
-    reference = verticalBaseValue(stmt, section, bases, concepts);
+  // The section's OWN total the source explicitly reported (null if it didn't).
+  const reported = reportedSectionTotal(stmt, section);
+
+  // Reference figure for annotating / falling back — the reported line when
+  // present, otherwise derived from mapped data. (verticalBaseValue() is the
+  // %-vertical denominator — always TOTAL ACTIVO — so it is NOT this section's
+  // total; only the ACTIVO branch may use it.)
+  let reference = reported;
+  if (reference === null) {
+    if (section === 'PASIVO') {
+      const totalAssets = reportedSectionTotal(stmt, 'ACTIVO') ?? verticalBaseValue(stmt, 'ACTIVO', bases, concepts);
+      const equity = reportedSectionTotal(stmt, 'CAPITAL') ?? stmt.mappedData.equity ?? null;
+      reference = totalAssets !== null && equity !== null ? totalAssets - equity : null;
+    } else if (section === 'CAPITAL') {
+      reference = stmt.mappedData.equity || null;
+    } else {
+      // ACTIVO, Estado de Resultados, and any other single-total section.
+      reference = verticalBaseValue(stmt, section, bases, concepts);
+    }
   }
 
+  // When the source reported an explicit total for this section, it is
+  // authoritative — use it verbatim so the balance check ties reported-vs-
+  // reported and cuadra to the peso (a within-tolerance SUM still carries the
+  // source's own per-section rounding and would leave the balance a few pesos
+  // off). If the reported totals themselves don't cuadrar, the DIFERENCIA row
+  // surfaces that honestly rather than hiding it behind a re-summed figure.
+  if (reported !== null) {
+    return { value: reported, note: detailSum !== null ? reportedTotalNote(reported, numericSum) : undefined };
+  }
+
+  // No explicit reported total — the live =SUM(detail) is the best auditable
+  // figure (the normal case for flat management statements like ASTRO's).
   if (detailSum !== null) {
     return { value: detailSum, note: divergenceNote(reference, numericSum) };
   }
