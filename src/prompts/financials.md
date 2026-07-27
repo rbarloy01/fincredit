@@ -150,6 +150,17 @@ Aplica estas reglas a todos los valores antes de incluirlos:
 
 **Nunca conviertas porcentajes a decimales** — si la cuenta tiene % en el nombre, reporta el número tal como aparece.
 
+### Signos de cuentas contra (van NEGATIVAS)
+Estas cuentas RESTAN dentro de su sección; su `value` debe ser NEGATIVO aunque el documento las liste sin paréntesis (a veces solo traen un guión "-" a la izquierda):
+- Estimación / Reserva preventiva para riesgos crediticios (y cuentas incobrables)
+- Depreciación acumulada / Depreciaciones acumuladas
+- Amortización acumulada / Amortización de gastos de instalación
+- Resultados / Utilidades de ejercicios anteriores **cuando son pérdida acumulada**
+- Utilidad del ejercicio **cuando es pérdida** (¡puede ser negativa!)
+- "Intereses por devengar" / "no devengados" cuando la fuente los presenta como deducción
+
+Regla práctica de signo: elige el signo que haga que el subtotal de la sección CUADRE (ver PASO 9). Si con la cuenta en positivo el subtotal no cuadra pero en negativo sí, va negativa.
+
 ---
 
 ## PASO 7 — Multi-período
@@ -169,6 +180,27 @@ Si el documento tiene columnas comparativas (por ejemplo, "Mar 2025" y "Dic 2024
 4. **Incluye TODAS las líneas de Balance General y Estado de Resultados** con valor numérico, incluso las que parecen menores o repetitivas.
 5. **Omite todo lo demás**, aunque tenga números y parezca útil para análisis.
 6. **No generes categorías auxiliares** como flujo de efectivo, covenants, razones, indicadores o notas.
+7. **Lee la imagen dígito por dígito.** No aproximes ni "redondees mentalmente" cifras. Los errores más comunes al leer un escaneo son confundir 6↔8, 0↔9, 1↔7, transponer dígitos o perder/agregar uno. La verificación del PASO 9 existe para atrapar exactamente esos errores.
+8. **EBITDA / operación:** si el Estado de Resultados reporta "Utilidad de Operación" o "Resultado de Operación", extráela tal cual como una línea (role subtotal). NO la calcules como ingresos−costos−gastos; para IFNBs esa línea reportada ES el proxy de EBITDA.
+
+---
+
+## PASO 9 — AUTO-VERIFICACIÓN Y AUTO-CORRECCIÓN (obligatorio antes de responder)
+
+Antes de emitir el JSON, VERIFICA numéricamente cada período. Si algo NO cuadra, **no entregues todavía**: casi siempre es un dígito o un signo mal leído — regresa a la imagen, corrige, y vuelve a verificar. Itera hasta que todo cuadre al peso (tolerancia = el redondeo del propio documento).
+
+Verifica, por período:
+1. **Cada subtotal/total = suma exacta de sus hijos** (las líneas cuyo `parent` apunta a él). Ej.: `Total activo circulante` = suma de sus cuentas; `SUMA EL ACTIVO` = suma de los subtotales de grupo (circulante + fijo neto + diferido).
+2. **Identidad del balance:** `SUMA EL ACTIVO` = `SUMA EL PASIVO` + `TOTAL CAPITAL CONTABLE`.
+3. **Resultados:** `UTILIDAD DE OPERACIÓN` = `TOTAL DE INGRESOS` − `TOTAL GASTOS DE OPERACIÓN`; y `UTILIDAD NETA` coherente con la cascada.
+
+Si una suma no cuadra, en orden:
+1. **Re-lee en la imagen SOLO las líneas de esa sección**, dígito por dígito. Ajusta el dígito mal leído (6↔8, 0↔9, transposición, dígito de más/menos).
+2. **Revisa signos** de las cuentas contra (ver PASO 6): estimaciones, depreciación/amortización acumulada, pérdidas acumuladas, utilidad del ejercicio si es pérdida.
+3. Corrige y re-verifica. Repite hasta cuadrar.
+4. **Solo si tras re-leer la diferencia persiste y es real del documento** (el EFF de origen no cuadra consigo mismo), déjala y regístrala en `reconciliationNote` del período, indicando monto y sección. NO inventes ni ajustes líneas para forzar el cuadre.
+
+Este paso es lo más importante del prompt: un estado que no cuadra casi nunca es un error del documento, es un dígito que leíste mal.
 
 ---
 
@@ -182,6 +214,7 @@ Si el documento tiene columnas comparativas (por ejemplo, "Mar 2025" y "Dic 2024
     {
       "period": "etiqueta del período exacta (ej: 1T2025, Dic 2024, Mar 2025)",
       "periodDate": "fecha ISO para ordenamiento (ej: 2025-03-31)",
+      "reconciliationNote": "null, o texto SOLO si tras el PASO 9 quedó una diferencia real del documento (indica monto y sección)",
       "rawLineItems": [
         {
           "statementType": "balance_general|estado_resultados",
