@@ -30,6 +30,7 @@ import {
 } from './loanTapeWorkspace';
 import { parseFinancialNumber, parseNullableFinancialNumber } from './numberParsing';
 import { deliverDownloadToReservedTarget, type ReservedDownloadTarget } from './browserDownload';
+import { classifyBalanceSection, childrenTie, type BalanceLine } from './balanceHierarchy';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -1245,38 +1246,9 @@ function buildSegmentedAnalysisSheet(
     const key = `${item.statementType || 'otro'}||${item.name}`;
     if (!keys.has(key)) keys.set(key, { name: item.name, segment, sourceOrder: sourceOrder++ });
   }));
-  // Faithful mode: when the source EFF reports its own section totals (CNBV /
-  // audited statements), we CANNOT reliably re-sum a flat item list that mixes
-  // subtotals, net-of-contra lines and grand totals in inconsistent order — a
-  // synthesized SUM double-counts or drops figures. So we reproduce the balance
-  // exactly as the source presents it: original order, its own subtotal/total
-  // lines kept in place, and the section total taken from the source's own
-  // "TOTAL ACTIVO/PASIVO/CAPITAL" line (a literal, visible in any viewer). Flat
-  // management statements with no reported totals (e.g. ASTRO) keep the
-  // synthesized live-SUM behavior below.
-  const faithful = name === 'Balance General' && periods.some(p => reportedSectionTotal(p.stmt, 'ACTIVO') !== null);
-
   const rows: SheetDef['rows'] = [statementHeaders(periods)];
   const totalRows: Record<string, number> = {};
   segments.forEach(segment => {
-    if (faithful) {
-      const items = Array.from(keys.entries())
-        .filter(([, meta]) => meta.segment === segment)
-        .filter(([, meta]) => !isCombinedGrandTotalName(meta.name))
-        .sort((a, b) => a[1].sourceOrder - b[1].sourceOrder);
-      if (!items.length) return;
-      rows.push([segment]);
-      const firstItemRow = rows.length + 1;
-      const grandIdx = items.findIndex(([, meta]) => isSectionGrandTotalName(meta.name, segment));
-      const sectionTotalRow = grandIdx >= 0 ? firstItemRow + grandIdx : firstItemRow + items.length - 1;
-      // % vertical base: total assets (the reported ACTIVO total row once known,
-      // else this section's own total row).
-      const baseRow = totalRows.ACTIVO || sectionTotalRow;
-      items.forEach(([key, meta]) => addAnalysisRow(rows, meta.name, segment, key, periods, baseRow));
-      totalRows[segment] = sectionTotalRow;
-      return;
-    }
-
     const items = Array.from(keys.entries())
       .filter(([, meta]) => meta.segment === segment)
       .filter(([, meta]) => !isBalanceTotalAccount(meta.name, segment))
@@ -1519,6 +1491,135 @@ export function buildCovenantTraceability(
   };
 }
 
+function relBelowSection(sectionPath: string | null | undefined, section: string): string[] {
+  const segs = (sectionPath || '').split('>').map(s => s.trim()).filter(Boolean);
+  const idx = segs.findIndex(s => s.toUpperCase() === section.toUpperCase());
+  return idx >= 0 ? segs.slice(idx + 1) : [];
+}
+
+// Hierarchical Balance General: reproduces the source's structure and renders
+// every subtotal and the section grand total as a REAL =SUM() formula of its
+// children (recovered from the sectionPath tree or arithmetically for flat
+// statements — see balanceHierarchy.ts), with the vertical analysis dividing by
+// the final TOTAL ACTIVO cell. A cell becomes a formula only when its children
+// numerically tie to the source's own figure for that period; otherwise the
+// source literal is kept, so a formula never displays a wrong number.
+function buildHierarchicalBG(
+  statements: FinancialStatement_DB[],
+  segments: string[],
+  footerRows: SheetDef['rows'],
+): SheetDef {
+  const periods = normalizedPeriods(statements);
+
+  // Union of lines per segment, in source order, with their relative path.
+  const linesBySegment = new Map<string, BalanceLine[]>();
+  const seen = new Set<string>();
+  periods.forEach(p => p.stmt.rawLineItems.forEach(item => {
+    const segment = exportSegment(item);
+    if (!segments.includes(segment)) return;
+    if (isCombinedGrandTotalName(item.name)) return; // drop "TOTAL PASIVO Y CAPITAL"
+    const key = `${item.statementType || 'otro'}||${item.name}`;
+    const scoped = `${segment}::${key}`;
+    if (seen.has(scoped)) return;
+    seen.add(scoped);
+    if (!linesBySegment.has(segment)) linesBySegment.set(segment, []);
+    linesBySegment.get(segment)!.push({ key, name: item.name, rel: relBelowSection(item.sectionPath, segment) });
+  }));
+
+  // Pass 1 — assign a worksheet row number to every line (header is row 1).
+  const rowByKey = new Map<string, number>();
+  const grandRowBySegment: Record<string, number> = {};
+  type LayoutEntry = { kind: 'sub'; segment: string } | { kind: 'line'; segment: string; line: BalanceLine; row: number };
+  const layout: LayoutEntry[] = [];
+  let cursor = 2;
+  segments.forEach(segment => {
+    const lines = linesBySegment.get(segment) || [];
+    if (!lines.length) return;
+    layout.push({ kind: 'sub', segment });
+    cursor += 1;
+    lines.forEach(line => {
+      rowByKey.set(`${segment}::${line.key}`, cursor);
+      if (isSectionGrandTotalName(line.name, segment)) grandRowBySegment[segment] = cursor;
+      layout.push({ kind: 'line', segment, line, row: cursor });
+      cursor += 1;
+    });
+  });
+  const grandActivoRow = grandRowBySegment.ACTIVO || 0;
+
+  // Per segment × period classification. Crucially this runs over EACH PERIOD's
+  // OWN line list in its own source order (not the multi-period union) — the
+  // arithmetic subtotal detection depends on contiguous runs, which blank
+  // lines carried in from other periods would break. The returned child keys
+  // map back to the shared union rows via rowByKey (keys are identical).
+  const classification = new Map<string, ReturnType<typeof classifyBalanceSection>>();
+  periods.forEach((p, i) => {
+    const linesForPeriod = new Map<string, BalanceLine[]>();
+    const seenP = new Set<string>();
+    p.stmt.rawLineItems.forEach(item => {
+      const segment = exportSegment(item);
+      if (!segments.includes(segment)) return;
+      if (isCombinedGrandTotalName(item.name)) return;
+      const key = `${item.statementType || 'otro'}||${item.name}`;
+      const scoped = `${segment}::${key}`;
+      if (seenP.has(scoped)) return;
+      seenP.add(scoped);
+      if (!linesForPeriod.has(segment)) linesForPeriod.set(segment, []);
+      linesForPeriod.get(segment)!.push({ key, name: item.name, rel: relBelowSection(item.sectionPath, segment) });
+    });
+    segments.forEach(segment => {
+      classification.set(`${segment}#${i}`, classifyBalanceSection(segment, linesForPeriod.get(segment) || [], key => rawValueByKey(p.stmt, key)));
+    });
+  });
+
+  // Pass 2 — emit rows.
+  const rows: SheetDef['rows'] = [statementHeaders(periods)];
+  layout.forEach(entry => {
+    if (entry.kind === 'sub') { rows.push([entry.segment]); return; }
+    const { segment, line, row } = entry;
+    const rowArr: SheetDef['rows'][0] = [line.name, segment];
+    periods.forEach((p, i) => {
+      const cls = classification.get(`${segment}#${i}`)!;
+      const valueCol = valueColForAnalysisPeriod(i);
+      const col = colName(valueCol);
+      const own = rawValueByKey(p.stmt, line.key);
+      const children = cls.childrenByKey.get(line.key);
+      let cell: string | number | null = own;
+      if (children && children.length) {
+        const childVals = children.map(k => rawValueByKey(p.stmt, k));
+        if (childrenTie(childVals, own)) {
+          cell = `=SUM(${children.map(k => `${col}${rowByKey.get(`${segment}::${k}`) ?? row}`).join(',')})`;
+        }
+      }
+      rowArr.push(cell);
+      // Vertical % divides by THIS period's own TOTAL ACTIVO cell (statements
+      // whose structure drifts across periods report the grand total on
+      // different rows), falling back to the global ACTIVO total row.
+      const activoCls = classification.get(`ACTIVO#${i}`);
+      const periodGrandRow = (activoCls?.grandKey && rowByKey.get(`ACTIVO::${activoCls.grandKey}`)) || grandActivoRow;
+      const base = periodGrandRow > 0 ? `${col}$${periodGrandRow}` : `${col}${row}`;
+      rowArr.push(`=IFERROR(IF(${col}${row}="","",${col}${row}/${base}),"")`);
+    });
+    periods.slice(1).forEach((_, i) => {
+      const prevCol = colName(valueColForAnalysisPeriod(i));
+      const vCol = colName(valueColForAnalysisPeriod(i + 1));
+      rowArr.push(`=IFERROR(${vCol}${row}-${prevCol}${row},"")`);
+      rowArr.push(`=IFERROR((${vCol}${row}-${prevCol}${row})/ABS(${prevCol}${row}),"")`);
+    });
+    rows.push(rowArr);
+  });
+
+  const totalRows: Record<string, number> = {
+    ACTIVO: grandRowBySegment.ACTIVO,
+    PASIVO: grandRowBySegment.PASIVO,
+    CAPITAL: grandRowBySegment.CAPITAL,
+  };
+  addBalanceCheckRows(rows, periods, totalRows);
+  if (footerRows.length > 0) rows.push([], [], [], [], [], ...footerRows);
+
+  const nCols = rows[0].length;
+  return { name: 'Balance General', rows, colWidths: statementColWidths(periods.length), outlineColumns: statementOutlineColumns(nCols) };
+}
+
 // 2. Balance General — ordered monthly time-series
 export function buildBG(statements: FinancialStatement_DB[], bases: VerticalBaseConfig = {}, concepts: DefinedConcept[] = [], covenants: Covenant_DB[] = []): SheetDef {
   const periods = normalizedPeriods(statements);
@@ -1537,7 +1638,14 @@ export function buildBG(statements: FinancialStatement_DB[], bases: VerticalBase
         ]),
       ]
     : [];
-  return buildSegmentedAnalysisSheet(statements, 'Balance General', ['ACTIVO', 'PASIVO', 'CAPITAL', 'Balance General sin clasificar'], bases, concepts, footerRows);
+  const segments = ['ACTIVO', 'PASIVO', 'CAPITAL', 'Balance General sin clasificar'];
+  // When the source reports its own section totals, build a real hierarchy with
+  // =SUM subtotals/totals; otherwise fall back to the synthesized single-total
+  // sheet (flat management statements like ASTRO).
+  const hasSourceTotals = periods.some(p => reportedSectionTotal(p.stmt, 'ACTIVO') !== null);
+  return hasSourceTotals
+    ? buildHierarchicalBG(statements, segments, footerRows)
+    : buildSegmentedAnalysisSheet(statements, 'Balance General', segments, bases, concepts, footerRows);
 }
 
 // 3. Estado de Resultados — ordered monthly time-series
@@ -2112,8 +2220,12 @@ export function buildGraficas(statements: FinancialStatement_DB[]): SheetDef {
   const periods = normalizedPeriods(statements);
   if (!periods.length) return { name: 'Gráficas', rows: [['Sin periodos cargados']] };
   const labels = periods.map(p => p.label);
-  const latestRatios = standardRatios(periods.at(-1)!.stmt);
-  const byKey = new Map(latestRatios.map(r => [r.key, r]));
+  // Compute the full ratio set ONCE per period and reuse it for every chart.
+  // (Previously standardRatios(p.stmt) — an expensive fuzzy-match over every
+  // raw account — was recomputed for each indicator × period, i.e. dozens of
+  // times per period; the dominant cost of generating the workbook.)
+  const ratiosByPeriod = periods.map(p => standardRatios(p.stmt));
+  const byKey = new Map(ratiosByPeriod[ratiosByPeriod.length - 1].map(r => [r.key, r]));
   const rows: SheetDef['rows'] = [
     ['GRÁFICAS — RAZONES Y COVENANTS'],
     ['Tendencia de cada razón estándar a lo largo de los periodos cargados. Estas imágenes son una foto al generar el archivo — no se recalculan solas; vuelve a exportar tras cargar un nuevo periodo.'],
@@ -2128,7 +2240,7 @@ export function buildGraficas(statements: FinancialStatement_DB[]): SheetDef {
   INDICADOR_KEYS.forEach(key => {
     const meta = byKey.get(key);
     if (!meta) return;
-    const values = periods.map(p => standardRatios(p.stmt).find(r => r.key === key)?.value ?? null);
+    const values = ratiosByPeriod.map(rs => rs.find(r => r.key === key)?.value ?? null);
     if (!values.some(v => v !== null)) return;
     const isPercent = isPercentCovenant({ name: meta.label, formula: standardRatioFormula(key), description: meta.formula } as Covenant_DB);
     const base64 = renderTrendChartPng(meta.label, labels, values, isPercent);
