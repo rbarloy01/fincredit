@@ -66,7 +66,16 @@ export function forecastCovenant(cov: Covenant_DB, statements: FinancialStatemen
   const directionSign = cov.operator === 'gte' || cov.operator === 'gt' ? 1 : -1;
   const sigma = residualStd > 0 ? residualStd : Math.max(Math.abs(predictedNextValue) * 0.05, 0.001);
   const z = (directionSign * (predictedNextValue - threshold)) / sigma;
-  const breachProbability = Math.min(1, Math.max(0, 1 - normalCdf(z)));
+  const rawBreachProbability = Math.min(1, Math.max(0, 1 - normalCdf(z)));
+
+  // Shrink toward 50% when the history is short: a straight line through 3–4
+  // points can otherwise report a near-certain (or near-impossible) breach with
+  // false precision. The shrinkage factor grows from 0.625 at the 3-point
+  // minimum to 1.0 (no shrinkage) at 6+ points, so more history earns a more
+  // confident number.
+  const historyWeight = Math.min(1, Math.max(0, (points.length - MIN_HISTORY_POINTS + 1) / 4));
+  const shrinkage = 0.5 + 0.5 * historyWeight;
+  const breachProbability = 0.5 + (rawBreachProbability - 0.5) * shrinkage;
 
   const trend: CovenantTrend =
     directionSign * slope > 1e-6 ? 'mejorando' :

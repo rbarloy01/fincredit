@@ -21,7 +21,24 @@ export interface CreditRiskPrediction {
   score: number;
   features: CreditRiskFeatures;
   drivers: string[];
+  /** Fraction (0–1) of the 7 financial features actually present in the data.
+   * Missing features are scored as "neutral", so a low coverage means the PD
+   * is largely an assumption, not a read on this credit. */
+  dataCoverage: number;
+  confidence: 'baja' | 'media' | 'alta';
 }
+
+// Shown next to any output of this model. The weights are hand-set priors, NOT
+// fitted against a real default history, so the PD is a directional triage
+// signal — never a validated probability or a credit decision on its own.
+export const CREDIT_RISK_DISCLAIMER =
+  'Modelo heurístico: los pesos son a priori, NO calibrados contra incumplimientos reales. Úsalo como señal direccional para priorizar revisión, no como probabilidad de default validada ni decisión de crédito.';
+
+// The seven financial features (the covenant rates are always defined, so they
+// don't count toward "how much real financial data do we have").
+const FINANCIAL_FEATURE_KEYS: Array<keyof CreditRiskFeatures> = [
+  'dscr', 'debtEbitda', 'currentRatio', 'capitalization', 'pastDuePortfolio', 'revenueGrowth', 'ebitdaMargin',
+];
 
 export interface CreditRiskTrainingSample {
   features: CreditRiskFeatures;
@@ -168,6 +185,16 @@ export function scoreCreditRisk(
     probabilityOfDefault >= 0.15 ? 'medium' :
     'low';
 
+  const presentFinancialFeatures = FINANCIAL_FEATURE_KEYS.filter(key => {
+    const raw = features[key];
+    return raw !== null && Number.isFinite(raw as number);
+  }).length;
+  const dataCoverage = presentFinancialFeatures / FINANCIAL_FEATURE_KEYS.length;
+  const confidence: CreditRiskPrediction['confidence'] =
+    dataCoverage >= 0.85 ? 'alta' :
+    dataCoverage >= 0.55 ? 'media' :
+    'baja';
+
   const drivers = [
     features.covenantBreachRate > 0 ? `${Math.round(features.covenantBreachRate * 100)}% de los covenants evaluados están incumplidos` : '',
     features.dscr !== null && features.dscr < 1.25 ? `DSCR ajustado en ${features.dscr.toFixed(2)}x` : '',
@@ -182,6 +209,8 @@ export function scoreCreditRisk(
     score,
     features,
     drivers: drivers.length ? drivers : ['Ningún factor domina el resultado del modelo'],
+    dataCoverage,
+    confidence,
   };
 }
 

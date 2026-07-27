@@ -2,7 +2,7 @@ import React from 'react';
 import { Client, Covenant_DB, FinancialStatement_DB, LoanTape_DB, Transaction } from '../../db/index';
 import { AlertTriangle, ArrowDownRight, ArrowUpRight, Brain, CheckCircle, Circle, FileClock, Gauge, Landmark, Lock, Minus, ShieldCheck, FileSpreadsheet, Scale, TrendingUp } from 'lucide-react';
 import { evaluateCovenantAuto, evaluateCovenantForStatement, isPercentCovenant, resolveCovenantThreshold, standardRatios } from '../../lib/financialMetrics';
-import { predictCreditRisk } from '../../lib/creditRiskModel';
+import { predictCreditRisk, CREDIT_RISK_DISCLAIMER } from '../../lib/creditRiskModel';
 import { forecastCovenants } from '../../lib/covenantForecastModel';
 
 interface Props {
@@ -277,25 +277,43 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
           </p>
         ) : (
           <>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
-              <div className="rounded-xl bg-slate-50 p-4">
-                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Probabilidad de incumplimiento</p>
-                <p className="text-2xl font-black text-slate-900 mt-1">{pct(creditRisk.probabilityOfDefault)}</p>
-              </div>
-              <div className="rounded-xl bg-slate-50 p-4">
-                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Score</p>
-                <p className="text-2xl font-black text-slate-900 mt-1">{creditRisk.score}/1000</p>
-              </div>
-              <div className="rounded-xl bg-slate-50 p-4">
-                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Nivel de riesgo</p>
-                <p className="text-2xl font-black text-slate-900 mt-1">{riskBandLabel(creditRisk.riskBand)}</p>
-              </div>
+            <div className="mb-4 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <p className="text-[11px] font-bold text-amber-800 leading-snug">{CREDIT_RISK_DISCLAIMER}</p>
             </div>
-            <div className="space-y-2">
-              {creditRisk.drivers.map((driver, i) => (
-                <p key={i} className="text-sm font-bold text-slate-600 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">{driver}</p>
-              ))}
-            </div>
+            {creditRisk.dataCoverage < 0.5 ? (
+              <div className="rounded-xl bg-slate-50 border border-slate-100 px-4 py-5 text-center">
+                <p className="text-sm font-black text-slate-500">Datos insuficientes para estimar un riesgo confiable</p>
+                <p className="text-xs font-bold text-slate-400 mt-1">
+                  Solo {Math.round(creditRisk.dataCoverage * 100)}% de los indicadores financieros están disponibles. Carga más periodos / cuentas antes de leer el PD.
+                </p>
+              </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+                  <div className="rounded-xl bg-slate-50 p-4">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Probabilidad de incumplimiento</p>
+                    <p className="text-2xl font-black text-slate-900 mt-1">{pct(creditRisk.probabilityOfDefault)}</p>
+                    <p className="text-[10px] font-bold text-slate-400 mt-1">
+                      Confianza {creditRisk.confidence} · {Math.round(creditRisk.dataCoverage * 100)}% de datos
+                    </p>
+                  </div>
+                  <div className="rounded-xl bg-slate-50 p-4">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Score</p>
+                    <p className="text-2xl font-black text-slate-900 mt-1">{creditRisk.score}/1000</p>
+                  </div>
+                  <div className="rounded-xl bg-slate-50 p-4">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Nivel de riesgo</p>
+                    <p className="text-2xl font-black text-slate-900 mt-1">{riskBandLabel(creditRisk.riskBand)}</p>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  {creditRisk.drivers.map((driver, i) => (
+                    <p key={i} className="text-sm font-bold text-slate-600 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">{driver}</p>
+                  ))}
+                </div>
+              </>
+            )}
           </>
         )}
       </div>
