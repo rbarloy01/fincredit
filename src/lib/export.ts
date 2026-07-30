@@ -358,10 +358,13 @@ export async function exportToExcel(sheets: SheetDef[], filename: string, target
           numFmtOverrides[ci + 1] = fmt;
           if (note) noteOverrides[ci + 1] = note;
           if (typeof inner === 'string' && inner.startsWith('=')) return { formula: inner.slice(1), result: null } as any;
-          return inner ?? '';
+          // Empty numeric cells must be a TRUE blank (null), never '' — an empty
+          // string is a text cell, which shows up blank but breaks =A+B math and
+          // reads as "number stored as text" in a numeric column.
+          return inner ?? null;
         }
         if (typeof c === 'string' && c.startsWith('=')) return { formula: c.slice(1), result: null } as any;
-        return c ?? '';
+        return c ?? null;
       }));
       const wrappedLineCount = Math.max(1, ...(sheet.wrapColumns || []).map(col => {
         const value = String(raw[col - 1] ?? '');
