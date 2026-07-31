@@ -115,6 +115,23 @@ export const auth = {
     sessionStorage.removeItem(SESSION_KEY);
   },
 
+  // Self-service password change for the currently signed-in user. Supabase
+  // requires an active session and applies its own password policy; we add a
+  // minimum length so the UI fails fast before the round-trip.
+  async changePassword(newPassword: string): Promise<void> {
+    const pw = (newPassword || '').trim();
+    if (pw.length < 8) throw new Error('La contraseña debe tener al menos 8 caracteres.');
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) throw new Error('Tu sesión expiró. Vuelve a iniciar sesión para cambiar la contraseña.');
+    const { error } = await supabase.auth.updateUser({ password: pw });
+    if (error) {
+      if (/same.*password|should be different/i.test(error.message || '')) {
+        throw new Error('La contraseña nueva debe ser distinta a la actual.');
+      }
+      throw new Error(error.message || 'No se pudo cambiar la contraseña.');
+    }
+  },
+
   getSession(): Session | null {
     const raw = sessionStorage.getItem(SESSION_KEY);
     if (!raw) return null;

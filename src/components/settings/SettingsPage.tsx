@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { db, User, Role } from '../../db/index';
 import { Session, auth } from '../../services/auth';
 import { AIProvider, AISettings, loadAISettings, saveAISettings, testConnection } from '../../services/ai';
-import { Users, Save, Plus, Trash2, Eye, EyeOff, Check, X, Info, Zap, ShieldCheck, RefreshCw, AlertTriangle } from 'lucide-react';
+import { Users, Save, Plus, Trash2, Eye, EyeOff, Check, X, Info, Zap, ShieldCheck, RefreshCw, AlertTriangle, Lock } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 
 interface Props {
@@ -47,9 +47,39 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
   const [healthCheckedAt, setHealthCheckedAt] = useState<Date | null>(null);
   const [healthError, setHealthError] = useState('');
 
+  const [pwCurrent, setPwCurrent] = useState('');
+  const [pwNew, setPwNew] = useState('');
+  const [pwConfirm, setPwConfirm] = useState('');
+  const [pwSaving, setPwSaving] = useState(false);
+  const [pwMsg, setPwMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
   useEffect(() => {
     if (session.role === 'manager') db.getUsers().then(setUsers);
   }, [session.role]);
+
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPwMsg(null);
+    if (pwNew !== pwConfirm) { setPwMsg({ type: 'err', text: 'La confirmación no coincide.' }); return; }
+    if (pwNew.length < 8) { setPwMsg({ type: 'err', text: 'La contraseña debe tener al menos 8 caracteres.' }); return; }
+    setPwSaving(true);
+    try {
+      // Re-verify the current password so an unlocked session can't change it
+      // blindly. Uses the live Supabase email (independent of session prop shape).
+      const { data: { session: authSession } } = await supabase.auth.getSession();
+      const email = authSession?.user?.email;
+      if (!email) throw new Error('Tu sesión expiró. Vuelve a iniciar sesión.');
+      const { error: verifyError } = await supabase.auth.signInWithPassword({ email, password: pwCurrent });
+      if (verifyError) throw new Error('La contraseña actual es incorrecta.');
+      await auth.changePassword(pwNew);
+      setPwMsg({ type: 'ok', text: 'Contraseña actualizada correctamente.' });
+      setPwCurrent(''); setPwNew(''); setPwConfirm('');
+    } catch (err: any) {
+      setPwMsg({ type: 'err', text: err.message || 'No se pudo cambiar la contraseña.' });
+    } finally {
+      setPwSaving(false);
+    }
+  };
 
   const runHealthCheck = async () => {
     setHealthLoading(true);
@@ -208,6 +238,40 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
         <div className="mb-8">
           <h1 className="text-2xl font-black text-slate-900 tracking-tight">Configuración</h1>
           <p className="text-slate-500 text-sm mt-1">Administra preferencias del sistema</p>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
+          <div className="flex items-start gap-3 mb-5">
+            <div className="w-8 h-8 bg-indigo-100 rounded-lg flex items-center justify-center shrink-0">
+              <Lock className="w-4 h-4 text-indigo-700" />
+            </div>
+            <div>
+              <h2 className="text-sm font-black text-slate-900 uppercase tracking-widest">Cambiar contraseña</h2>
+              <p className="text-xs text-slate-500 mt-1">Actualiza la contraseña de tu cuenta. Mínimo 8 caracteres.</p>
+            </div>
+          </div>
+          <form onSubmit={handleChangePassword} className="space-y-4">
+            <div>
+              <label className={lbl}>Contraseña actual</label>
+              <input type="password" className={inp} value={pwCurrent} onChange={e => setPwCurrent(e.target.value)} autoComplete="current-password" required />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className={lbl}>Nueva contraseña</label>
+                <input type="password" className={inp} value={pwNew} onChange={e => setPwNew(e.target.value)} placeholder="Mínimo 8 caracteres" autoComplete="new-password" required />
+              </div>
+              <div>
+                <label className={lbl}>Confirmar nueva</label>
+                <input type="password" className={inp} value={pwConfirm} onChange={e => setPwConfirm(e.target.value)} autoComplete="new-password" required />
+              </div>
+            </div>
+            {pwMsg && (
+              <div className={`text-xs font-bold rounded-lg px-3 py-2 border ${pwMsg.type === 'ok' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-rose-50 text-rose-700 border-rose-200'}`}>{pwMsg.text}</div>
+            )}
+            <button type="submit" disabled={pwSaving} className="py-2.5 px-5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-black disabled:opacity-60">
+              {pwSaving ? 'Guardando...' : 'Actualizar contraseña'}
+            </button>
+          </form>
         </div>
 
         {session.role === 'manager' && (
