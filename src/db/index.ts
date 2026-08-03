@@ -13,9 +13,12 @@ export interface User {
   createdAt: string;
 }
 
+export type ClientStatus = 'activo' | 'dormant' | 'cerrado';
+
 export interface Client {
   id: string;
   orgId?: string;
+  status?: ClientStatus;
   name: string;
   taxId: string;
   industry: string;
@@ -394,7 +397,7 @@ function normalizePaymentHistory(value: any): Client['paymentHistory'] {
 
 function toClient(r: any): Client {
   return {
-    id: r.id, orgId: r.org_id || '', name: r.name, taxId: r.tax_id || '', industry: r.industry || '',
+    id: r.id, orgId: r.org_id || '', status: (r.status as ClientStatus) || 'activo', name: r.name, taxId: r.tax_id || '', industry: r.industry || '',
     score: r.score || '', currency: r.currency || 'MXN',
     totalCreditValue: normalizeFinancialWriteValue(r.total_credit_value), creditType: r.credit_type || [],
     contractName: r.contract_name || '', analystName: r.analyst_name || '',
@@ -412,6 +415,7 @@ function toClient(r: any): Client {
 function fromClient(c: Omit<Client, 'id' | 'createdAt'>): any {
   return {
     ...(c.orgId ? { org_id: c.orgId } : {}),
+    status: c.status || 'activo',
     name: c.name, tax_id: c.taxId, industry: c.industry, score: c.score,
     currency: c.currency, total_credit_value: normalizeFinancialWriteValue(c.totalCreditValue), credit_type: c.creditType,
     contract_name: c.contractName, analyst_name: c.analystName, created_by: c.createdBy || null,
@@ -1006,6 +1010,12 @@ export const db = {
         error = retry.error;
       }
     }
+    if (error && isMissingSchemaError(error, 'status')) {
+      delete payload.status;
+      const retry = await supabase.from('clients').insert(payload).select().single();
+      row = retry.data;
+      error = retry.error;
+    }
     if (error) err('createClient', error);
     return toClient(row);
   },
@@ -1047,7 +1057,14 @@ export const db = {
     if (updates.lastPeriod !== undefined) row.last_period = updates.lastPeriod;
     if (updates.logoLeft !== undefined) row.logo_left = updates.logoLeft;
     if (updates.logoRight !== undefined) row.logo_right = updates.logoRight;
-    const { error } = await supabase.from('clients').update(row).eq('id', id);
+    if (updates.status !== undefined) row.status = updates.status;
+    let { error } = await supabase.from('clients').update(row).eq('id', id);
+    if (error && isMissingSchemaError(error, 'status')) {
+      delete row.status;
+      if (Object.keys(row).length === 0) return;
+      const retry = await supabase.from('clients').update(row).eq('id', id);
+      error = retry.error;
+    }
     if (error) err('updateClient', error);
   },
 
@@ -1437,6 +1454,16 @@ export const db = {
     const { data, error } = await supabase.from('covenants').select('*').eq('client_id', clientId).order('created_at');
     if (error) err('getCovenants', error);
     return (data || []).map(toCovenant);
+  },
+
+  async getCovenantsForClients(clientIds: string[]): Promise<Record<string, Covenant_DB[]>> {
+    if (!clientIds.length) return {};
+    const { data, error } = await supabase.from('covenants').select('*').in('client_id', clientIds).order('created_at');
+    if (error) err('getCovenantsForClients', error);
+    return (data || []).map(toCovenant).reduce((acc, covenant) => {
+      (acc[covenant.clientId] ||= []).push(covenant);
+      return acc;
+    }, {} as Record<string, Covenant_DB[]>);
   },
 
   async getCovenantById(id: string): Promise<Covenant_DB | undefined> {

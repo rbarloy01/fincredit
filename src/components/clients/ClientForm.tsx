@@ -50,6 +50,7 @@ const ClientForm: React.FC<Props> = ({ session, aiSettings, initialData, onSave,
   const [analystName, setAnalystName] = useState(initialData?.analystName || '');
   const [score, setScore] = useState(initialData?.score || '');
   const [frequency, setFrequency] = useState<'mensual' | 'trimestral'>(initialData?.frequency || 'mensual');
+  const [status, setStatus] = useState<'activo' | 'dormant' | 'cerrado'>(initialData?.status || 'activo');
   const [customFields, setCustomFields] = useState<CustomField[]>([]);
   const [saving, setSaving] = useState(false);
   const [contractFile, setContractFile] = useState<{ file: File; base64?: string } | null>(null);
@@ -162,6 +163,7 @@ const ClientForm: React.FC<Props> = ({ session, aiSettings, initialData, onSave,
         analystName: analystName.trim(),
         score: score.trim(),
         frequency,
+        status,
         createdBy: session.userId,
         paymentHistory: initialData?.paymentHistory || [],
         currentDue: initialData?.currentDue || 0,
@@ -443,6 +445,32 @@ const ClientForm: React.FC<Props> = ({ session, aiSettings, initialData, onSave,
                   </button>
                 ))}
               </div>
+            </div>
+
+            {/* Status */}
+            <div>
+              <label className={labelClass}>Estatus del cliente</label>
+              <div className="flex gap-3">
+                {([
+                  { key: 'activo', label: 'Activo' },
+                  { key: 'dormant', label: 'Dormant' },
+                  { key: 'cerrado', label: 'Cerrado' },
+                ] as const).map(s => (
+                  <button
+                    key={s.key}
+                    type="button"
+                    onClick={() => setStatus(s.key)}
+                    className={`flex-1 py-3 rounded-xl text-sm font-bold border transition-all ${
+                      status === s.key
+                        ? 'bg-indigo-600 text-white border-indigo-600'
+                        : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-300'
+                    }`}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-slate-400 mt-1 font-semibold">Solo los clientes activos cuentan para las alertas del dashboard global.</p>
             </div>
 
           </div>

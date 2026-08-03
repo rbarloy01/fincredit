@@ -244,7 +244,9 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
     }
     const payload = {
       contents: [{ parts }],
-      generationConfig: { temperature: 0.0, maxOutputTokens: 16384, responseMimeType: 'application/json', thinkingConfig: { thinkingBudget: 0 } },
+      // gemini-flash-latest ahora apunta a un modelo de "pensamiento" que RECHAZA thinkingBudget:0
+      // (400 INVALID_ARGUMENT). 128 es el mínimo aceptado → mantiene el pensamiento al mínimo sin romper.
+      generationConfig: { temperature: 0.0, maxOutputTokens: 16384, responseMimeType: 'application/json', thinkingConfig: { thinkingBudget: 128 } },
     };
     const res = await fetchAIWithRetry('/api/gemini', { apiKey, model: GEMINI_MODEL, payload });
     const data = await readAIResponseJson(res, 'Gemini');

@@ -4,7 +4,7 @@ import LoginPage from './components/auth/LoginPage';
 import ClientList from './components/clients/ClientList';
 import { Client, CustomField, db, RolloutGuardFeature, RolloutGuardResult } from './db/index';
 import { AISettings, loadAISettings } from './services/ai';
-import { Activity, AlertTriangle, BarChart3, Building2, ClipboardList, Inbox, Layers3, Settings, LogOut, RefreshCw, ShieldAlert, ShieldCheck, Moon, Sun, Sparkles } from 'lucide-react';
+import { Activity, AlertTriangle, BarChart3, Building2, ClipboardList, Inbox, Layers3, LayoutDashboard, Settings, LogOut, RefreshCw, ShieldAlert, ShieldCheck, Moon, Sun, Sparkles } from 'lucide-react';
 import { isSupabaseConfigured, supabaseConfigError } from './lib/supabase';
 import { lazyWithChunkRetry, resetChunkRetryStateForCurrentBuild } from './lib/lazyWithChunkRetry';
 
@@ -16,9 +16,10 @@ const AccountConsolidationPage = lazyWithChunkRetry(() => import('./components/c
 const IngestionInboxPage = lazyWithChunkRetry(() => import('./components/ingestion/IngestionInboxPage'), 'ingestion');
 const LifecyclePage = lazyWithChunkRetry(() => import('./components/lifecycle/LifecyclePage'), 'lifecycle');
 const CrmDashboardPage = lazyWithChunkRetry(() => import('./components/crm/CrmDashboardPage'), 'crm-dashboard');
+const DashboardPage = lazyWithChunkRetry(() => import('./components/dashboard/DashboardPage'), 'dashboard');
 const CompanyDefaultPage = lazyWithChunkRetry(() => import('./components/zscore/CompanyDefaultPage'), 'zscore');
 
-type Route = 'clients' | 'client_new' | 'client_edit' | 'client_detail' | 'crm' | 'benchmarking' | 'consolidation' | 'lifecycle' | 'zscore' | 'ingestion' | 'settings';
+type Route = 'dashboard' | 'clients' | 'client_new' | 'client_edit' | 'client_detail' | 'crm' | 'benchmarking' | 'consolidation' | 'lifecycle' | 'zscore' | 'ingestion' | 'settings';
 
 resetChunkRetryStateForCurrentBuild();
 
@@ -180,7 +181,7 @@ class RouteErrorBoundary extends Component<
 
 const App: React.FC = () => {
   const [session, setSession] = useState<Session | null>(null);
-  const [route, setRoute] = useState<Route>('clients');
+  const [route, setRoute] = useState<Route>('dashboard');
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [editingClient, setEditingClient] = useState<Client | undefined>(undefined);
   const [aiSettings, setAiSettings] = useState<AISettings>(loadAISettings);
@@ -304,6 +305,7 @@ const App: React.FC = () => {
   }
 
   const navItems = [
+    { id: 'dashboard' as Route, label: 'Dashboard', icon: LayoutDashboard },
     { id: 'clients' as Route, label: 'Clientes', icon: Building2 },
     { id: 'crm' as Route, label: 'CRM', icon: ClipboardList },
     { id: 'benchmarking' as Route, label: 'Benchmarking', icon: BarChart3 },
@@ -422,6 +424,10 @@ const App: React.FC = () => {
         </div>
         <RouteErrorBoundary key={route} onReset={() => setRoute('clients')}>
         <Suspense fallback={<RouteFallback />}>
+          {route === 'dashboard' && (
+            <DashboardPage onSelectClient={handleSelectClient} />
+          )}
+
           {(route === 'clients') && (
             <ClientList
               session={session}
@@ -432,7 +438,7 @@ const App: React.FC = () => {
 
           {route === 'crm' && (
             <RolloutGuardedRoute feature="crm" title="CRM">
-              <CrmDashboardPage onSelectClient={handleSelectClient} />
+              <CrmDashboardPage onSelectClient={handleSelectClient} session={session} />
             </RolloutGuardedRoute>
           )}
 

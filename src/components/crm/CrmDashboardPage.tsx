@@ -1,10 +1,18 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Building2, CheckCircle2, ExternalLink, FileText, Search, TrendingUp } from 'lucide-react';
-import { Client, ContractFile, CrmActivity, db, FinancialStatement_DB, LoanTape_DB, Transaction } from '../../db/index';
+import { AlertTriangle, Building2, CheckCircle2, Columns3, ExternalLink, FileText, KanbanSquare, ListChecks, Search, Table2, TrendingUp } from 'lucide-react';
+import { Client, ContractFile, Covenant_DB, CrmActivity, db, FinancialStatement_DB, LoanTape_DB, Transaction } from '../../db/index';
+import { computeClientSignal, ClientSignal } from '../../lib/portfolioAnalytics';
+import { CRM_STAGES, CrmStage, collectOpenReminders, currentStage } from '../../lib/crmPipeline';
+import KanbanBoard from './KanbanBoard';
+import RemindersInbox from './RemindersInbox';
+import { Session } from '../../services/auth';
 
 interface Props {
   onSelectClient: (clientId: string) => void;
+  session: Session;
 }
+
+type CrmView = 'pipeline' | 'reminders' | 'table';
 
 function fmtCurrency(value: number, currency = 'MXN') {
   const prefix = currency === 'USD' ? 'USD ' : currency === 'EUR' ? 'EUR ' : '$';
@@ -100,17 +108,21 @@ function monitoringStatus(statements: FinancialStatement_DB[] = [], loanTapes: L
   return 'Pendiente';
 }
 
-const CrmDashboardPage: React.FC<Props> = ({ onSelectClient }) => {
+const CrmDashboardPage: React.FC<Props> = ({ onSelectClient, session }) => {
   const [clients, setClients] = useState<Client[]>([]);
   const [transactionsByClient, setTransactionsByClient] = useState<Record<string, Transaction[]>>({});
   const [activitiesByClient, setActivitiesByClient] = useState<Record<string, CrmActivity[]>>({});
   const [contractFilesByTransaction, setContractFilesByTransaction] = useState<Record<string, ContractFile[]>>({});
   const [statementsByClient, setStatementsByClient] = useState<Record<string, FinancialStatement_DB[]>>({});
   const [loanTapesByClient, setLoanTapesByClient] = useState<Record<string, LoanTape_DB[]>>({});
+  const [covenantsByClient, setCovenantsByClient] = useState<Record<string, Covenant_DB[]>>({});
   const [openingFileId, setOpeningFileId] = useState('');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [view, setView] = useState<CrmView>('pipeline');
+  const [movingId, setMovingId] = useState('');
+  const [completingId, setCompletingId] = useState('');
 
   useEffect(() => {
     let active = true;
@@ -120,11 +132,12 @@ const CrmDashboardPage: React.FC<Props> = ({ onSelectClient }) => {
       try {
         const nextClients = await db.getClients();
         const clientIds = nextClients.map(client => client.id);
-        const [nextTransactions, nextActivities, nextStatements, nextLoanTapes] = await Promise.all([
+        const [nextTransactions, nextActivities, nextStatements, nextLoanTapes, nextCovenants] = await Promise.all([
           db.getTransactionsForClients(clientIds),
           db.getCrmActivitiesForClients(clientIds),
           db.getStatementsForClients(clientIds),
           db.getLoanTapesForClients(clientIds),
+          db.getCovenantsForClients(clientIds),
         ]);
         const transactionIds = Object.values(nextTransactions).flat().map(tx => tx.id);
         const nextContractFiles = await db.getContractFilesForTransactions(transactionIds);
@@ -135,6 +148,7 @@ const CrmDashboardPage: React.FC<Props> = ({ onSelectClient }) => {
         setContractFilesByTransaction(nextContractFiles);
         setStatementsByClient(nextStatements);
         setLoanTapesByClient(nextLoanTapes);
+        setCovenantsByClient(nextCovenants);
       } catch (err: any) {
         if (active) setError(err.message || 'No se pudo cargar CRM.');
       } finally {
@@ -144,6 +158,86 @@ const CrmDashboardPage: React.FC<Props> = ({ onSelectClient }) => {
     void load();
     return () => { active = false; };
   }, []);
+
+  const now = useMemo(() => new Date(), []);
+
+  const signalsByClient = useMemo(() => {
+    const map: Record<string, ClientSignal> = {};
+    for (const client of clients) {
+      map[client.id] = computeClientSignal(
+        client,
+        statementsByClient[client.id] || [],
+        covenantsByClient[client.id] || [],
+        transactionsByClient[client.id] || [],
+        activitiesByClient[client.id] || [],
+        now, 90, { monthly: 40, quarterly: 75 },
+      );
+    }
+    return map;
+  }, [clients, statementsByClient, covenantsByClient, transactionsByClient, activitiesByClient, now]);
+
+  const clientsById = useMemo(
+    () => Object.fromEntries(clients.map(c => [c.id, c])) as Record<string, Client>,
+    [clients],
+  );
+
+  const reminderCount = useMemo(() => collectOpenReminders(activitiesByClient, now).length, [activitiesByClient, now]);
+
+  const reloadActivities = async (clientId: string) => {
+    const map = await db.getCrmActivitiesForClients([clientId]);
+    setActivitiesByClient(prev => ({ ...prev, [clientId]: map[clientId] || [] }));
+  };
+
+  const handleMoveStage = async (clientId: string, toStage: CrmStage) => {
+    setMovingId(clientId);
+    setError('');
+    const client = clientsById[clientId];
+    const from = currentStage(activitiesByClient[clientId] || []);
+    try {
+      await db.createCrmActivity({
+        clientId,
+        contactId: undefined,
+        type: 'review',
+        phase: toStage === 'Monitoring' ? 'Monitoring' : 'Underwriting',
+        recordType: 'Avance de etapa',
+        nextStage: toStage,
+        contactName: '',
+        analystName: client?.analystName || '',
+        subject: `Etapa: ${from} → ${toStage}`,
+        quickNote: '',
+        nextStep: '',
+        detail: '',
+        status: 'done',
+        priority: 'normal',
+        dueAt: undefined,
+        completedAt: new Date().toISOString(),
+        ownerId: undefined,
+        createdBy: session.userId,
+      });
+      await reloadActivities(clientId);
+    } catch (err: any) {
+      setError(err.message || 'No se pudo mover la etapa del cliente.');
+    } finally {
+      setMovingId('');
+    }
+  };
+
+  const handleCompleteActivity = async (activityId: string) => {
+    setCompletingId(activityId);
+    setError('');
+    let owningClient = '';
+    for (const [cid, acts] of Object.entries(activitiesByClient) as [string, CrmActivity[]][]) {
+      if (acts.some(a => a.id === activityId)) { owningClient = cid; break; }
+    }
+    try {
+      await db.updateCrmActivity(activityId, { status: 'done', completedAt: new Date().toISOString() });
+      if (owningClient) await reloadActivities(owningClient);
+    } catch (err: any) {
+      setError(err.message || 'No se pudo completar la actividad.');
+    } finally {
+      setCompletingId('');
+    }
+  };
 
   const rows = useMemo(() => {
     return clients.flatMap(client => {
@@ -281,12 +375,74 @@ const CrmDashboardPage: React.FC<Props> = ({ onSelectClient }) => {
         })}
       </div>
 
+      <div className="mb-5 flex flex-wrap items-center gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm w-fit">
+        {([
+          { key: 'pipeline', label: 'Pipeline', icon: KanbanSquare },
+          { key: 'reminders', label: 'Seguimientos', icon: ListChecks, badge: reminderCount },
+          { key: 'table', label: 'Tabla', icon: Table2 },
+        ] as const).map(tab => {
+          const Icon = tab.icon;
+          const active = view === tab.key;
+          return (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setView(tab.key)}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-black transition-colors ${active ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+            >
+              <Icon className="h-4 w-4" />
+              {tab.label}
+              {'badge' in tab && tab.badge ? (
+                <span className={`ml-0.5 rounded-md px-1.5 py-0.5 text-[10px] ${active ? 'bg-indigo-500 text-white' : 'bg-rose-100 text-rose-700'}`}>{tab.badge}</span>
+              ) : null}
+            </button>
+          );
+        })}
+      </div>
+
       {error && (
         <div className="mb-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-bold text-amber-800">
           {error}
         </div>
       )}
 
+      {view === 'pipeline' && (
+        <div className="crm-card overflow-hidden p-3">
+          <div className="mb-3 flex items-center justify-between px-1">
+            <p className="text-xs font-black uppercase tracking-widest text-slate-600">Pipeline por etapa</p>
+            <p className="text-xs font-bold text-slate-400">Arrastra un cliente para cambiar su etapa · badges = alertas de monitoreo</p>
+          </div>
+          {loading ? (
+            <p className="px-4 py-12 text-center text-sm font-bold text-slate-400">Cargando pipeline...</p>
+          ) : (
+            <KanbanBoard
+              clients={clients}
+              activitiesByClient={activitiesByClient}
+              signalsByClient={signalsByClient}
+              onSelectClient={onSelectClient}
+              onMoveStage={handleMoveStage}
+              movingId={movingId}
+            />
+          )}
+        </div>
+      )}
+
+      {view === 'reminders' && (
+        loading ? (
+          <p className="px-4 py-12 text-center text-sm font-bold text-slate-400">Cargando seguimientos...</p>
+        ) : (
+          <RemindersInbox
+            clientsById={clientsById}
+            activitiesByClient={activitiesByClient}
+            now={now}
+            onSelectClient={onSelectClient}
+            onComplete={handleCompleteActivity}
+            completingId={completingId}
+          />
+        )
+      )}
+
+      {view === 'table' && (
       <div className="crm-card overflow-hidden">
         <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-3">
           <p className="text-xs font-black uppercase tracking-widest text-slate-600">Pipeline de seguimiento</p>
@@ -368,6 +524,7 @@ const CrmDashboardPage: React.FC<Props> = ({ onSelectClient }) => {
           </table>
         </div>
       </div>
+      )}
     </div>
   );
 };

@@ -50,6 +50,36 @@ function fmtDate(value?: string) {
   return new Intl.DateTimeFormat('es-MX', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
 }
 
+function relativeTime(value?: string) {
+  if (!value) return '';
+  const t = new Date(value).getTime();
+  if (!Number.isFinite(t)) return '';
+  const diff = t - Date.now();
+  const abs = Math.abs(diff);
+  const day = 24 * 60 * 60 * 1000;
+  const rtf = new Intl.RelativeTimeFormat('es-MX', { numeric: 'auto' });
+  if (abs < 60 * 60 * 1000) return rtf.format(Math.round(diff / (60 * 1000)), 'minute');
+  if (abs < day) return rtf.format(Math.round(diff / (60 * 60 * 1000)), 'hour');
+  if (abs < 30 * day) return rtf.format(Math.round(diff / day), 'day');
+  if (abs < 365 * day) return rtf.format(Math.round(diff / (30 * day)), 'month');
+  return rtf.format(Math.round(diff / (365 * day)), 'year');
+}
+
+function timelineNodeStyle(item: CrmTimelineItem): { ring: string; icon: string } {
+  if (item.kind === 'contact') return { ring: 'border-blue-200 bg-blue-50 text-blue-600', icon: 'contact' };
+  if (item.status === 'done') return { ring: 'border-emerald-200 bg-emerald-50 text-emerald-600', icon: 'done' };
+  if (item.status === 'canceled') return { ring: 'border-slate-200 bg-slate-100 text-slate-400', icon: 'canceled' };
+  return { ring: 'border-indigo-200 bg-indigo-50 text-indigo-600', icon: 'planned' };
+}
+
+function timelineStatusChip(item: CrmTimelineItem): { label: string; cls: string } | null {
+  if (item.kind === 'contact') return null;
+  if (item.status === 'done') return { label: 'Completado', cls: 'bg-emerald-100 text-emerald-700' };
+  if (item.status === 'canceled') return { label: 'Cancelado', cls: 'bg-slate-100 text-slate-500' };
+  if (item.status === 'planned') return { label: 'Pendiente', cls: 'bg-indigo-100 text-indigo-700' };
+  return null;
+}
+
 function relationshipClass(value: CrmRelationship) {
   if (value === 'champion') return 'bg-emerald-100 text-emerald-800 border-emerald-200';
   if (value === 'risk') return 'bg-rose-100 text-rose-800 border-rose-200';
@@ -466,21 +496,39 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
           </div>
 
           <div className="crm-card p-5">
-            <h2 className="border-b border-slate-200 pb-3 text-sm font-black uppercase tracking-widest text-slate-900">Timeline</h2>
-            <div className="mt-5 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <h2 className="text-sm font-black uppercase tracking-widest text-slate-900">Timeline</h2>
+              {timeline.length > 0 && <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-black text-slate-500">{timeline.length}</span>}
+            </div>
+            <div className="relative mt-5">
               {timeline.length === 0 && <p className="py-8 text-center text-sm font-semibold text-slate-400">Aún no hay historia CRM para este cliente</p>}
-              {timeline.slice(0, 12).map(item => (
-                <div key={`${item.kind}-${item.id}-${item.at}`} className="flex gap-3">
-                  <div className="mt-1 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-blue-50 text-blue-600">
-                    {item.kind === 'contact' ? <UserRound className="h-4 w-4" /> : <Clock className="h-4 w-4" />}
-                  </div>
-                  <div className="min-w-0 flex-1 border-b border-slate-100 pb-4">
-                    <p className="text-sm font-black text-slate-900">{item.title}</p>
-                    <p className="mt-1 text-xs font-bold text-slate-400">{fmtDate(item.at)}</p>
-                    {item.detail && <p className="mt-2 text-sm leading-6 text-slate-600">{item.detail}</p>}
-                  </div>
-                </div>
-              ))}
+              {timeline.length > 0 && <span className="absolute left-4 top-2 bottom-2 w-px bg-slate-200" aria-hidden />}
+              <div className="space-y-5">
+                {timeline.slice(0, 20).map(item => {
+                  const nodeStyle = timelineNodeStyle(item);
+                  const chip = timelineStatusChip(item);
+                  return (
+                    <div key={`${item.kind}-${item.id}-${item.at}`} className="relative flex gap-3">
+                      <div className={`z-10 mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border-2 ${nodeStyle.ring}`}>
+                        {nodeStyle.icon === 'contact' ? <UserRound className="h-4 w-4" />
+                          : nodeStyle.icon === 'done' ? <CheckCircle2 className="h-4 w-4" />
+                          : nodeStyle.icon === 'canceled' ? <Trash2 className="h-4 w-4" />
+                          : <Clock className="h-4 w-4" />}
+                      </div>
+                      <div className="min-w-0 flex-1 pb-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-black text-slate-900">{item.title || 'Actividad'}</p>
+                          {chip && <span className={`rounded-md px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wider ${chip.cls}`}>{chip.label}</span>}
+                        </div>
+                        <p className="mt-0.5 text-xs font-bold text-slate-400" title={fmtDate(item.at)}>
+                          {relativeTime(item.at)} <span className="text-slate-300">·</span> {fmtDate(item.at)}
+                        </p>
+                        {item.detail && <p className="mt-1.5 text-sm leading-6 text-slate-600">{item.detail}</p>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </section>
