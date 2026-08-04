@@ -11,7 +11,6 @@ import {
   analyzeLoanTapesLocally,
   activeRows,
   sum,
-  quality,
   dpdDistribution,
   weightedAverage,
   groupBy,
@@ -85,6 +84,19 @@ export function periodLabel(iso: string | null): string {
 const norm = (v: any) => String(v ?? '').trim();
 const clientKey = (r: StandardLoan) => norm(r.client) || '(sin cliente)';
 
+// APEM / monitoreo convention: vigente = 0-30 DPD, atrasada = 31-90, vencida = >90.
+// (The generic skill uses vigente=0; the cockpit follows the client-monitoring cut so
+// figures reconcile with the operational cartera-vencida reports.)
+function classifyBalances(rows: StandardLoan[]) {
+  const bal = (pred: (r: StandardLoan) => boolean) => rows.filter(pred).reduce((a, r) => a + (r.outstanding_balance || 0), 0);
+  return {
+    vig: bal(r => r.days_overdue !== null && r.days_overdue <= 30),
+    atr: bal(r => r.days_overdue !== null && r.days_overdue > 30 && r.days_overdue <= 90),
+    ven: bal(r => r.days_overdue !== null && r.days_overdue > 90),
+    sinDato: bal(r => r.days_overdue === null),
+  };
+}
+
 function rowsStandardized(tape: LoanTape_DB): StandardLoan[] {
   const data: any = tape.extractedData;
   const fallback = parseDate(tape.uploadDate);
@@ -136,7 +148,7 @@ export function buildCockpitData(tapes: LoanTape_DB[]): CockpitData {
   const series: CockpitPeriodPoint[] = periods.map((p, i) => {
     const rows = byPeriod(p);
     const total = sum(rows);
-    const q = quality(rows) as Record<string, { count: number; balance: number; pct: number }>;
+    const cl = classifyBalances(rows);
     const dist = dpdDistribution(rows);
     const dpd = DPD_BUCKETS.map(b => dist.find(d => d.bucket === b)?.balance || 0);
     const dpdPct = dpd.map(v => (total ? v / total : 0));
@@ -148,8 +160,8 @@ export function buildCockpitData(tapes: LoanTape_DB[]): CockpitData {
       creditos: rows.length,
       clientes: new Set(rows.map(clientKey)).size,
       wa_rate: weightedAverage(rows, 'interest_rate'),
-      vig: q.vigente?.balance || 0, atr: q.atrasada?.balance || 0, ven: q.vencida?.balance || 0, sinDato: q.sin_dato?.balance || 0,
-      vigPct: q.vigente?.pct || 0, atrPct: q.atrasada?.pct || 0, venPct: q.vencida?.pct || 0,
+      vig: cl.vig, atr: cl.atr, ven: cl.ven, sinDato: cl.sinDato,
+      vigPct: total ? cl.vig / total : 0, atrPct: total ? cl.atr / total : 0, venPct: total ? cl.ven / total : 0,
       dpd, dpdPct,
       over180: dpd[5] || 0,
       hhi: hhiOf(rows),
@@ -208,6 +220,20 @@ export function buildCockpitData(tapes: LoanTape_DB[]): CockpitData {
   return { periods, labels, series, migration, clientTrends, watchlist, topClients, allRows: all };
 }
 
+// Portfolio quality for one period, using the cockpit's 0-30/31-90/>90 convention
+// (so the per-corte detail panel reconciles with the KPIs and the client's reports).
+export function periodQuality(data: CockpitData, period: string) {
+  const rows = activeRows(data.allRows).filter(r => r.file_date === period);
+  const total = sum(rows);
+  const c = classifyBalances(rows);
+  const cnt = (pred: (r: StandardLoan) => boolean) => rows.filter(pred).length;
+  return {
+    vigente: { count: cnt(r => r.days_overdue !== null && r.days_overdue <= 30), balance: c.vig, pct: total ? c.vig / total : 0 },
+    atrasada: { count: cnt(r => r.days_overdue !== null && r.days_overdue > 30 && r.days_overdue <= 90), balance: c.atr, pct: total ? c.atr / total : 0 },
+    vencida: { count: cnt(r => r.days_overdue !== null && r.days_overdue > 90), balance: c.ven, pct: total ? c.ven / total : 0 },
+  };
+}
+
 // Vintage / cosecha by origination cohort, on a given snapshot period (default latest).
 export function buildVintage(data: CockpitData, period?: string): CockpitVintage[] {
   const p = period || data.periods[data.periods.length - 1];
@@ -220,8 +246,7 @@ export function buildVintage(data: CockpitData, period?: string): CockpitVintage
   }
   return [...m.entries()].map(([cohort, items]) => {
     const total = sum(items);
-    const q = quality(items) as Record<string, { balance: number }>;
-    const vig = q.vigente?.balance || 0, atr = q.atrasada?.balance || 0, ven = q.vencida?.balance || 0;
+    const { vig, atr, ven } = classifyBalances(items);
     const dpds = items.map(i => i.days_overdue).filter((v): v is number => v !== null);
     return {
       cohort, creditos: items.length, saldo: total,

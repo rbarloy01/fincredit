@@ -7,7 +7,7 @@ import { FileSpreadsheet, LayoutDashboard } from 'lucide-react';
 import { LoanTape_DB } from '../../db/index';
 import {
   buildCockpitData, buildVintage, snapshotAnalysis, buildCockpitNarrative,
-  periodLabel, DPD_BUCKETS, type CockpitData,
+  periodLabel, periodQuality, DPD_BUCKETS, type CockpitData,
 } from '../../lib/loanTapeCockpit';
 import { loadExportModule } from '../../lib/exportLoader';
 import { reserveDownloadTarget } from '../../lib/browserDownload';
@@ -367,19 +367,19 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
       {/* Snapshot skill tables */}
       {compare ? (
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-          <SnapshotColumn label={periodLabel(cmpA)} snap={snapA} />
-          <SnapshotColumn label={periodLabel(cmpB)} snap={snapB} />
+          <SnapshotColumn label={periodLabel(cmpA)} snap={snapA} quality={cmpA ? periodQuality(data, cmpA) : null} />
+          <SnapshotColumn label={periodLabel(cmpB)} snap={snapB} quality={cmpB ? periodQuality(data, cmpB) : null} />
         </div>
       ) : (
-        <SnapshotColumn label={focusPoint.label} snap={snapFocus} />
+        <SnapshotColumn label={focusPoint.label} snap={snapFocus} quality={periodQuality(data, focusPoint.period)} />
       )}
     </div>
   );
 }
 
-function SnapshotColumn({ label, snap }: { label: string; snap: any }) {
+function SnapshotColumn({ label, snap, quality }: { label: string; snap: any; quality: any }) {
   if (!snap) return null;
-  const q = snap.portfolioQuality || {};
+  const q = quality || snap.portfolioQuality || {};
   const byClient = (snap.concentrations?.by_client || []).slice(0, 8);
   const byType = (snap.concentrations?.by_loan_type || []).slice(0, 6);
   const det = (snap.anomalies?.dpd_deterioration || []).slice(0, 8);
