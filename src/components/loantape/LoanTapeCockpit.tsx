@@ -199,7 +199,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
       </div>
 
       {/* Evolution */}
-      <ChartCard title="Evolución de saldo & cartera vencida (>90d)" subtitle="Barras = saldo · línea = % vencida" fileName={`Evolucion_${clientName}`} captureId="evo" registerNode={registerNode}>
+      <ChartCard title="Evolución de saldo & cartera vencida (>90d)" subtitle="Barras = saldo · línea = % vencida" fileName={`Evolucion_${clientName}`} captureId="evo" registerNode={registerNode} legend={[{ label: 'Saldo', color: C.indigo }, { label: 'Vencida %', color: C.red }]}>
         <div style={{ height: 260 }}>
           <ResponsiveContainer>
             <ComposedChart data={evoData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
@@ -217,7 +217,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         {/* Quality migration */}
-        <ChartCard title="Migración de calidad de cartera" subtitle="% del saldo por estatus, por corte" fileName={`Calidad_${clientName}`} captureId="calidad" registerNode={registerNode}>
+        <ChartCard title="Migración de calidad de cartera" subtitle="% del saldo por estatus, por corte" fileName={`Calidad_${clientName}`} captureId="calidad" registerNode={registerNode} legend={[{ label: 'Vigente', color: C.green }, { label: 'Atrasada', color: C.amber }, { label: 'Vencida', color: C.red }]}>
           <div style={{ height: 240 }}>
             <ResponsiveContainer>
               <BarChart data={qualData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }} stackOffset="expand">
@@ -272,7 +272,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
         </ChartCard>
 
         {/* HHI over time */}
-        <ChartCard title="HHI & Top-1 en el tiempo" subtitle="Índice Herfindahl (0-1) y concentración del cliente #1" fileName={`HHI_${clientName}`} captureId="hhi" registerNode={registerNode}>
+        <ChartCard title="HHI & Top-1 en el tiempo" subtitle="Índice Herfindahl (0-1) y concentración del cliente #1" fileName={`HHI_${clientName}`} captureId="hhi" registerNode={registerNode} legend={[{ label: 'HHI', color: C.indigo }, { label: 'Top-1 %', color: C.cyan }]}>
           <div style={{ height: 240 }}>
             <ResponsiveContainer>
               <ComposedChart data={hhiData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
@@ -290,7 +290,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
         </ChartCard>
 
         {/* Roll rate */}
-        <ChartCard title="Roll-rate — deterioro vs. cura" subtitle="Créditos que empeoran (↑) vs. que se curan (↓) por corte" fileName={`RollRate_${clientName}`} captureId="roll" registerNode={registerNode}>
+        <ChartCard title="Roll-rate — deterioro vs. cura" subtitle="Créditos que empeoran (↑) vs. que se curan (↓) por corte" fileName={`RollRate_${clientName}`} captureId="roll" registerNode={registerNode} legend={[{ label: 'Deteriorados', color: C.red }, { label: 'Curados', color: C.green }]}>
           <div style={{ height: 240 }}>
             <ResponsiveContainer>
               <BarChart data={rollData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }} stackOffset="sign">
@@ -307,7 +307,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
         </ChartCard>
 
         {/* Client trends */}
-        <ChartCard title="Tendencia de clientes principales" subtitle="Saldo (MXN M) por corte · top 5" fileName={`Clientes_${clientName}`} captureId="clientes" registerNode={registerNode}>
+        <ChartCard title="Tendencia de clientes principales" subtitle="Saldo (MXN M) por corte · top 5" fileName={`Clientes_${clientName}`} captureId="clientes" registerNode={registerNode} legend={data.topClients.map((c, i) => ({ label: c.length > 16 ? c.slice(0, 16) + '…' : c, color: CLIENT_COLORS[i % CLIENT_COLORS.length] }))}>
           <div style={{ height: 240 }}>
             <ResponsiveContainer>
               <LineChart data={cliData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
@@ -324,7 +324,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
       </div>
 
       {/* Vintage */}
-      <ChartCard title={`Cosecha por año de originación — ${focusPoint.label}`} subtitle="Saldo (MXN M) por cohorte, coloreado por calidad" fileName={`Cosecha_${clientName}`} captureId="cosecha" registerNode={registerNode}>
+      <ChartCard title={`Cosecha por año de originación — ${focusPoint.label}`} subtitle="Saldo (MXN M) por cohorte, coloreado por calidad" fileName={`Cosecha_${clientName}`} captureId="cosecha" registerNode={registerNode} legend={[{ label: 'Vigente', color: C.green }, { label: 'Atrasada', color: C.amber }, { label: 'Vencida', color: C.red }]}>
         <div style={{ height: 260 }}>
           <ResponsiveContainer>
             <BarChart data={vintData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>

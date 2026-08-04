@@ -232,10 +232,85 @@ export async function exportToPng(el: HTMLElement, filename: string, target?: Re
   downloadDataUrl(canvas.toDataURL('image/png'), `${filename}.png`, target);
 }
 
-// Capture a DOM node to a base64 PNG (no download) — used to embed live charts into Excel.
+// High-quality chart capture. Recharts renders a real <svg>; html2canvas re-lays-out
+// its ResponsiveContainer during cloning and collapses it to width/height -1 (empty
+// chart). So for any node containing an <svg> we serialize the already-rendered SVG
+// and rasterize it crisply, redrawing a title + legend (which recharts renders as
+// sibling HTML, outside the SVG) from data-* attributes. Non-SVG nodes (heatmaps,
+// tables) fall back to html2canvas with a finite image timeout.
+function svgCardToDataUrl(node: HTMLElement, svg: SVGSVGElement): Promise<string> {
+  const title = node.getAttribute('data-title') || '';
+  let legend: Array<{ label: string; color: string }> = [];
+  try { legend = JSON.parse(node.getAttribute('data-legend') || '[]'); } catch { /* ignore */ }
+  const rect = svg.getBoundingClientRect();
+  const w = Math.round(rect.width || Number(svg.getAttribute('width')) || 520);
+  const h = Math.round(rect.height || Number(svg.getAttribute('height')) || 300);
+  const clone = svg.cloneNode(true) as SVGSVGElement;
+  clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  clone.setAttribute('width', String(w));
+  clone.setAttribute('height', String(h));
+  const styleEl = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+  styleEl.textContent = 'text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif}';
+  clone.insertBefore(styleEl, clone.firstChild);
+  const xml = new XMLSerializer().serializeToString(clone);
+  const src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+
+  const scale = 2, padSide = 12, padTop = title ? 32 : 12, legendH = legend.length ? 24 : 8;
+  const cw = w + padSide * 2, ch = h + padTop + legendH + 6;
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = cw * scale; canvas.height = ch * scale;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) { reject(new Error('no 2d ctx')); return; }
+      ctx.scale(scale, scale);
+      ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, cw, ch);
+      if (title) {
+        ctx.fillStyle = '#334155';
+        ctx.font = '800 12px system-ui,-apple-system,sans-serif';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillText(title.toUpperCase(), padSide, 20);
+      }
+      ctx.drawImage(img, padSide, padTop, w, h);
+      if (legend.length) {
+        let lx = padSide; const ly = padTop + h + 14;
+        ctx.font = '600 11px system-ui,-apple-system,sans-serif'; ctx.textBaseline = 'middle';
+        for (const it of legend) {
+          ctx.fillStyle = it.color; ctx.fillRect(lx, ly - 5, 10, 10);
+          ctx.fillStyle = '#475569'; ctx.fillText(it.label, lx + 14, ly);
+          lx += 14 + ctx.measureText(it.label).width + 16;
+        }
+      }
+      resolve(canvas.toDataURL('image/png'));
+    };
+    img.onerror = () => reject(new Error('svg rasterization failed'));
+    img.src = src;
+  });
+}
+
+async function captureNodeDataUrl(node: HTMLElement): Promise<string> {
+  // Pick the LARGEST <svg> by rendered area — that's the recharts main plot. recharts
+  // also emits tiny 14x14 legend-icon svgs (also class "recharts-surface"), so we must
+  // compare areas rather than trust the class or DOM order, else we capture a thumbnail.
+  const svgs = Array.from(node.querySelectorAll('svg')) as SVGSVGElement[];
+  const surface = svgs.slice().sort((a, b) => {
+    const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+    return (rb.width * rb.height) - (ra.width * ra.height);
+  })[0];
+  if (surface && surface.getBoundingClientRect().width > 40) return svgCardToDataUrl(node, surface);
+  const canvas = await html2canvas(node, { ...canvasOpts(node), imageTimeout: 15000 });
+  return canvas.toDataURL('image/png');
+}
+
+// Base64 PNG (no download) — used to embed live charts into Excel.
 export async function captureNodePng(el: HTMLElement): Promise<string> {
-  const canvas = await html2canvas(el, canvasOpts(el));
-  return canvas.toDataURL('image/png').split(',')[1];
+  return (await captureNodeDataUrl(el)).split(',')[1];
+}
+
+// PNG download of a chart node (SVG-aware). Used by the ChartCard "PNG" button.
+export async function exportNodePng(el: HTMLElement, filename: string, target?: ReservedDownloadTarget): Promise<void> {
+  downloadDataUrl(await captureNodeDataUrl(el), `${filename}.png`, target);
 }
 
 async function renderPage(el: HTMLElement, pdf: jsPDF, addPage = false): Promise<void> {

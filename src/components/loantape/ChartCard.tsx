@@ -9,6 +9,7 @@ interface Props {
   fileName: string;
   captureId?: string;
   registerNode?: (id: string, node: HTMLElement | null) => void;
+  legend?: Array<{ label: string; color: string }>;
   right?: React.ReactNode;
   className?: string;
   children: React.ReactNode;
@@ -17,7 +18,7 @@ interface Props {
 // Card wrapper for a cockpit chart: title + subtitle, a "PNG" export button
 // (captures the titled chart region via the shared html2canvas exporter), and
 // optional registration of its DOM node so the parent can embed it into Excel.
-export default function ChartCard({ title, subtitle, fileName, captureId, registerNode, right, className, children }: Props) {
+export default function ChartCard({ title, subtitle, fileName, captureId, registerNode, legend, right, className, children }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
 
@@ -32,8 +33,8 @@ export default function ChartCard({ title, subtitle, fileName, captureId, regist
     setBusy(true);
     const target = reserveDownloadTarget();
     try {
-      const { exportToPng } = await loadExportModule();
-      await exportToPng(ref.current, fileName, target);
+      const { exportNodePng } = await loadExportModule();
+      await exportNodePng(ref.current, fileName, target);
     } catch (e: any) {
       alert(`No se pudo exportar la imagen: ${e?.message || e}`);
     } finally {
@@ -54,7 +55,7 @@ export default function ChartCard({ title, subtitle, fileName, captureId, regist
           <Download className="w-3.5 h-3.5" /> {busy ? '…' : 'PNG'}
         </button>
       </div>
-      <div ref={ref} className="bg-white">
+      <div ref={ref} className="bg-white" data-title={title} data-legend={legend ? JSON.stringify(legend) : undefined}>
         <p className="text-xs font-black text-slate-700 uppercase tracking-widest pr-16">{title}</p>
         {subtitle && <p className="text-xs text-slate-500 mt-0.5 pr-16">{subtitle}</p>}
         <div className="mt-3">{children}</div>

@@ -486,7 +486,7 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
           <h2 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-4">Acerca de</h2>
           <div className="space-y-2 text-sm text-slate-600">
             <div className="flex justify-between"><span className="font-semibold text-slate-700">Sistema</span><span>FinMonitor — Monitoreo de Crédito IFNB</span></div>
-            <div className="flex justify-between"><span className="font-semibold text-slate-700">Versión</span><span>1.1.0</span></div>
+            <div className="flex justify-between"><span className="font-semibold text-slate-700">Versión</span><span>1.2.0</span></div>
             <div className="flex justify-between"><span className="font-semibold text-slate-700">Motor IA activo</span><span className="capitalize">{currentProvider.label}</span></div>
             <div className="flex justify-between"><span className="font-semibold text-slate-700">Almacenamiento</span><span>Supabase PostgreSQL</span></div>
           </div>
