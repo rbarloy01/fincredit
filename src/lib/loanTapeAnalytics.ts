@@ -55,9 +55,9 @@ const SYNONYMS: Record<keyof StandardLoan, string[]> = {
   file_date: ['file date', 'fecha archivo', 'fecha corte', 'fecha reporte'],
 };
 
-const PAID_STATUSES = ['paid', 'fully paid', 'paid off', 'closed', 'canceled', 'cancelled', 'liquidated', 'liquidado', 'pagado'];
+export const PAID_STATUSES = ['paid', 'fully paid', 'paid off', 'closed', 'canceled', 'cancelled', 'liquidated', 'liquidado', 'pagado'];
 
-function normalize(value: any): string {
+export function normalize(value: any): string {
   return String(value ?? '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -67,7 +67,7 @@ function normalize(value: any): string {
     .trim();
 }
 
-function parseNumber(value: any): number | null {
+export function parseNumber(value: any): number | null {
   return parseNullableFinancialNumber(value);
 }
 
@@ -77,7 +77,7 @@ function excelSerialToDate(serial: number): string | null {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
-function parseDate(value: any): string | null {
+export function parseDate(value: any): string | null {
   if (value === null || value === undefined || value === '') return null;
   if (typeof value === 'number') return excelSerialToDate(value);
   const raw = String(value).trim();
@@ -165,17 +165,17 @@ export function standardizeLoanTape(rows: any[], fileName?: string) {
   return { standardized, mappingReport: notes };
 }
 
-function activeRows(rows: StandardLoan[]) {
+export function activeRows(rows: StandardLoan[]) {
   return rows.filter(r => !PAID_STATUSES.includes(normalize(r.loan_status)));
 }
 
-function latestRows(rows: StandardLoan[]) {
+export function latestRows(rows: StandardLoan[]) {
   const dates = Array.from(new Set(rows.map(r => r.file_date).filter(Boolean) as string[])).sort();
   const latest = dates[dates.length - 1] || null;
   return { latest, rows: latest ? rows.filter(r => r.file_date === latest) : rows };
 }
 
-function latestAndPreviousRows(rows: StandardLoan[]) {
+export function latestAndPreviousRows(rows: StandardLoan[]) {
   const dates = Array.from(new Set(rows.map(r => r.file_date).filter(Boolean) as string[])).sort();
   const latest = dates[dates.length - 1] || null;
   const previous = dates[dates.length - 2] || null;
@@ -188,11 +188,11 @@ function latestAndPreviousRows(rows: StandardLoan[]) {
   };
 }
 
-function sum(rows: StandardLoan[]) {
+export function sum(rows: StandardLoan[]) {
   return rows.reduce((acc, r) => acc + (r.outstanding_balance || 0), 0);
 }
 
-function pct(value: number, total: number) {
+export function pct(value: number, total: number) {
   return total > 0 ? value / total : 0;
 }
 
@@ -219,7 +219,7 @@ function fmtChange(current: number, previous: number, kind: 'money' | 'pct' | 'n
   return `${delta >= 0 ? '+' : ''}${delta.toFixed(0)}`;
 }
 
-function quality(rows: StandardLoan[]) {
+export function quality(rows: StandardLoan[]) {
   const total = sum(rows);
   const groups = {
     vigente: rows.filter(r => r.days_overdue !== null && r.days_overdue === 0),
@@ -233,7 +233,7 @@ function quality(rows: StandardLoan[]) {
   }));
 }
 
-function dpdDistribution(rows: StandardLoan[]) {
+export function dpdDistribution(rows: StandardLoan[]) {
   const total = sum(rows);
   const buckets = [
     { bucket: '0 dias', min: 0, max: 0 },
@@ -256,7 +256,7 @@ function dpdDistribution(rows: StandardLoan[]) {
   return distribution;
 }
 
-function groupBy(rows: StandardLoan[], field: keyof StandardLoan, limit = 10) {
+export function groupBy(rows: StandardLoan[], field: keyof StandardLoan, limit = 10) {
   const total = sum(rows);
   const map = new Map<string, StandardLoan[]>();
   for (const row of rows) {
@@ -279,14 +279,14 @@ function groupBy(rows: StandardLoan[], field: keyof StandardLoan, limit = 10) {
     .slice(0, limit);
 }
 
-function weightedAverage(rows: StandardLoan[], field: 'days_overdue' | 'interest_rate') {
+export function weightedAverage(rows: StandardLoan[], field: 'days_overdue' | 'interest_rate') {
   const usable = rows.filter(row => row[field] !== null && Number.isFinite(row[field]) && (row.outstanding_balance || 0) > 0);
   const weight = sum(usable);
   if (!weight) return null;
   return usable.reduce((total, row) => total + Number(row[field]) * (row.outstanding_balance || 0), 0) / weight;
 }
 
-function topShare(rows: StandardLoan[], count: number) {
+export function topShare(rows: StandardLoan[], count: number) {
   const total = sum(rows);
   const largest = [...rows]
     .sort((a, b) => (b.outstanding_balance || 0) - (a.outstanding_balance || 0))
@@ -294,7 +294,7 @@ function topShare(rows: StandardLoan[], count: number) {
   return pct(sum(largest), total);
 }
 
-function loanTypeProfile(rows: StandardLoan[]) {
+export function loanTypeProfile(rows: StandardLoan[]) {
   const total = sum(rows);
   const map = new Map<string, StandardLoan[]>();
   for (const row of rows) {
@@ -329,7 +329,7 @@ function loanTypeProfile(rows: StandardLoan[]) {
   }).sort((a, b) => b.balance - a.balance);
 }
 
-function buckets(rows: StandardLoan[], field: 'amount' | 'outstanding_balance') {
+export function buckets(rows: StandardLoan[], field: 'amount' | 'outstanding_balance') {
   const values = rows.map(r => r[field]).filter((v): v is number => v !== null && Number.isFinite(v));
   if (!values.length) return [];
   const min = Math.min(...values);
@@ -524,7 +524,7 @@ export function answerLoanTapeQuestion(question: string, rows: StandardLoan[], a
   return analysis?.executiveSummary || `Resumen: ${latest.length} registros activos, saldo ${fmtMoney(total)}. Preguntas útiles: "qué falta", "top concentración", "mora", "cambios vs mes anterior", "por producto".`;
 }
 
-function anomalies(rows: StandardLoan[]) {
+export function anomalies(rows: StandardLoan[]) {
   const dates = Array.from(new Set(rows.map(r => r.file_date).filter(Boolean) as string[])).sort();
   if (dates.length < 2) return {};
   const previousDate = dates[dates.length - 2];

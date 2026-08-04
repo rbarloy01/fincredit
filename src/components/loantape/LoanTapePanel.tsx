@@ -18,6 +18,7 @@ import {
 import WorkingOverlay from '../common/WorkingOverlay';
 import { lazyWithChunkRetry } from '../../lib/lazyWithChunkRetry';
 import { loadExportModule } from '../../lib/exportLoader';
+import LoanTapeCockpit from './LoanTapeCockpit';
 
 const WorkspaceBlock = lazyWithChunkRetry(() => import('./LoanTapeWorkspaceBlock'), 'loan-tape-workspace-block');
 
@@ -122,6 +123,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
   const [analyzing, setAnalyzing] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [exporting, setExporting] = useState<'excel' | 'pdf' | null>(null);
+  const [view, setView] = useState<'archivos' | 'dashboard'>('archivos');
   const [analystStates, setAnalystStates] = useState<Record<string, LoanTapeAnalystState>>({});
   const analystStatesRef = useRef<Record<string, LoanTapeAnalystState>>({});
   const analystSaveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
@@ -373,7 +375,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
           <p className="text-slate-500 text-sm mt-0.5">{tapes.length} archivo{tapes.length !== 1 ? 's' : ''} cargado{tapes.length !== 1 ? 's' : ''}</p>
         </div>
         <div className="flex items-center gap-2">
-          {tapes.length > 0 && (
+          {tapes.length > 0 && view === 'archivos' && (
             <>
               <button onClick={() => handleExport('excel')} disabled={!!exporting} className="flex items-center gap-1.5 bg-white border border-slate-200 text-slate-600 font-bold px-3 py-2 rounded-xl text-xs hover:bg-slate-50 disabled:opacity-50 transition-all">
                 {exporting === 'excel' ? <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg> : <FileSpreadsheet className="w-3.5 h-3.5" />}
@@ -401,6 +403,18 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
         </div>
       </div>
 
+      {tapes.length > 0 && (
+        <div className="flex items-center gap-1 rounded-xl border border-slate-200 bg-white p-1 w-fit">
+          {([['archivos', 'Archivos'], ['dashboard', 'Dashboard']] as const).map(([k, lbl]) => (
+            <button key={k} onClick={() => setView(k)} className={`px-4 py-1.5 text-xs font-black rounded-lg transition-colors ${view === k ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-100'}`}>{lbl}</button>
+          ))}
+        </div>
+      )}
+
+      {view === 'dashboard' && tapes.length > 0 && (
+        <LoanTapeCockpit tapes={tapes} clientName={clientName} />
+      )}
+
       {tapes.length === 0 && (
         <div className="bg-white border border-slate-200 rounded-2xl p-12 text-center">
           <BarChart3 className="w-10 h-10 text-slate-300 mx-auto mb-3" />
@@ -409,6 +423,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
         </div>
       )}
 
+      {view === 'archivos' && (
       <div className="space-y-4">
         {tapes.map(tape => {
           const isExpanded = expanded === tape.id;
@@ -982,6 +997,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
           );
         })}
       </div>
+      )}
     </div>
   );
 };

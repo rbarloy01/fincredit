@@ -232,6 +232,12 @@ export async function exportToPng(el: HTMLElement, filename: string, target?: Re
   downloadDataUrl(canvas.toDataURL('image/png'), `${filename}.png`, target);
 }
 
+// Capture a DOM node to a base64 PNG (no download) — used to embed live charts into Excel.
+export async function captureNodePng(el: HTMLElement): Promise<string> {
+  const canvas = await html2canvas(el, canvasOpts(el));
+  return canvas.toDataURL('image/png').split(',')[1];
+}
+
 async function renderPage(el: HTMLElement, pdf: jsPDF, addPage = false): Promise<void> {
   const PW = 210, PH = 297;
   const canvas = await html2canvas(el, canvasOpts(el));
@@ -3140,6 +3146,104 @@ export async function exportLoanTape(
       pages.forEach(page => page.remove());
     }
   }
+}
+
+interface CockpitExportPayload {
+  data: { periods: string[]; labels: string[]; series: any[]; migration: any[]; watchlist: any[]; allRows: any[] };
+  vintage: any[];
+  narrative: string[];
+  snapshot: any;
+  focusPeriod: string;
+  focusLabel: string;
+}
+
+const COCKPIT_IMG_TITLES: Record<string, string> = {
+  evo: 'Evolución de saldo & cartera vencida', calidad: 'Migración de calidad de cartera',
+  dpd: 'Mapa de calor DPD', conc: 'Concentración acumulada (foco)', hhi: 'HHI & Top-1 en el tiempo',
+  roll: 'Roll-rate — deterioro vs. cura', clientes: 'Tendencia de clientes principales',
+  cosecha: 'Cosecha por año de originación', watchlist: 'Watchlist de vencidos crónicos',
+};
+const COCKPIT_IMG_ORDER = ['evo', 'calidad', 'dpd', 'conc', 'hhi', 'roll', 'clientes', 'cosecha', 'watchlist'];
+const pctNum = (v: number) => Math.round((v || 0) * 1000) / 10; // fraction -> percent, 1 decimal
+
+export function buildLoanTapeCockpitSheets(
+  tapes: LoanTape_DB[], selectedPeriods: string[], payload: CockpitExportPayload, images: Array<{ id: string; base64: string }> = [],
+): SheetDef[] {
+  const { data, vintage, narrative, snapshot, focusLabel } = payload;
+  const selSet = new Set(selectedPeriods);
+  const sel = data.series.filter((s: any) => selSet.has(s.period));
+
+  const resumen: SheetDef['rows'] = [
+    ['ANÁLISIS CONSOLIDADO DE LOAN TAPE'], [],
+    ['Corte foco', focusLabel], ['Cortes seleccionados', selectedPeriods.length, 'de', data.periods.length], [],
+    ['LECTURA CUANTITATIVA (descriptiva)'],
+    ...narrative.map(line => [line]),
+  ];
+
+  const serieRows = [['Período', 'Saldo', 'Créditos', 'Clientes', 'Tasa pond. %', 'Vigente %', 'Atrasada %', 'Vencida %', 'HHI', 'Top-1 %', 'Top-3 %', 'Top-10 %', '>180 saldo', 'Runoff %'],
+    ...sel.map((s: any) => [s.label, Math.round(s.saldo), s.creditos, s.clientes, s.wa_rate != null ? pctNum(s.wa_rate) : null, pctNum(s.vigPct), pctNum(s.atrPct), pctNum(s.venPct), Math.round(s.hhi * 1000) / 1000, pctNum(s.top1), pctNum(s.top3), pctNum(s.top10), Math.round(s.over180), s.runoff != null ? pctNum(s.runoff) : null])];
+
+  const migRows = [['Período', 'Altas #', 'Altas $', 'Bajas #', 'Bajas $', 'Deteriorados', 'Curados', 'Empeoraron'],
+    ...data.migration.filter((m: any) => selSet.has(m.period)).map((m: any) => [m.label, m.new_n, Math.round(m.new_bal), m.gone_n, Math.round(m.gone_bal), m.deteriorated, m.cured, m.worsened])];
+
+  const vintRows = [['Cohorte (año orig.)', 'Créditos', 'Saldo', 'Vigente %', 'Atrasada %', 'Vencida %', 'DPD prom.'],
+    ...vintage.map((v: any) => [v.cohort, v.creditos, Math.round(v.saldo), pctNum(v.vigPct), pctNum(v.atrPct), pctNum(v.venPct), v.avgDpd != null ? Math.round(v.avgDpd) : null])];
+
+  const watchRows = [['Crédito', 'Cliente', 'Cortes vencido', 'Máx DPD', 'Saldo actual'],
+    ...data.watchlist.map((w: any) => [w.loan_id, w.client, w.monthsOverdue, w.maxDpd, Math.round(w.saldoActual)])];
+
+  const conc = snapshot?.concentrations || {};
+  const anom = snapshot?.anomalies || {};
+  const q = snapshot?.portfolioQuality || {};
+  const concSheetRows: SheetDef['rows'] = [
+    [`CONCENTRACIÓN — ${focusLabel}`], [],
+    ...rowsFromObjects('Por cliente (Top 20)', conc.by_client, ['name', 'count', 'balance', 'pct']), [],
+    ...rowsFromObjects('Por producto', conc.by_loan_type, ['name', 'count', 'balance', 'pct', 'avg_interest_rate', 'avg_days_overdue']), [],
+    ...rowsFromObjects('Por estado', conc.by_state, ['name', 'count', 'balance', 'pct']),
+  ];
+  const anomSheetRows: SheetDef['rows'] = [
+    [`ANOMALÍAS — ${focusLabel} (vs. corte previo)`], [],
+    ...rowsFromObjects('Créditos nuevos', anom.new_loans, ['loan_id', 'outstanding_balance', 'start_date', 'category', 'percentage']), [],
+    ...rowsFromObjects('Deterioro DPD', anom.dpd_deterioration, ['loan_id', 'days_overdue_prev', 'days_overdue_latest', 'outstanding_balance']), [],
+    ...rowsFromObjects('Créditos que desaparecen', anom.disappeared_loans, ['loan_id', 'outstanding_balance', 'end_date', 'category', 'days_overdue_prev']),
+  ];
+  const qualityRows: SheetDef['rows'] = [
+    [`CALIDAD Y DPD — ${focusLabel}`], [],
+    ['Clasificación', 'Créditos', 'Saldo', '%'],
+    ...['vigente', 'atrasada', 'vencida', 'sin_dato'].filter(k => q[k]).map(k => [k, q[k].count, Math.round(q[k].balance), pctNum(q[k].pct)]), [],
+    ...rowsFromObjects('Distribución DPD', snapshot?.dpd_distribution, ['bucket', 'count', 'balance', 'pct']),
+  ];
+
+  const standardizedSel = data.allRows.filter((r: any) => !r.file_date || selSet.has(r.file_date));
+
+  const graficas: SheetDef = { name: 'Gráficas', rows: [['GRÁFICAS DEL DASHBOARD'], []], images: [] };
+  const byId = new Map(images.map(im => [im.id, im.base64]));
+  for (const id of COCKPIT_IMG_ORDER) {
+    const b64 = byId.get(id);
+    if (!b64) continue;
+    graficas.rows.push([COCKPIT_IMG_TITLES[id] || id]);
+    graficas.images!.push({ base64: b64, col: 0, row: graficas.rows.length, width: 640, height: 340 });
+    for (let k = 0; k < 19; k++) graficas.rows.push([]); // reserve vertical space
+  }
+
+  return [
+    { name: 'Resumen', rows: resumen, colWidths: [120], wrapColumns: [0] },
+    { name: 'Serie mensual', rows: serieRows, colWidths: [12, 16, 10, 10, 12, 11, 12, 11, 8, 10, 10, 11, 16, 11] },
+    { name: 'Migración DPD', rows: migRows, colWidths: [12, 10, 16, 10, 16, 13, 10, 12] },
+    { name: 'Cosecha', rows: vintRows, colWidths: [18, 10, 16, 11, 12, 11, 11] },
+    { name: 'Watchlist', rows: watchRows, colWidths: [16, 40, 14, 10, 16] },
+    { name: 'Concentracion', rows: concSheetRows, colWidths: [40, 10, 16, 10, 14, 12] },
+    { name: 'Anomalias', rows: anomSheetRows, colWidths: [18, 16, 16, 16, 12] },
+    { name: 'Calidad y DPD', rows: qualityRows, colWidths: [18, 12, 16, 10] },
+    { name: 'LT Estandarizada', rows: rowsFromObjects('LOAN TAPE ESTANDARIZADA (períodos seleccionados)', standardizedSel, ['file_date', 'loan_id', 'client', 'amount', 'outstanding_balance', 'interest_rate', 'loan_status', 'start_date', 'end_date', 'loan_type', 'days_overdue', 'currency', 'industry', 'state']), colWidths: [12, 18, 28, 16, 18, 12, 14, 14, 14, 20, 12, 10, 18, 18] },
+    graficas,
+  ];
+}
+
+export async function exportLoanTapeCockpit(
+  tapes: LoanTape_DB[], clientName: string, selectedPeriods: string[], payload: CockpitExportPayload, images: Array<{ id: string; base64: string }> = [], target?: ReservedDownloadTarget,
+): Promise<void> {
+  await exportToExcel(buildLoanTapeCockpitSheets(tapes, selectedPeriods, payload, images), `Cockpit_${clientName}`, target);
 }
 
 export async function exportCovenantsFinancieros(
