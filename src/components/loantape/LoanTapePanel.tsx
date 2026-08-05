@@ -252,7 +252,9 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
       name: file.name.replace(/\.[^.]+$/, ''),
       fileName: file.name,
       tapeType,
-      extractedData: { rows: result.standardized, _standardized: result.standardized, _mappingReport: result.mappingReport, _import: rec },
+      // Store _standardized as the single source of truth; `rows` (raw preview) falls
+      // back to it at read time — no duplicated payload.
+      extractedData: { _standardized: result.standardized, _mappingReport: result.mappingReport, _import: rec },
     });
   };
 
@@ -278,7 +280,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
   const handleAnalyze = async (tape: LoanTape_DB) => {
     setAnalyzing(tape.id);
     try {
-      const rows: any[] = Array.isArray(tape.extractedData) ? tape.extractedData : (tape.extractedData?.rows || []);
+      const rows: any[] = Array.isArray(tape.extractedData) ? tape.extractedData : (tape.extractedData?.rows || tape.extractedData?._standardized || []);
       const standardized = tape.extractedData?._standardized || standardizeLoanTape(rows, tape.fileName).standardized;
       const baseData = Array.isArray(tape.extractedData)
         ? { rows: tape.extractedData, _standardized: standardized }
@@ -442,7 +444,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
         {tapes.map(tape => {
           const isExpanded = expanded === tape.id;
           const data = tape.extractedData;
-          const rows: any[] = Array.isArray(data) ? data : (data?.rows || []);
+          const rows: any[] = Array.isArray(data) ? data : (data?.rows || data?._standardized || []);
           const mappingRows: any[] = Array.isArray(data?._mappingReport) ? data._mappingReport : [];
           const standardizedRows: any[] = Array.isArray(data?._standardized) ? data._standardized : [];
           const analysis: StructuredLoanTapeAnalysis | null = data?._analysis || null;
