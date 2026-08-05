@@ -19,6 +19,7 @@ import WorkingOverlay from '../common/WorkingOverlay';
 import { lazyWithChunkRetry } from '../../lib/lazyWithChunkRetry';
 import { loadExportModule } from '../../lib/exportLoader';
 import LoanTapeCockpit from './LoanTapeCockpit';
+import { importLoanTapeSheets } from '../../lib/loanTapeImport';
 
 const WorkspaceBlock = lazyWithChunkRetry(() => import('./LoanTapeWorkspaceBlock'), 'loan-tape-workspace-block');
 
@@ -215,20 +216,33 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
     const buffer = await file.arrayBuffer();
     const XLSX = await import('xlsx');
     const workbook = XLSX.read(new Uint8Array(buffer), { type: 'array' });
-    const sheetName = workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json(sheet, { defval: null });
-    const local = standardizeLoanTape(rows, file.name);
+    // Read EVERY sheet as array-of-arrays so the importer can detect the header row and
+    // map each sheet by format profile (SIAC/CAUDEX/generic).
+    const sheets = workbook.SheetNames.map(name => ({
+      name,
+      rows: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, blankrows: false, defval: null }) as any[][],
+    }));
 
-    const headers = rows.length > 0 ? Object.keys(rows[0] as any) : [];
-    let tapeType: 'credito' | 'factoraje' | 'otro' = 'otro';
-    if (headers.some(h => /factoraje|factor|cedente/i.test(h))) tapeType = 'factoraje';
-    else if (headers.some(h => /credito|prestamo|loan|vencimiento|saldo/i.test(h))) tapeType = 'credito';
+    // previous cut total (most recent existing tape) for the MoM sanity check
+    const prev: any = tapes[0]?.extractedData;
+    const prevStd: any[] = Array.isArray(prev?._standardized) ? prev._standardized : [];
+    const previousTotal = prevStd.length ? prevStd.reduce((a, s) => a + (Number(s.outstanding_balance) || 0), 0) : null;
+
+    const result = importLoanTapeSheets(sheets, file.name, { previousTotal });
+    const rec = result.reconciliation;
+
+    if (rec.severity === 'blocker') {
+      const proceed = window.confirm(`${rec.messages.join('\n')}\n\n¿Cargar de todos modos?`);
+      if (!proceed) return null;
+    }
+
+    const lt0 = (result.standardized.find(s => s.loan_type)?.loan_type || '').toLowerCase();
+    const tapeType: 'credito' | 'factoraje' | 'otro' = /factoraje|factor|cedente/.test(lt0) ? 'factoraje' : (result.standardized.length ? 'credito' : 'otro');
 
     const sourceDocument = await db.uploadClientDocument(clientId, file, 'loan_tape', {
       clientName,
       uploadSurface: 'loan_tape_panel',
-      rows: rows.length,
+      rows: result.standardized.length,
       tapeType,
     });
 
@@ -238,7 +252,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
       name: file.name.replace(/\.[^.]+$/, ''),
       fileName: file.name,
       tapeType,
-      extractedData: { rows, _standardized: local.standardized, _mappingReport: local.mappingReport },
+      extractedData: { rows: result.standardized, _standardized: result.standardized, _mappingReport: result.mappingReport, _import: rec },
     });
   };
 
@@ -250,7 +264,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
       let lastId: string | null = null;
       for (const file of selected) {
         const tape = await saveLoanTapeFile(file);
-        lastId = tape.id;
+        if (tape) lastId = tape.id;
       }
       if (lastId) setExpanded(lastId);
       await loadTapes();
@@ -432,6 +446,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
           const mappingRows: any[] = Array.isArray(data?._mappingReport) ? data._mappingReport : [];
           const standardizedRows: any[] = Array.isArray(data?._standardized) ? data._standardized : [];
           const analysis: StructuredLoanTapeAnalysis | null = data?._analysis || null;
+          const imp: any = (data && !Array.isArray(data)) ? data._import : null;
           const profile = buildLoanTapeDataProfile(standardizedRows, mappingRows);
           const analystState = analystStates[tape.id] || normalizeLoanTapeAnalystState(tape.analystState);
 
@@ -457,6 +472,12 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                   <p className="text-xs text-slate-500 mt-0.5">
                     {new Date(tape.uploadDate).toLocaleDateString('es-MX')} · {rows.length} registros
                   </p>
+                  {imp && (
+                    <p className={`text-[11px] font-bold mt-0.5 truncate ${imp.severity === 'blocker' ? 'text-rose-600' : imp.severity === 'warning' ? 'text-amber-600' : 'text-emerald-600'}`}
+                       title={(imp.messages || []).join('\n')}>
+                      {imp.severity === 'blocker' ? '🔴' : imp.severity === 'warning' ? '🟠' : '🟢'} {(imp.messages || [])[0]}
+                    </p>
+                  )}
                 </div>
                 <div className="flex items-center gap-3">
                   {analysis && <StatusBadge status={analysis.overallStatus} />}
