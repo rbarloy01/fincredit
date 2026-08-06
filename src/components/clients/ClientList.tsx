@@ -38,7 +38,7 @@ const ClientList: React.FC<Props> = ({ session, onSelectClient, onNewClient }) =
   const loadClients = async () => {
     setLoading(true);
     try {
-      const list = await db.getClients();
+      const list = await db.getClientsLight();
       setClients(list);
     } catch (err) {
       console.error('Error loading clients:', err);
@@ -60,27 +60,26 @@ const ClientList: React.FC<Props> = ({ session, onSelectClient, onNewClient }) =
 
     const loadWatch = async () => {
       try {
-        const rows = await Promise.all(clients.map(async client => {
-          const [statements, covenants, tapes] = await Promise.all([
-            db.getStatements(client.id),
-            db.getCovenants(client.id),
-            db.getLoanTapes(client.id),
-          ]);
-          const breaches = covenants.filter(c => evaluateCovenantAuto(c, statements).status === 'incumple').length;
+        // Batched: 3 queries total instead of 3 per client (N+1). Loan-tape existence
+        // comes from a client_id-only query — no extracted_data transfer.
+        const ids = clients.map(c => c.id);
+        const [statementsByClient, covenantsByClient, tapeClientIds] = await Promise.all([
+          db.getStatementsForClients(ids),
+          db.getCovenantsForClients(ids),
+          db.getLoanTapeClientIds(ids),
+        ]);
+        if (cancelled) return;
+        let breaches = 0, overdueDocs = 0, missingTapes = 0;
+        for (const client of clients) {
+          const statements = statementsByClient[client.id] || [];
+          const covenants = covenantsByClient[client.id] || [];
+          breaches += covenants.filter(c => evaluateCovenantAuto(c, statements).status === 'incumple').length;
           const latestStmt = [...statements].sort((a, b) => a.periodDate.localeCompare(b.periodDate)).at(-1);
           const daysNoFinancials = latestStmt ? (Date.now() - new Date(latestStmt.periodDate).getTime()) / 86400000 : Infinity;
-          const overdueDocs = daysNoFinancials > 45 ? 1 : 0;
-          const missingTapes = tapes.length === 0 ? 1 : 0;
-          return { breaches, overdueDocs, missingTapes };
-        }));
-
-        if (cancelled) return;
-        setWatch({
-          breaches: rows.reduce((s, r) => s + r.breaches, 0),
-          overdueDocs: rows.reduce((s, r) => s + r.overdueDocs, 0),
-          missingTapes: rows.reduce((s, r) => s + r.missingTapes, 0),
-          maturities: 0,
-        });
+          if (daysNoFinancials > 45) overdueDocs += 1;
+          if (!tapeClientIds.has(client.id)) missingTapes += 1;
+        }
+        setWatch({ breaches, overdueDocs, missingTapes, maturities: 0 });
       } catch (err) {
         if (!cancelled) console.error('Error loading portfolio indicators:', err);
       }

@@ -156,7 +156,7 @@ const DashboardPage: React.FC<Props> = ({ onSelectClient }) => {
       setLoading(true);
       setError('');
       try {
-        const nextClients = await db.getClients();
+        const nextClients = await db.getClientsLight();
         if (!active) return;
         setClients(nextClients);
       } catch (err: any) {

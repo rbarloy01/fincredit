@@ -1026,6 +1026,18 @@ export const db = {
     return (data || []).map(toClient);
   },
 
+  // Light list read for grids/dashboard: omits the heavy JSON blobs (payment_history,
+  // aforo_history, opinion, logos) that list views never render. Keeps `documentation`
+  // (dashboard "docs pendientes" needs it). ClientDetail still loads the full client.
+  async getClientsLight(): Promise<Client[]> {
+    const cols = 'id,org_id,status,name,tax_id,industry,score,currency,total_credit_value,credit_type,contract_name,analyst_name,created_by,created_at,current_due,max_default_days,max_default_amount,default_frequency_12m,report_date,frequency,last_period,documentation';
+    const run = (sel: string) => supabase.from('clients').select(sel).order('created_at', { ascending: false });
+    let res: any = await run(cols);
+    if (res.error && isMissingSchemaError(res.error, 'status')) res = await run(cols.replace('status,', ''));
+    if (res.error) err('getClientsLight', res.error);
+    return (res.data || []).map(toClient);
+  },
+
   async getClientById(id: string): Promise<Client | undefined> {
     const { data, error } = await supabase.from('clients').select('*').eq('id', id).maybeSingle();
     if (error) err('getClientById', error);
@@ -1685,6 +1697,28 @@ export const db = {
     const { data, error } = await supabase.from('loan_tapes').select('*').eq('client_id', clientId).order('upload_date', { ascending: false });
     if (error) err('getLoanTapes', error);
     return (data || []).map(toLoanTape);
+  },
+
+  // Which of these clients have at least one loan tape — one tiny query, no extracted_data.
+  async getLoanTapeClientIds(clientIds: string[]): Promise<Set<string>> {
+    if (!clientIds.length) return new Set();
+    const { data, error } = await supabase.from('loan_tapes').select('client_id').in('client_id', clientIds);
+    if (error) err('getLoanTapeClientIds', error);
+    return new Set((data || []).map((r: any) => r.client_id));
+  },
+
+  // For ClientDetail: metadata for all tapes (count/dates) + the LATEST tape's full
+  // extracted_data (its _analysis feeds monitor/report). Avoids pulling every tape's
+  // MB-scale JSON on client open — the Loan Tape tab still loads full tapes on demand.
+  async getLoanTapesForDetail(clientId: string): Promise<LoanTape_DB[]> {
+    const { data, error } = await supabase.from('loan_tapes')
+      .select('id,client_id,name,upload_date,file_name,tape_type')
+      .eq('client_id', clientId).order('upload_date', { ascending: false });
+    if (error) err('getLoanTapesForDetail', error);
+    const metas = (data || []).map(toLoanTape);
+    if (metas.length === 0) return metas;
+    const { data: full } = await supabase.from('loan_tapes').select('*').eq('id', metas[0].id).maybeSingle();
+    return full ? [toLoanTape(full), ...metas.slice(1)] : metas;
   },
 
   async getLoanTapesForClients(clientIds: string[]): Promise<Record<string, LoanTape_DB[]>> {

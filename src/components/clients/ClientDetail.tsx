@@ -260,7 +260,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
         db.getTransactions(clientId),
         db.getStatements(clientId),
         db.getCovenants(clientId),
-        db.getLoanTapes(clientId),
+        db.getLoanTapesForDetail(clientId),
         db.getInstitutionalLiabilities(clientId),
         db.getCustomFields(clientId),
       ]);

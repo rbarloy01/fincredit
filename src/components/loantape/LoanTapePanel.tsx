@@ -356,6 +356,19 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
     }));
   };
 
+  // Memoize the data-readiness profile per tape (only recompute when tapes change) —
+  // otherwise buildLoanTapeDataProfile re-runs over every tape's rows on every render.
+  const profilesByTape = React.useMemo(() => {
+    const m: Record<string, ReturnType<typeof buildLoanTapeDataProfile>> = {};
+    for (const tape of tapes) {
+      const d: any = tape.extractedData;
+      const std = Array.isArray(d?._standardized) ? d._standardized : [];
+      const mr = Array.isArray(d?._mappingReport) ? d._mappingReport : [];
+      m[tape.id] = buildLoanTapeDataProfile(std, mr);
+    }
+    return m;
+  }, [tapes]);
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -449,7 +462,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
           const standardizedRows: any[] = Array.isArray(data?._standardized) ? data._standardized : [];
           const analysis: StructuredLoanTapeAnalysis | null = data?._analysis || null;
           const imp: any = (data && !Array.isArray(data)) ? data._import : null;
-          const profile = buildLoanTapeDataProfile(standardizedRows, mappingRows);
+          const profile = profilesByTape[tape.id] || buildLoanTapeDataProfile(standardizedRows, mappingRows);
           const analystState = analystStates[tape.id] || normalizeLoanTapeAnalystState(tape.analystState);
 
           return (
