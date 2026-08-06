@@ -514,6 +514,22 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
 
   const handleSaveReview = async () => {
     if (!review) return;
+    // Guardrail: the entity name extracted from the file should match the target client.
+    // Catches "wrong client selected on upload" (e.g. ALTERNA's balanza saved under ASTRO).
+    const normCompany = (s: string) => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+      .replace(/\([^)]*\)/g, ' ').replace(/\bbase\s*\d+\b/g, ' ')
+      .replace(/\b(s\.?\s?a\.?\s?p\.?\s?i\.?|s\.?\s?a\.?|s\.?\s?c\.?|de|c\.?\s?v\.?|sofom|e\.?\s?n\.?\s?r\.?|enr|r\.?\s?l\.?)\b/g, ' ')
+      .replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
+    const a = normCompany(review.companyName), b = normCompany(clientName || '');
+    if (a && b) {
+      const an = a.replace(/\s/g, ''), bn = b.replace(/\s/g, '');
+      const a0 = a.split(' ')[0], b0 = b.split(' ')[0];
+      const match = a.includes(b) || b.includes(a) || an.includes(bn) || bn.includes(an) || (!!a0 && !!b0 && (a0 === b0 || a0.startsWith(b0) || b0.startsWith(a0)));
+      if (!match) {
+        const proceed = window.confirm(`⚠ El archivo dice "${review.companyName}" pero el cliente destino es "${clientName}".\n\nPuede que hayas elegido el cliente equivocado. ¿Guardar de todos modos?`);
+        if (!proceed) return;
+      }
+    }
     try {
       const existingStatements = await db.getStatements(clientId);
       for (const statement of review.statements) {
