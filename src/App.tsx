@@ -7,6 +7,7 @@ import { AISettings, loadAISettings } from './services/ai';
 import { Activity, AlertTriangle, BarChart3, Building2, ClipboardList, Inbox, Layers3, LayoutDashboard, Settings, LogOut, RefreshCw, ShieldAlert, ShieldCheck, Moon, Sun, Sparkles } from 'lucide-react';
 import { isSupabaseConfigured, supabaseConfigError } from './lib/supabase';
 import { lazyWithChunkRetry, resetChunkRetryStateForCurrentBuild } from './lib/lazyWithChunkRetry';
+import { logDiag } from './lib/telemetry';
 
 const ClientForm = lazyWithChunkRetry(() => import('./components/clients/ClientForm'), 'client-form');
 const ClientDetail = lazyWithChunkRetry(() => import('./components/clients/ClientDetail'), 'client-detail');
@@ -160,6 +161,7 @@ class RouteErrorBoundary extends Component<
 
   componentDidCatch(error: Error) {
     console.error('Route render error:', error);
+    try { logDiag('error', error.message, error.stack, 'route-render'); } catch { /* noop */ }
   }
 
   render() {

@@ -1,6 +1,7 @@
 // FinMonitor DB — Supabase backend
 import { supabase } from '../lib/supabase';
 import { normalizeFinancialNumberString, parseFinancialNumber } from '../lib/numberParsing';
+import { logDiag } from '../lib/telemetry';
 
 export type Role = 'manager' | 'analyst' | 'pending';
 export type ActiveRole = Exclude<Role, 'pending'>;
@@ -746,6 +747,7 @@ function toSourceDocument(r: any): SourceDocument {
 }
 
 function err(label: string, e: any): never {
+  try { logDiag('query', `${label}: ${e?.message || e}`, e?.details || e?.hint || undefined, label); } catch { /* noop */ }
   throw new Error(`${label}: ${e?.message || e}`);
 }
 

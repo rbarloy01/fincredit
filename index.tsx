@@ -2,7 +2,10 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './src/App.tsx';
+import { installTelemetry, logDiag } from './src/lib/telemetry';
 import './index.css';
+
+installTelemetry();
 
 const clearChunkRetryState = () => {
   try {
@@ -47,6 +50,7 @@ const showStartupRecovery = () => {
 
 window.addEventListener('error', event => {
   if (isChunkLoadError(event.error || event.message)) {
+    logDiag('chunk', event.message || 'chunk load error');
     event.preventDefault();
     showStartupRecovery();
   }
@@ -54,10 +58,32 @@ window.addEventListener('error', event => {
 
 window.addEventListener('unhandledrejection', event => {
   if (isChunkLoadError(event.reason)) {
+    logDiag('chunk', 'chunk load error (rejection)');
     event.preventDefault();
     showStartupRecovery();
   }
 });
+
+// Top-level safety net: any render crash outside the route boundary shows a recover card
+// (instead of a blank screen) and is logged to Diagnóstico.
+class TopBoundary extends React.Component<{ children: React.ReactNode }, { err: Error | null }> {
+  declare props: { children: React.ReactNode };
+  state: { err: Error | null } = { err: null };
+  static getDerivedStateFromError(err: Error) { return { err }; }
+  componentDidCatch(err: Error) { try { logDiag('error', err.message, err.stack, 'top-boundary'); } catch { /* noop */ } }
+  render() {
+    if (!this.state.err) return this.props.children as any;
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#020617', color: '#f8fafc', fontFamily: "system-ui,-apple-system,'Segoe UI',sans-serif", padding: 24 }}>
+        <div style={{ width: '100%', maxWidth: 440, background: '#0f172a', border: '1px solid #1e293b', borderRadius: 24, padding: 32, textAlign: 'center' }}>
+          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 900 }}>Algo falló</h1>
+          <p style={{ margin: '12px 0 0', color: '#cbd5e1', fontSize: 13, fontWeight: 700, lineHeight: 1.6 }}>{this.state.err.message || 'Error inesperado.'}</p>
+          <button onClick={() => window.location.reload()} style={{ marginTop: 22, width: '100%', border: 0, borderRadius: 14, background: '#ffffff', color: '#0f172a', padding: '14px 18px', fontSize: 14, fontWeight: 900, cursor: 'pointer' }}>Recargar FinMonitor</button>
+        </div>
+      </div>
+    );
+  }
+}
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
@@ -67,6 +93,8 @@ if (!rootElement) {
 const root = ReactDOM.createRoot(rootElement);
 root.render(
   <React.StrictMode>
-    <App />
+    <TopBoundary>
+      <App />
+    </TopBoundary>
   </React.StrictMode>
 );

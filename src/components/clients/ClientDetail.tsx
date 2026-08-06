@@ -13,6 +13,7 @@ import CompanyOverviewPanel from './CompanyOverviewPanel';
 import { ALL_FACILITIES, facilityDisplayName, matchesFacilityFilter } from '../../lib/facilityHistory';
 import { lazyWithChunkRetry } from '../../lib/lazyWithChunkRetry';
 import { loadExportModule } from '../../lib/exportLoader';
+import { timed } from '../../lib/telemetry';
 
 const FinancialPanel = lazyWithChunkRetry(() => import('../financials/FinancialPanel'), 'financial-panel');
 const LoanTapePanel = lazyWithChunkRetry(() => import('../loantape/LoanTapePanel'), 'loan-tape-panel');
@@ -255,7 +256,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
   const loadData = async () => {
     setLoading(true);
     try {
-      const [c, txs, stmts, covs, tapes, liabilities, fields] = await Promise.all([
+      const [c, txs, stmts, covs, tapes, liabilities, fields] = await timed('clientDetail.load', () => Promise.all([
         db.getClientById(clientId),
         db.getTransactions(clientId),
         db.getStatements(clientId),
@@ -263,7 +264,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
         db.getLoanTapesForDetail(clientId),
         db.getInstitutionalLiabilities(clientId),
         db.getCustomFields(clientId),
-      ]);
+      ]));
       if (c) setClient(c);
       setTransactions(txs);
       setStatements(stmts);

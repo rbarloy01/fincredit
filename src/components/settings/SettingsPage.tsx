@@ -4,10 +4,47 @@ import { Session, auth } from '../../services/auth';
 import { AIProvider, AISettings, loadAISettings, saveAISettings, testConnection } from '../../services/ai';
 import { Users, Save, Plus, Trash2, Eye, EyeOff, Check, X, Info, Zap, ShieldCheck, RefreshCw, AlertTriangle, Lock } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
+import { getDiag, clearDiag } from '../../lib/telemetry';
 
 interface Props {
   session: Session;
   onSettingsChange: (s: AISettings) => void;
+}
+
+function DiagnosticPanel() {
+  const [entries, setEntries] = useState(getDiag());
+  const refresh = () => setEntries(getDiag());
+  const copy = () => { try { navigator.clipboard?.writeText(JSON.stringify(getDiag(), null, 2)); } catch { /* noop */ } };
+  return (
+    <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
+      <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+        <h2 className="text-sm font-black text-slate-900 uppercase tracking-widest">Diagnóstico</h2>
+        <div className="flex gap-2">
+          <button onClick={refresh} className="text-xs font-bold text-slate-600 border border-slate-200 rounded-lg px-2.5 py-1 hover:bg-slate-50">Actualizar</button>
+          <button onClick={copy} className="text-xs font-bold text-indigo-600 border border-indigo-200 rounded-lg px-2.5 py-1 hover:bg-indigo-50">Copiar</button>
+          <button onClick={() => { clearDiag(); refresh(); }} className="text-xs font-bold text-rose-600 border border-rose-200 rounded-lg px-2.5 py-1 hover:bg-rose-50">Limpiar</button>
+        </div>
+      </div>
+      <p className="text-xs text-slate-500 mb-3">Errores y operaciones lentas capturados en este navegador. Si la app se traba o te saca, abre esto y dale “Copiar” para compartir el detalle.</p>
+      {entries.length === 0 ? (
+        <p className="text-sm font-semibold text-emerald-600">Sin incidencias registradas. 🎉</p>
+      ) : (
+        <div className="space-y-1.5 max-h-96 overflow-y-auto">
+          {entries.map((e, i) => (
+            <div key={i} className={`rounded-lg border px-3 py-2 text-xs ${e.kind === 'error' ? 'border-rose-200 bg-rose-50' : e.kind === 'query' ? 'border-orange-200 bg-orange-50' : 'border-amber-200 bg-amber-50'}`}>
+              <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-wider text-slate-500">
+                <span>{e.kind}</span>
+                <span className="text-slate-400 font-semibold normal-case tracking-normal">{new Date(e.t).toLocaleString('es-MX')}</span>
+                {e.ctx && <span className="text-slate-400 font-semibold normal-case tracking-normal">· {e.ctx}</span>}
+              </div>
+              <div className="font-bold text-slate-800 mt-0.5 break-words">{e.msg}</div>
+              {e.detail && <div className="text-[11px] text-slate-500 mt-0.5 break-words whitespace-pre-wrap max-h-20 overflow-hidden">{e.detail}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 const PROVIDERS: { id: AIProvider; label: string; placeholder: string; color: string }[] = [
@@ -491,6 +528,8 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
             <div className="flex justify-between"><span className="font-semibold text-slate-700">Almacenamiento</span><span>Supabase PostgreSQL</span></div>
           </div>
         </div>
+
+        <DiagnosticPanel />
       </div>
     </div>
   );
