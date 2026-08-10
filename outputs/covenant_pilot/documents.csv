@@ -1,0 +1,11 @@
+document_id,cliente,tipo_documento,periodo,formato,enlace,local_path,status,error,pages
+2,Apem,EF - Apalancamiento,Abr 2024,PDF,https://drive.google.com/file/d/1y3ttSYtei5XGpjIAnO1JbB_9ycATJXSj/view,,failed,"<urlopen error [Errno 8] nodename nor servname provided, or not known>",0
+3,Apem,EEFF,Abr 2025,PDF,https://drive.google.com/file/d/1XTjGddyBUvbEGSbXNE9r2sY0jp4AMQTu/view,,failed,"<urlopen error [Errno 8] nodename nor servname provided, or not known>",0
+4,Apem,EF - Apalancamiento,Ago 2024,PDF,https://drive.google.com/file/d/1OSFw840nwX7KY81jZPzuRo4IAQ02rh8A/view,,failed,"<urlopen error [Errno 8] nodename nor servname provided, or not known>",0
+5,Apem,EEFF,Ago 2025,PDF,https://drive.google.com/file/d/1bZXFFevz9yjb6CJCTok7N3s2uTHRlFj6/view,,failed,"<urlopen error [Errno 8] nodename nor servname provided, or not known>",0
+6,Apem,EF - Apalancamiento,Dic 2023,PDF,https://drive.google.com/file/d/1ZSFffpY844Ow1W9R3vhL02WJXsECNx0h/view,,failed,"<urlopen error [Errno 8] nodename nor servname provided, or not known>",0
+7,Apem,EF - Apalancamiento,Dic 2024,PDF,https://drive.google.com/file/d/1Zp5a4wZ9UP5Asnj8b7ZXGhwitltGZCj2/view,,failed,"<urlopen error [Errno 8] nodename nor servname provided, or not known>",0
+8,Apem,EF - Apalancamiento (Firmado),Dic 2024,PDF,https://drive.google.com/file/d/1wxMkUFiO6FGsZEMZdbmrzOUTdMkOxF-M/view,,failed,"<urlopen error [Errno 8] nodename nor servname provided, or not known>",0
+9,Apem,EF - Apalancamiento,Dic 2025,PDF,https://drive.google.com/file/d/1qNu1KqaEfmbdzoLXochvHX1PwH8d9jl4/view,,failed,"<urlopen error [Errno 8] nodename nor servname provided, or not known>",0
+10,Apem,EF - Apalancamiento,Ene 2024,PDF,https://drive.google.com/file/d/1UlTUMKMZvy98UTI4Ep1pZhxrLtsdFfyp/view,,failed,"<urlopen error [Errno 8] nodename nor servname provided, or not known>",0
+11,Apem,EF - Apalancamiento,Ene 2025,PDF,https://drive.google.com/file/d/1ujY8PHjR-i6Jo4j30UILEPochBegSPk5/view,,failed,"<urlopen error [Errno 8] nodename nor servname provided, or not known>",0

@@ -1,0 +1,341 @@
+{
+  "version": "0.1",
+  "language": "es-MX",
+  "notes": [
+    "Diccionario inicial basado en formulas proporcionadas por el usuario.",
+    "Las cuentas fuente pueden variar por cliente/documento; el extractor debe mapear etiquetas contables a estos conceptos normalizados.",
+    "Los resultados deben guardar source_document, source_page, raw_label, normalized_concept, value, confidence y review_status."
+  ],
+  "concepts": {
+    "margen_financiero_ajustado": {
+      "description": "Margen financiero ajustado"
+    },
+    "utilidad_operacion_ajustada": {
+      "description": "Utilidad de operacion ajustada",
+      "synonyms": [
+        "utilidad de operacion",
+        "utilidad operativa",
+        "resultado de operacion",
+        "resultado operativo"
+      ]
+    },
+    "utilidad_neta": {
+      "description": "Utilidad neta",
+      "synonyms": [
+        "resultado neto",
+        "utilidad del ejercicio",
+        "resultado del ejercicio"
+      ]
+    },
+    "ingresos_por_intereses": {
+      "description": "Ingresos por intereses",
+      "synonyms": [
+        "intereses ganados",
+        "productos financieros",
+        "ingresos financieros",
+        "ingresos por cartera"
+      ]
+    },
+    "ingresos_por_comisiones": {
+      "description": "Ingresos por comisiones",
+      "synonyms": [
+        "comisiones cobradas",
+        "comisiones y tarifas cobradas",
+        "ingresos por comisiones y tarifas"
+      ]
+    },
+    "gastos_por_comisiones": {
+      "description": "Gastos por comisiones",
+      "synonyms": [
+        "comisiones pagadas",
+        "comisiones y tarifas pagadas"
+      ]
+    },
+    "gastos_administracion_venta_operacion": {
+      "description": "Gastos de administracion, venta y operacion",
+      "synonyms": [
+        "gastos de administracion",
+        "gastos administrativos",
+        "gastos de venta",
+        "gastos de operacion",
+        "gastos generales",
+        "gastos de administracion y promocion"
+      ]
+    },
+    "total_capital_contable": {
+      "description": "Total capital contable",
+      "synonyms": [
+        "capital contable",
+        "patrimonio",
+        "total patrimonio",
+        "total capital"
+      ]
+    },
+    "total_activo": {
+      "description": "Total activo",
+      "synonyms": [
+        "activo total",
+        "total activos"
+      ]
+    },
+    "total_pasivo": {
+      "description": "Total pasivo",
+      "synonyms": [
+        "pasivo total",
+        "total pasivos"
+      ]
+    },
+    "cartera_vencida": {
+      "description": "Cartera vencida",
+      "synonyms": [
+        "creditos vencidos",
+        "cartera vencida total",
+        "saldo vencido"
+      ]
+    },
+    "cartera_administrada": {
+      "description": "Cartera administrada",
+      "synonyms": [
+        "cartera total",
+        "cartera bruta",
+        "portafolio administrado",
+        "saldo insoluto"
+      ]
+    },
+    "estimacion_preventiva": {
+      "description": "Estimacion preventiva para riesgos crediticios",
+      "synonyms": [
+        "estimacion preventiva",
+        "reservas crediticias",
+        "reserva para riesgos crediticios",
+        "provision para perdidas crediticias"
+      ]
+    },
+    "cartera_neta": {
+      "description": "Cartera neta",
+      "synonyms": [
+        "cartera de credito neta",
+        "cartera neta de credito",
+        "creditos netos"
+      ]
+    },
+    "gastos_por_intereses": {
+      "description": "Gastos por intereses",
+      "synonyms": [
+        "intereses pagados",
+        "gastos financieros",
+        "costo financiero"
+      ]
+    },
+    "bancos_y_fondos_cp": {
+      "description": "Bancos y fondos de corto plazo",
+      "synonyms": [
+        "prestamos bancarios corto plazo",
+        "deuda bancaria cp",
+        "pasivos con costo cp",
+        "bancos cp"
+      ]
+    },
+    "bancos_y_fondos_lp": {
+      "description": "Bancos y fondos de largo plazo",
+      "synonyms": [
+        "prestamos bancarios largo plazo",
+        "deuda bancaria lp",
+        "pasivos con costo lp",
+        "bancos lp"
+      ]
+    },
+    "bancos_inversiones_disponibles_no_comprometidas": {
+      "description": "Bancos e inversiones disponibles y no comprometidas",
+      "synonyms": [
+        "efectivo",
+        "bancos",
+        "disponibilidades",
+        "inversiones en valores",
+        "inversiones temporales",
+        "equivalentes de efectivo"
+      ]
+    },
+    "activos_productivos": {
+      "description": "Activos productivos. Incluye cartera neta, bancos/inversiones disponibles no comprometidas y otros activos generadores cuando el tipo de entidad lo soporte.",
+      "components": [
+        "bancos_inversiones_disponibles_no_comprometidas",
+        "cartera_neta",
+        "otros_activos_generadores"
+      ],
+      "review_required": true,
+      "review_reason": "La composicion de activos productivos puede variar segun tipo de entidad; confirmar si otros activos generadores aplican antes de aprobar el ratio.",
+      "default_formula": "bancos_inversiones_disponibles_no_comprometidas + cartera_neta + otros_activos_generadores"
+    },
+    "otros_activos_generadores": {
+      "description": "Otros activos generadores de ingresos o rendimiento financiero, sujetos a validacion por tipo de entidad.",
+      "synonyms": [
+        "otros activos productivos",
+        "otros activos generadores",
+        "activos generadores",
+        "inversiones productivas",
+        "valores productivos",
+        "cuentas por cobrar productivas",
+        "arrendamientos financieros",
+        "bienes en arrendamiento financiero",
+        "factoraje financiero",
+        "derechos de cobro",
+        "portafolio de inversion",
+        "instrumentos financieros"
+      ],
+      "default_value_if_missing": 0,
+      "review_required": true,
+      "review_reason": "Solo debe incluirse cuando el documento o la entidad indiquen que el activo genera rendimiento financiero recurrente."
+    }
+  },
+  "ratios": [
+    {
+      "name": "Margen Financiero",
+      "key": "margen_financiero",
+      "formula": "margen_financiero_ajustado / (ingresos_por_intereses + ingresos_por_comisiones)",
+      "required_concepts": [
+        "margen_financiero_ajustado",
+        "ingresos_por_intereses",
+        "ingresos_por_comisiones"
+      ],
+      "format": "percent"
+    },
+    {
+      "name": "Margen Operativo",
+      "key": "margen_operativo",
+      "formula": "utilidad_operacion_ajustada / (ingresos_por_intereses + ingresos_por_comisiones)",
+      "required_concepts": [
+        "utilidad_operacion_ajustada",
+        "ingresos_por_intereses",
+        "ingresos_por_comisiones"
+      ],
+      "format": "percent"
+    },
+    {
+      "name": "Margen Neto",
+      "key": "margen_neto",
+      "formula": "utilidad_neta / (ingresos_por_intereses + ingresos_por_comisiones)",
+      "required_concepts": [
+        "utilidad_neta",
+        "ingresos_por_intereses",
+        "ingresos_por_comisiones"
+      ],
+      "format": "percent"
+    },
+    {
+      "name": "Rentabilidad Operativa",
+      "key": "rentabilidad_operativa",
+      "formula": "(gastos_por_comisiones + gastos_administracion_venta_operacion) / (ingresos_por_intereses + ingresos_por_comisiones)",
+      "required_concepts": [
+        "gastos_por_comisiones",
+        "gastos_administracion_venta_operacion",
+        "ingresos_por_intereses",
+        "ingresos_por_comisiones"
+      ],
+      "format": "percent"
+    },
+    {
+      "name": "ROE",
+      "key": "roe",
+      "formula": "utilidad_neta / total_capital_contable",
+      "required_concepts": [
+        "utilidad_neta",
+        "total_capital_contable"
+      ],
+      "format": "percent"
+    },
+    {
+      "name": "ROA",
+      "key": "roa",
+      "formula": "utilidad_neta / total_activo",
+      "required_concepts": [
+        "utilidad_neta",
+        "total_activo"
+      ],
+      "format": "percent"
+    },
+    {
+      "name": "Cartera Vencida",
+      "key": "cartera_vencida_ratio",
+      "formula": "cartera_vencida / cartera_administrada",
+      "required_concepts": [
+        "cartera_vencida",
+        "cartera_administrada"
+      ],
+      "format": "percent"
+    },
+    {
+      "name": "Cartera Vencida Neta",
+      "key": "cartera_vencida_neta",
+      "formula": "(cartera_vencida - estimacion_preventiva) / cartera_administrada",
+      "required_concepts": [
+        "cartera_vencida",
+        "estimacion_preventiva",
+        "cartera_administrada"
+      ],
+      "format": "percent"
+    },
+    {
+      "name": "Tasa Activa",
+      "key": "tasa_activa",
+      "formula": "ingresos_por_intereses / cartera_neta",
+      "required_concepts": [
+        "ingresos_por_intereses",
+        "cartera_neta"
+      ],
+      "format": "percent"
+    },
+    {
+      "name": "Tasa Pasiva",
+      "key": "tasa_pasiva",
+      "formula": "gastos_por_intereses / (bancos_y_fondos_cp + bancos_y_fondos_lp)",
+      "required_concepts": [
+        "gastos_por_intereses",
+        "bancos_y_fondos_cp",
+        "bancos_y_fondos_lp"
+      ],
+      "format": "percent"
+    },
+    {
+      "name": "Apalancamiento",
+      "key": "apalancamiento",
+      "formula": "(bancos_y_fondos_cp + bancos_y_fondos_lp) / total_activo",
+      "required_concepts": [
+        "bancos_y_fondos_cp",
+        "bancos_y_fondos_lp",
+        "total_activo"
+      ],
+      "format": "percent"
+    },
+    {
+      "name": "ICAP",
+      "key": "icap",
+      "formula": "total_capital_contable / total_activo",
+      "required_concepts": [
+        "total_capital_contable",
+        "total_activo"
+      ],
+      "format": "percent"
+    },
+    {
+      "name": "ICAP Ajustado",
+      "key": "icap_ajustado",
+      "formula": "total_capital_contable / cartera_neta",
+      "required_concepts": [
+        "total_capital_contable",
+        "cartera_neta"
+      ],
+      "format": "percent"
+    },
+    {
+      "name": "Cobertura de Deuda",
+      "key": "cobertura_de_deuda",
+      "formula": "activos_productivos / total_pasivo",
+      "required_concepts": [
+        "activos_productivos",
+        "total_pasivo"
+      ],
+      "format": "x"
+    }
+  ]
+}
