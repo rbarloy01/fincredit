@@ -11,6 +11,7 @@ import pandas as pd
 import pdfplumber
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
 
 WORKSPACE = Path(__file__).resolve().parents[1]
@@ -810,21 +811,138 @@ def golden_sample_scaffold(ratios):
     return sample
 
 
+def _first_nonblank(series, default=""):
+    if series is None:
+        return default
+    cleaned = [value for value in series.tolist() if pd.notna(value) and str(value).strip()]
+    return cleaned[0] if cleaned else default
+
+
+def build_crm_clients(documents, ratios, qa):
+    clients = set()
+    if not documents.empty and "client" in documents:
+        clients.update(documents["client"].dropna().astype(str))
+    if not ratios.empty and "client" in ratios:
+        clients.update(ratios["client"].dropna().astype(str))
+    if not qa.empty and "client" in qa:
+        clients.update(qa["client"].dropna().astype(str))
+
+    rows = []
+    for client in sorted(clients):
+        doc_client = documents[documents["client"].eq(client)] if not documents.empty else pd.DataFrame()
+        ratio_client = ratios[ratios["client"].eq(client)] if not ratios.empty else pd.DataFrame()
+        qa_client = qa[qa["client"].eq(client)] if not qa.empty and "client" in qa else pd.DataFrame()
+
+        periods = sorted(doc_client["period"].dropna().astype(str).unique()) if "period" in doc_client else []
+        latest_period = periods[-1] if periods else ""
+        ratio_review = int(ratio_client["review_status"].eq("needs_review").sum()) if "review_status" in ratio_client else 0
+        qa_review = int(qa_client["status"].eq("needs_review").sum()) if "status" in qa_client else 0
+        documents_found = len(doc_client)
+        status = "Listo para revisar"
+        priority = "Media"
+        if documents_found == 0:
+            status = "Sin documentos"
+            priority = "Alta"
+        elif ratio_review or qa_review:
+            status = "Requiere revision"
+            priority = "Alta"
+        elif ratio_client.empty:
+            status = "Sin razones"
+            priority = "Media"
+        else:
+            status = "Actualizado"
+            priority = "Baja"
+
+        rows.append(
+            {
+                "Cliente": client,
+                "Estatus": status,
+                "Prioridad": priority,
+                "Responsable": "",
+                "Proxima accion": "",
+                "Fecha actualizacion": "",
+                "Ultimo periodo": latest_period,
+                "Docs": documents_found,
+                "Periodos": len(periods),
+                "Razones": len(ratio_client),
+                "Razones revisar": ratio_review,
+                "QA revisar": qa_review,
+                "Credito": _first_nonblank(doc_client.get("se_otorgo_credito")),
+                "Producto": _first_nonblank(doc_client.get("producto_principal")),
+                "Tipo EEFF": _first_nonblank(doc_client.get("tipo_estado_financiero")),
+                "Link contrato": _first_nonblank(doc_client.get("contrato_drive_link")),
+                "Notas": _first_nonblank(doc_client.get("notes")),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_inicio(crm, documents, accounts, concepts, ratios, qa):
+    if crm.empty:
+        return pd.DataFrame(
+            [
+                {"Seccion": "Estado", "Metrica": "Clientes", "Valor": 0, "Detalle": "No se encontraron clientes en la corrida."},
+                {"Seccion": "Siguiente paso", "Metrica": "Carga", "Valor": "", "Detalle": "Revisar ruta de clientes y volver a ejecutar."},
+            ]
+        )
+    return pd.DataFrame(
+        [
+            {"Seccion": "Estado", "Metrica": "Clientes", "Valor": len(crm), "Detalle": "Filas en CRM Clientes."},
+            {"Seccion": "Estado", "Metrica": "Actualizados", "Valor": int(crm["Estatus"].eq("Actualizado").sum()), "Detalle": "Sin alertas de razones ni QA."},
+            {"Seccion": "Estado", "Metrica": "Requieren revision", "Valor": int(crm["Estatus"].eq("Requiere revision").sum()), "Detalle": "Tienen razones o QA por validar."},
+            {"Seccion": "Estado", "Metrica": "Sin documentos", "Valor": int(crm["Estatus"].eq("Sin documentos").sum()), "Detalle": "No se indexaron estados financieros."},
+            {"Seccion": "Pipeline", "Metrica": "Documentos", "Valor": len(documents), "Detalle": "Archivos financieros indexados."},
+            {"Seccion": "Pipeline", "Metrica": "Cuentas extraidas", "Valor": len(accounts), "Detalle": "Renglones leidos desde PDFs/Excel."},
+            {"Seccion": "Pipeline", "Metrica": "Conceptos mapeados", "Valor": len(concepts), "Detalle": "Cuentas normalizadas para calculo."},
+            {"Seccion": "Pipeline", "Metrica": "Razones", "Valor": len(ratios), "Detalle": "Razones financieras calculadas."},
+            {
+                "Seccion": "Pipeline",
+                "Metrica": "QA pendientes",
+                "Valor": int(qa["status"].eq("needs_review").sum()) if not qa.empty and "status" in qa else 0,
+                "Detalle": "Checks que requieren revision.",
+            },
+        ]
+    )
+
+
+def build_update_guide(output_path):
+    return pd.DataFrame(
+        [
+            {"Paso": 1, "Accion": "Editar clientes", "Detalle": "Actualiza config/client_metadata_template.tsv para campos permanentes como producto, credito, contrato y notas."},
+            {"Paso": 2, "Accion": "Agregar documentos", "Detalle": "Coloca estados financieros en la carpeta del cliente o en el staging de Drive usado por la corrida."},
+            {"Paso": 3, "Accion": "Reprocesar", "Detalle": "Ejecuta scripts/run_finmonitor_prod.sh o corre financial_monitor_pipeline.py con --clients y --output."},
+            {"Paso": 4, "Accion": "Revisar CRM Clientes", "Detalle": "Filtra Prioridad Alta, llena Responsable / Proxima accion / Fecha actualizacion y atiende Razones revisar / QA revisar."},
+            {"Paso": 5, "Accion": "Auditar detalle", "Detalle": f"El archivo objetivo actual es {output_path}. Las hojas tecnicas quedan despues del CRM."},
+        ]
+    )
+
+
 def style_workbook(writer):
     header_fill = PatternFill("solid", fgColor="16324F")
     header_font = Font(color="FFFFFF", bold=True)
+    title_fill = PatternFill("solid", fgColor="0F172A")
+    panel_fill = PatternFill("solid", fgColor="EAF2F8")
     border = Border(bottom=Side(style="thin", color="C9D6E2"))
     status_fills = {
         "ok": PatternFill("solid", fgColor="D9EAD3"),
         "calculated": PatternFill("solid", fgColor="D9EAD3"),
         "extracted": PatternFill("solid", fgColor="D9EAD3"),
+        "actualizado": PatternFill("solid", fgColor="D9EAD3"),
+        "listo para revisar": PatternFill("solid", fgColor="D9EAD3"),
         "needs_review": PatternFill("solid", fgColor="FFF2CC"),
+        "requiere revision": PatternFill("solid", fgColor="FFF2CC"),
+        "sin razones": PatternFill("solid", fgColor="FFF2CC"),
         "unmapped": PatternFill("solid", fgColor="F4CCCC"),
         "error": PatternFill("solid", fgColor="F4CCCC"),
+        "sin documentos": PatternFill("solid", fgColor="F4CCCC"),
+        "alta": PatternFill("solid", fgColor="F4CCCC"),
+        "media": PatternFill("solid", fgColor="FFF2CC"),
+        "baja": PatternFill("solid", fgColor="D9EAD3"),
     }
     for ws in writer.book.worksheets:
         if ws.max_row < 1:
             continue
+        ws.sheet_view.showGridLines = False
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
         for cell in ws[1]:
@@ -836,25 +954,64 @@ def style_workbook(writer):
         for col_idx, header in enumerate(headers, start=1):
             letter = get_column_letter(col_idx)
             width = 14
-            if header in {"path", "source_ref", "raw_value", "review_notes", "mapping_notes", "details", "contrato_drive_path"}:
+            if header in {"path", "source_ref", "raw_value", "review_notes", "mapping_notes", "details", "contrato_drive_path", "contrato_drive_link", "proxima_accion", "detalle", "Link contrato", "Proxima accion", "Detalle"}:
                 width = 44
-            elif header in {"filename", "raw_label", "formula"}:
+            elif header in {"filename", "raw_label", "formula", "notas", "Notas"}:
                 width = 32
-            elif header in {"client", "period", "ratio", "concept"}:
+            elif header in {"client", "cliente", "Cliente", "period", "ratio", "concept", "estatus_crm", "producto_principal", "Estatus", "Producto"}:
                 width = 20
+            elif header in {"responsable", "Responsable", "prioridad", "Prioridad", "ultimo_periodo", "fecha_actualizacion", "Ultimo periodo", "Fecha actualizacion", "Tipo EEFF"}:
+                width = 18
             ws.column_dimensions[letter].width = width
         for row in ws.iter_rows(min_row=2):
             for cell in row:
-                cell.alignment = Alignment(wrap_text=False, vertical="top")
+                cell.alignment = Alignment(wrap_text=cell.column_letter in {"E", "P", "Q"}, vertical="top")
                 if isinstance(cell.value, float):
                     cell.number_format = '#,##0.00;[Red](#,##0.00);-'
-                if headers[cell.column - 1] in {"review_status", "status", "mapping_status", "source_method"}:
+                if headers[cell.column - 1] in {"review_status", "status", "mapping_status", "source_method", "estatus_crm", "prioridad", "Estatus", "Prioridad"}:
                     fill = status_fills.get(str(cell.value).lower())
                     if fill:
                         cell.fill = fill
+        if ws.title in {"Inicio", "CRM Clientes", "Actualizar"}:
+            for cell in ws[1]:
+                cell.fill = title_fill
+        if ws.title == "Inicio":
+            ws.column_dimensions["A"].width = 18
+            ws.column_dimensions["B"].width = 24
+            ws.column_dimensions["C"].width = 14
+            ws.column_dimensions["D"].width = 56
+            for row_idx in range(2, ws.max_row + 1):
+                ws.cell(row_idx, 1).fill = panel_fill
+                ws.cell(row_idx, 1).font = Font(bold=True, color="16324F")
+                ws.cell(row_idx, 3).number_format = '#,##0'
+        if ws.title == "CRM Clientes":
+            for col_idx in range(8, 13):
+                for row_idx in range(2, ws.max_row + 1):
+                    ws.cell(row_idx, col_idx).number_format = '#,##0'
+            for col_idx in range(4, 7):
+                for row_idx in range(2, ws.max_row + 1):
+                    ws.cell(row_idx, col_idx).font = Font(color="0000FF")
+                    ws.cell(row_idx, col_idx).fill = PatternFill("solid", fgColor="FFF2CC")
+            if ws.max_row >= 2:
+                priority = DataValidation(type="list", formula1='"Alta,Media,Baja"', allow_blank=True)
+                status = DataValidation(type="list", formula1='"Actualizado,Listo para revisar,Requiere revision,Sin razones,Sin documentos"', allow_blank=False)
+                ws.add_data_validation(priority)
+                ws.add_data_validation(status)
+                priority.add(f"C2:C{ws.max_row}")
+                status.add(f"B2:B{ws.max_row}")
+        if ws.title == "Actualizar":
+            ws.column_dimensions["A"].width = 10
+            ws.column_dimensions["B"].width = 24
+            ws.column_dimensions["C"].width = 100
+            for row in ws.iter_rows(min_row=2):
+                row[2].alignment = Alignment(wrap_text=True, vertical="top")
+                ws.row_dimensions[row[0].row].height = 36
 
 
 def export_workbook(path, documents, accounts, concepts, ratios, qa, mapping, credit_evidence):
+    crm = build_crm_clients(documents, ratios, qa)
+    inicio = build_inicio(crm, documents, accounts, concepts, ratios, qa)
+    update_guide = build_update_guide(path)
     audit = pd.DataFrame(
         [
             {"category": "documents", "detail": "indexed", "count": len(documents)},
@@ -871,11 +1028,14 @@ def export_workbook(path, documents, accounts, concepts, ratios, qa, mapping, cr
         ]
     )
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        documents.to_excel(writer, sheet_name="Documentos", index=False)
-        accounts.to_excel(writer, sheet_name="Cuentas Extraidas", index=False)
-        concepts.to_excel(writer, sheet_name="Conceptos", index=False)
+        inicio.to_excel(writer, sheet_name="Inicio", index=False)
+        crm.to_excel(writer, sheet_name="CRM Clientes", index=False)
+        update_guide.to_excel(writer, sheet_name="Actualizar", index=False)
         ratios.to_excel(writer, sheet_name="Razones", index=False)
         qa.to_excel(writer, sheet_name="QA", index=False)
+        documents.to_excel(writer, sheet_name="Documentos", index=False)
+        concepts.to_excel(writer, sheet_name="Conceptos", index=False)
+        accounts.to_excel(writer, sheet_name="Cuentas Extraidas", index=False)
         credit_evidence.to_excel(writer, sheet_name="Credit Evidence", index=False)
         golden_sample_scaffold(ratios).to_excel(writer, sheet_name="Golden Sample", index=False)
         audit.to_excel(writer, sheet_name="Auditoria", index=False)
