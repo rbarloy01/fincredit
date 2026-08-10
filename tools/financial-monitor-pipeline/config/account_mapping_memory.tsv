@@ -1,0 +1,30 @@
+entity_type	client	doc_statement	raw_label	concept	confidence	status	notes
+leasing	Ventus	BG	Efectivo y Equivalentes (Inversiones)	efectivo_inversiones	1.00	approved	
+leasing	Ventus	BG	Bancos	efectivo_inversiones	0.90	approved	
+leasing	Ventus	BG	Clientes Arrendamiento	clientes_arrendamiento	1.00	approved	
+leasing	Ventus	BG	Clientes Factoraje	clientes_factoraje	1.00	approved	
+leasing	Ventus	BG	Estimación de cuentas incobrables	estimacion_preventiva	1.00	approved	
+leasing	Ventus	BG	Fondeadores a corto plazo	fondeadores_cp	1.00	approved	
+leasing	Ventus	BG	Fondeadores a largo plazo	fondeadores_lp	1.00	approved	
+leasing	Ventus	BG	Acreedores diversos a corto plazo	deuda_cp_proxy	0.65	proxy	Usar solo si no hay fondeadores CP.
+leasing	Ventus	BG	Cuentas por pagar a largo plazo	deuda_lp_proxy	0.65	proxy	Usar solo si no hay fondeadores LP.
+leasing	Ventus	BG	Maquinaria y equipo	otros_activos_generadores	0.75	proxy	Revisar si aplica como activo productivo.
+leasing	Ventus	BG	Equipo de Transporte	otros_activos_generadores	0.75	proxy	Revisar si aplica como activo productivo.
+leasing	Ventus	BG	Automóviles, autobuses, camiones de carga	otros_activos_generadores	0.75	proxy	Revisar si aplica como activo productivo.
+leasing	Ventus	BG	Depreciación acumulada de activos fijos	depreciacion_activos_productivos	0.75	proxy	Se resta de activos productivos si se incluyen activos fijos.
+generic	*	BG	TOTAL ACTIVO	total_activo	1.00	approved	
+generic	*	BG	TOTAL PASIVO	total_pasivo	1.00	approved	
+generic	*	BG	TOTAL CAPITAL CONTABLE	total_capital_contable	1.00	approved	
+generic	*	ER	TOTAL INGRESOS	ingresos_totales	1.00	approved	
+generic	*	ER	TOTAL COSTO DE VENTAS	costo_ventas	1.00	approved	
+generic	*	ER	UTLIDAD (PÉRDIDA) BRUTA	utilidad_bruta	1.00	approved	
+generic	*	ER	UTILIDAD (PÉRDIDA) BRUTA	utilidad_bruta	1.00	approved	
+generic	*	ER	TOTAL GASTOS DE OPERACIÓN	gastos_operacion	1.00	approved	
+generic	*	ER	UTILIDAD (PÉRDIDA) EN OPERACIÓN	utilidad_operacion	1.00	approved	
+generic	*	ER	UTLIDAD (PÉRDIDA) EN OPERACIÓN	utilidad_operacion	1.00	approved	
+generic	*	ER	GASTOS FINANCIEROS	gastos_financieros	1.00	approved	
+generic	*	ER	PRODUCTOS FINANCIEROS	productos_financieros	1.00	approved	
+generic	*	ER	INTERESES A FAVOR	intereses_a_favor	1.00	approved	
+generic	*	ER	UTILIDAD (PÉRDIDA) NETA	utilidad_neta	1.00	approved	
+generic	*	ER	INGRESOS COMISIÓN POR APERTURA	ingresos_por_comisiones	0.90	approved	
+generic	*	ER	INGRESOS COMISIONES POR FACTORAJE	ingresos_por_comisiones	0.90	approved	

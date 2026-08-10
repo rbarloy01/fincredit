@@ -1,0 +1,11 @@
+node_modules
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Runtime caches
+outputs/.cache/
+
+# Office temporary lock files
+~$*
+outputs/**/~$*
