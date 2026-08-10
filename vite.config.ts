@@ -285,6 +285,8 @@ export default defineConfig(({ mode }) => {
                   gemini: Boolean(env.GEMINI_API_KEY),
                   claude: Boolean(env.ANTHROPIC_API_KEY),
                   openai: Boolean(env.OPENAI_API_KEY),
+                  bytez: Boolean(env.BYTEZ_API_KEY),
+                  nvidiaNim: Boolean(env.NVIDIA_NIM_API_KEY),
                 },
                 profile: {
                   found: profileRes.ok && Boolean(profile?.id),
@@ -371,6 +373,61 @@ export default defineConfig(({ mode }) => {
             } catch (error: any) {
               res.statusCode = 500;
               res.end(JSON.stringify({ error: error?.message || 'Claude proxy error' }));
+            }
+          });
+
+          server.middlewares.use('/api/bytez', async (req, res) => {
+            if (req.method !== 'POST') {
+              res.statusCode = 405;
+              res.end('Method not allowed');
+              return;
+            }
+            try {
+              const incoming = JSON.parse(await readBody(req));
+              const apiKey = incoming.apiKey || env.BYTEZ_API_KEY;
+              if (!apiKey) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ error: 'BYTEZ_API_KEY missing — configure it in Settings' }));
+                return;
+              }
+              const providerKey = incoming.providerKey || env.BYTEZ_PROVIDER_KEY;
+              const result = await postJson(
+                'https://api.bytez.com/models/v2/openai/v1/chat/completions',
+                apiKey,
+                incoming.payload,
+                { Authorization: apiKey, ...(providerKey ? { 'provider-key': providerKey } : {}) }
+              );
+              res.statusCode = result.status;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(result.body);
+            } catch (error: any) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: error?.message || 'Bytez proxy error' }));
+            }
+          });
+
+          server.middlewares.use('/api/nvidia-nim', async (req, res) => {
+            if (req.method !== 'POST') {
+              res.statusCode = 405;
+              res.end('Method not allowed');
+              return;
+            }
+            try {
+              const incoming = JSON.parse(await readBody(req));
+              const apiKey = incoming.apiKey || env.NVIDIA_NIM_API_KEY;
+              if (!apiKey) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ error: 'NVIDIA_NIM_API_KEY missing — configure it in Settings' }));
+                return;
+              }
+              const baseUrl = String(incoming.baseUrl || env.NVIDIA_NIM_BASE_URL || 'https://integrate.api.nvidia.com/v1').replace(/\/$/, '');
+              const result = await postJson(`${baseUrl}/chat/completions`, apiKey, incoming.payload);
+              res.statusCode = result.status;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(result.body);
+            } catch (error: any) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: error?.message || 'NVIDIA NIM proxy error' }));
             }
           });
 

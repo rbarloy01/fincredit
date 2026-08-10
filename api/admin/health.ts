@@ -40,6 +40,8 @@ export default async function handler(req: any, res: any) {
         gemini: Boolean(process.env.GEMINI_API_KEY),
         claude: Boolean(process.env.ANTHROPIC_API_KEY),
         openai: Boolean(process.env.OPENAI_API_KEY),
+        bytez: Boolean(process.env.BYTEZ_API_KEY),
+        nvidiaNim: Boolean(process.env.NVIDIA_NIM_API_KEY),
       },
       ingestion: {
         googleServiceAccount: Boolean(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS),

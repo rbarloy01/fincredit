@@ -51,6 +51,8 @@ const PROVIDERS: { id: AIProvider; label: string; placeholder: string; color: st
   { id: 'gemini', label: 'Google Gemini', placeholder: 'AIzaSy...', color: 'bg-blue-100 text-blue-800 border-blue-200' },
   { id: 'claude', label: 'Anthropic Claude', placeholder: 'sk-ant-api03-...', color: 'bg-violet-100 text-violet-800 border-violet-200' },
   { id: 'openai', label: 'OpenAI GPT-4o', placeholder: 'sk-proj-...', color: 'bg-emerald-100 text-emerald-800 border-emerald-200' },
+  { id: 'bytez', label: 'Bytez', placeholder: 'bytez...', color: 'bg-amber-100 text-amber-800 border-amber-200' },
+  { id: 'nvidia_nim', label: 'NVIDIA NIM', placeholder: 'nvapi-...', color: 'bg-lime-100 text-lime-800 border-lime-200' },
 ];
 
 type HealthStatus = 'pass' | 'fail';
@@ -147,6 +149,8 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
         ['Gemini', health.aiKeys?.gemini, 'GEMINI_API_KEY'],
         ['Claude', health.aiKeys?.claude, 'ANTHROPIC_API_KEY'],
         ['OpenAI', health.aiKeys?.openai, 'OPENAI_API_KEY'],
+        ['Bytez', health.aiKeys?.bytez, 'BYTEZ_API_KEY'],
+        ['NVIDIA NIM', health.aiKeys?.nvidiaNim, 'NVIDIA_NIM_API_KEY'],
       ] as const;
       const configuredAi = aiEntries.filter(([, configured]) => configured).map(([label]) => label);
       const missingAi = aiEntries.filter(([, configured]) => !configured).map(([, , envName]) => envName);
@@ -187,7 +191,7 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
             : 'No hay llaves de IA configuradas del lado del servidor.',
           nextStep: configuredAi.length > 0
             ? 'El proveedor seleccionado debe corresponder a una llave disponible, o usar una llave local.'
-            : 'Agrega GEMINI_API_KEY, ANTHROPIC_API_KEY u OPENAI_API_KEY en las variables del despliegue.',
+            : 'Agrega GEMINI_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, BYTEZ_API_KEY o NVIDIA_NIM_API_KEY en las variables del despliegue.',
         },
         {
           id: 'profile-org',
@@ -397,7 +401,7 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
           {/* Provider selector */}
           <div className="mb-5">
             <label className={lbl}>Proveedor</label>
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
               {PROVIDERS.map(p => (
                 <button
                   key={p.id}

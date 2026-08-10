@@ -1,11 +1,11 @@
-// Multi-provider AI service: Gemini, Claude, OpenAI
-// Uses Vite proxy at /api/gemini, /api/claude, /api/openai
+// Multi-provider AI service: Gemini, Claude, OpenAI, Bytez, NVIDIA NIM
+// Uses Vite proxy at /api/gemini, /api/claude, /api/openai, /api/bytez, /api/nvidia-nim
 
 import loanTapePrompt from '../prompts/loan-tape.md?raw';
 import financialsPrompt from '../prompts/financials.md?raw';
 import { parseFinancialNumber } from '../lib/numberParsing';
 
-export type AIProvider = 'gemini' | 'claude' | 'openai';
+export type AIProvider = 'gemini' | 'claude' | 'openai' | 'bytez' | 'nvidia_nim';
 
 export interface AISettings {
   provider: AIProvider;
@@ -14,6 +14,8 @@ export interface AISettings {
 
 const SETTINGS_KEY = 'finmonitor_ai_settings';
 const GEMINI_MODEL = 'gemini-flash-latest';
+const BYTEZ_MODEL = 'Qwen/Qwen3-4B';
+const NVIDIA_NIM_MODEL = 'nvidia/llama-3.1-nemotron-70b-instruct';
 
 export interface AIMedia {
   base64: string;
@@ -305,6 +307,25 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
       || data.output?.flatMap((item: any) => item.content || []).map((part: any) => part.text || '').join('')
       || data.choices?.[0]?.message?.content
       || '';
+  }
+
+  if (provider === 'bytez' || provider === 'nvidia_nim') {
+    if (mediaItems.length > 0) {
+      throw new Error(`${provider === 'bytez' ? 'Bytez' : 'NVIDIA NIM'} está configurado para texto en este flujo. Usa Gemini/OpenAI/Claude para PDFs o imágenes, o pasa texto OCR.`);
+    }
+    const payload = {
+      model: provider === 'bytez' ? BYTEZ_MODEL : NVIDIA_NIM_MODEL,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      temperature: 0,
+      max_tokens: 8192,
+    };
+    const res = await fetchAIWithRetry(provider === 'bytez' ? '/api/bytez' : '/api/nvidia-nim', { apiKey, payload });
+    const data = await readAIResponseJson(res, provider === 'bytez' ? 'Bytez' : 'NVIDIA NIM');
+    if (!res.ok) throw new Error(data.error?.message || data.error || `${provider} error`);
+    return data.choices?.[0]?.message?.content || '';
   }
 
   throw new Error(`Proveedor desconocido: ${provider}`);
