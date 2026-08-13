@@ -21,12 +21,17 @@ DEFAULT_CLIENTS_ROOT = Path(
 )
 MAPPING_PATH = WORKSPACE / "config/account_mapping_memory.tsv"
 CLIENT_METADATA_PATH = WORKSPACE / "config/client_metadata_template.tsv"
+CLIENT_FOLLOWUPS_PATH = WORKSPACE / "config/client_followups.tsv"
 OUTPUT_DIR = WORKSPACE / "outputs/financial_monitor"
 CACHE_DIR = WORKSPACE / "outputs/.cache/pdf_accounts"
 AMOUNT_RE = r"\(?-?\s*(?:\d+\s+)?\d{1,3}(?:\s*,\s*\d{3})+(?:\.\d+)?\)?|\(?-?\s*\d+(?:\.\d+)?\)?"
 PAGE_TIMEOUT_SECONDS = 18
 SUPPORTED_SUFFIXES = {".pdf", ".xlsx", ".xls", ".webloc"}
 EXTRACTABLE_SUFFIXES = {".pdf", ".xlsx", ".xls"}
+FRONT_SHEETS = {"Inicio", "CRM Clientes", "Actualizar"}
+HIDDEN_SHEETS = {"Conceptos", "Cuentas Extraidas", "Credit Evidence", "Golden Sample", "Mapping Memory"}
+FOLLOWUP_COLUMNS = ["responsable", "proxima_accion", "fecha_actualizacion", "seguimiento_notas"]
+FACILITY_COLUMNS = ["facility_id", "facility_name", "facility_covenants"]
 MONTHS = {
     "ene": "01",
     "enero": "01",
@@ -307,14 +312,99 @@ def load_client_metadata(path):
         metadata = pd.read_csv(path, sep="\t")
     if "client" not in metadata.columns:
         raise ValueError("Client metadata must include a 'client' column.")
+    rename_map = {}
+    for col in metadata.columns:
+        key = normalize(col)
+        if key in {"facility", "facility id", "id facility", "linea credito id", "linea de credito id"}:
+            rename_map[col] = "facility_id"
+        elif key in {"facility name", "facility nombre", "nombre facility", "linea credito", "linea de credito"}:
+            rename_map[col] = "facility_name"
+        elif key in {"facility covenants", "covenants facility", "covenants", "covenants seleccionados"}:
+            rename_map[col] = "facility_covenants"
+    if rename_map:
+        metadata = metadata.rename(columns=rename_map)
     metadata["client"] = metadata["client"].astype(str)
     return metadata
+
+
+def _metadata_value_matches(value, target):
+    normalized = normalize(value)
+    if normalized == target:
+        return True
+    parts = [normalize(part) for part in re.split(r"[|,;/]+", "" if value is None else str(value))]
+    return target in parts
+
+
+def filter_client_metadata_by_facility(metadata, facility):
+    if metadata.empty or not facility:
+        return metadata
+    facility_cols = [col for col in FACILITY_COLUMNS if col in metadata.columns]
+    if not facility_cols:
+        raise ValueError(
+            "Facility filter requested, but client metadata has no facility columns. "
+            "Add facility_id, facility_name or facility_covenants."
+        )
+    target = normalize(facility)
+    mask = pd.Series(False, index=metadata.index)
+    for col in facility_cols:
+        mask = mask | metadata[col].map(lambda value: _metadata_value_matches(value, target))
+    filtered = metadata[mask].copy()
+    if filtered.empty:
+        available = sorted(
+            {
+                str(value).strip()
+                for col in facility_cols
+                for value in metadata[col].dropna().tolist()
+                if str(value).strip()
+            }
+        )
+        raise ValueError(f"Facility '{facility}' was not found in metadata. Available values: {', '.join(available)}")
+    return filtered
+
+
+def load_client_followups(path):
+    if not path or not Path(path).exists():
+        return pd.DataFrame(columns=["client", *FOLLOWUP_COLUMNS])
+    if str(path).lower().endswith((".xlsx", ".xls")):
+        followups = pd.read_excel(path)
+    else:
+        followups = pd.read_csv(path, sep="\t")
+    rename_map = {}
+    for col in followups.columns:
+        key = normalize(col)
+        if key in {"cliente", "client"}:
+            rename_map[col] = "client"
+        elif key in {"responsable", "owner"}:
+            rename_map[col] = "responsable"
+        elif key in {"proxima accion", "siguiente accion", "next action"}:
+            rename_map[col] = "proxima_accion"
+        elif key in {"fecha actualizacion", "fecha de actualizacion", "updated at", "last update"}:
+            rename_map[col] = "fecha_actualizacion"
+        elif key in {"seguimiento notas", "notas seguimiento", "followup notes"}:
+            rename_map[col] = "seguimiento_notas"
+    followups = followups.rename(columns=rename_map)
+    if "client" not in followups.columns:
+        raise ValueError("Client followups must include a 'client' column.")
+    followups["client"] = followups["client"].astype(str)
+    for col in FOLLOWUP_COLUMNS:
+        if col not in followups.columns:
+            followups[col] = ""
+    return followups[["client", *FOLLOWUP_COLUMNS]]
+
+
+def filter_followups_by_clients(followups, clients):
+    if followups.empty or "client" not in followups:
+        return followups
+    selected = {str(client) for client in clients}
+    return followups[followups["client"].astype(str).isin(selected)].copy()
 
 
 def enrich_with_client_metadata(df, metadata):
     if df.empty or metadata.empty:
         return df
     metadata_cols = [col for col in metadata.columns if col != "client"]
+    if metadata["client"].duplicated().any():
+        metadata = metadata.drop_duplicates(["client", *[col for col in FACILITY_COLUMNS if col in metadata.columns]])
     return df.merge(metadata[["client", *metadata_cols]], on="client", how="left")
 
 
@@ -649,6 +739,9 @@ def client_meta_for(concepts, client):
         "se_otorgo_credito",
         "contrato_drive_path",
         "contrato_drive_link",
+        "facility_id",
+        "facility_name",
+        "facility_covenants",
     }}
 
 
@@ -798,6 +891,32 @@ def calculate_ratios(concepts):
     return pd.DataFrame(rows), pd.DataFrame(qa_rows)
 
 
+def _selected_covenant_names(value):
+    if value is None or pd.isna(value) or not str(value).strip():
+        return set()
+    return {normalize(part) for part in re.split(r"[|,;/]+", str(value)) if normalize(part)}
+
+
+def filter_ratios_by_facility_covenants(ratios, metadata):
+    if ratios.empty or metadata.empty or "facility_covenants" not in metadata.columns:
+        return ratios
+    covenant_map = {}
+    for _, row in metadata.iterrows():
+        selected = _selected_covenant_names(row.get("facility_covenants"))
+        if selected:
+            covenant_map.setdefault(str(row["client"]), set()).update(selected)
+    if not covenant_map:
+        return ratios
+
+    def keep(row):
+        selected = covenant_map.get(str(row["client"]))
+        if not selected:
+            return True
+        return normalize(row.get("ratio")) in selected
+
+    return ratios[ratios.apply(keep, axis=1)].copy()
+
+
 def golden_sample_scaffold(ratios):
     if ratios.empty:
         return pd.DataFrame()
@@ -818,7 +937,13 @@ def _first_nonblank(series, default=""):
     return cleaned[0] if cleaned else default
 
 
-def build_crm_clients(documents, ratios, qa):
+def _client_groups(frame):
+    if frame.empty or "client" not in frame:
+        return {}
+    return {str(client): group for client, group in frame.groupby(frame["client"].astype(str), sort=False)}
+
+
+def build_crm_clients(documents, ratios, qa, followups=None):
     clients = set()
     if not documents.empty and "client" in documents:
         clients.update(documents["client"].dropna().astype(str))
@@ -826,12 +951,19 @@ def build_crm_clients(documents, ratios, qa):
         clients.update(ratios["client"].dropna().astype(str))
     if not qa.empty and "client" in qa:
         clients.update(qa["client"].dropna().astype(str))
+    if followups is not None and not followups.empty and "client" in followups:
+        clients.update(followups["client"].dropna().astype(str))
 
+    document_groups = _client_groups(documents)
+    ratio_groups = _client_groups(ratios)
+    qa_groups = _client_groups(qa)
+    followup_groups = _client_groups(followups if followups is not None else pd.DataFrame())
     rows = []
     for client in sorted(clients):
-        doc_client = documents[documents["client"].eq(client)] if not documents.empty else pd.DataFrame()
-        ratio_client = ratios[ratios["client"].eq(client)] if not ratios.empty else pd.DataFrame()
-        qa_client = qa[qa["client"].eq(client)] if not qa.empty and "client" in qa else pd.DataFrame()
+        doc_client = document_groups.get(client, pd.DataFrame())
+        ratio_client = ratio_groups.get(client, pd.DataFrame())
+        qa_client = qa_groups.get(client, pd.DataFrame())
+        followup_client = followup_groups.get(client, pd.DataFrame())
 
         periods = sorted(doc_client["period"].dropna().astype(str).unique()) if "period" in doc_client else []
         latest_period = periods[-1] if periods else ""
@@ -840,37 +972,54 @@ def build_crm_clients(documents, ratios, qa):
         documents_found = len(doc_client)
         status = "Listo para revisar"
         priority = "Media"
+        blocker = "Listo"
+        suggested_action = "Validar y actualizar proxima accion"
         if documents_found == 0:
             status = "Sin documentos"
             priority = "Alta"
+            blocker = "Faltan estados financieros"
+            suggested_action = "Agregar EEFF y reprocesar"
         elif ratio_review or qa_review:
             status = "Requiere revision"
             priority = "Alta"
+            blocker_parts = []
+            if ratio_review:
+                blocker_parts.append(f"{ratio_review} razones")
+            if qa_review:
+                blocker_parts.append(f"{qa_review} checks QA")
+            blocker = "Revisar " + " + ".join(blocker_parts)
+            suggested_action = "Abrir hojas Razones/QA y resolver alertas"
         elif ratio_client.empty:
             status = "Sin razones"
             priority = "Media"
+            blocker = "Sin razones calculadas"
+            suggested_action = "Validar mapeo de cuentas"
         else:
             status = "Actualizado"
             priority = "Baja"
+            suggested_action = "Confirmar seguimiento comercial"
 
         rows.append(
             {
                 "Cliente": client,
                 "Estatus": status,
                 "Prioridad": priority,
-                "Responsable": "",
-                "Proxima accion": "",
-                "Fecha actualizacion": "",
+                "Bloqueo principal": blocker,
+                "Accion sugerida": suggested_action,
+                "Responsable": _first_nonblank(followup_client.get("responsable")),
+                "Proxima accion": _first_nonblank(followup_client.get("proxima_accion")),
+                "Fecha actualizacion": _first_nonblank(followup_client.get("fecha_actualizacion")),
                 "Ultimo periodo": latest_period,
+                "Facility ID": _first_nonblank(doc_client.get("facility_id")) or _first_nonblank(ratio_client.get("facility_id")),
+                "Facility": _first_nonblank(doc_client.get("facility_name")) or _first_nonblank(ratio_client.get("facility_name")),
+                "Covenants facility": _first_nonblank(doc_client.get("facility_covenants")) or _first_nonblank(ratio_client.get("facility_covenants")),
                 "Docs": documents_found,
-                "Periodos": len(periods),
-                "Razones": len(ratio_client),
                 "Razones revisar": ratio_review,
                 "QA revisar": qa_review,
                 "Credito": _first_nonblank(doc_client.get("se_otorgo_credito")),
                 "Producto": _first_nonblank(doc_client.get("producto_principal")),
-                "Tipo EEFF": _first_nonblank(doc_client.get("tipo_estado_financiero")),
                 "Link contrato": _first_nonblank(doc_client.get("contrato_drive_link")),
+                "Notas seguimiento": _first_nonblank(followup_client.get("seguimiento_notas")),
                 "Notas": _first_nonblank(doc_client.get("notes")),
             }
         )
@@ -909,12 +1058,209 @@ def build_update_guide(output_path):
     return pd.DataFrame(
         [
             {"Paso": 1, "Accion": "Editar clientes", "Detalle": "Actualiza config/client_metadata_template.tsv para campos permanentes como producto, credito, contrato y notas."},
-            {"Paso": 2, "Accion": "Agregar documentos", "Detalle": "Coloca estados financieros en la carpeta del cliente o en el staging de Drive usado por la corrida."},
-            {"Paso": 3, "Accion": "Reprocesar", "Detalle": "Ejecuta scripts/run_finmonitor_prod.sh o corre financial_monitor_pipeline.py con --clients y --output."},
-            {"Paso": 4, "Accion": "Revisar CRM Clientes", "Detalle": "Filtra Prioridad Alta, llena Responsable / Proxima accion / Fecha actualizacion y atiende Razones revisar / QA revisar."},
-            {"Paso": 5, "Accion": "Auditar detalle", "Detalle": f"El archivo objetivo actual es {output_path}. Las hojas tecnicas quedan despues del CRM."},
+            {"Paso": 2, "Accion": "Editar seguimiento", "Detalle": "Actualiza config/client_followups.tsv para conservar Responsable / Proxima accion / Fecha actualizacion / Notas seguimiento entre corridas."},
+            {"Paso": 3, "Accion": "Agregar documentos", "Detalle": "Coloca estados financieros en la carpeta del cliente o en el staging de Drive usado por la corrida."},
+            {"Paso": 4, "Accion": "Reprocesar", "Detalle": "Ejecuta scripts/run_finmonitor_prod.sh o corre financial_monitor_pipeline.py con --clients y --output."},
+            {"Paso": 5, "Accion": "Revisar CRM Clientes", "Detalle": "Filtra Prioridad Alta, lee Bloqueo principal / Accion sugerida y llena Responsable / Proxima accion / Fecha actualizacion."},
+            {"Paso": 6, "Accion": "Auditar detalle", "Detalle": f"El archivo objetivo actual es {output_path}. Revisa Razones, QA, Documentos y Auditoria; las hojas raw quedan ocultas para no ensuciar la vista principal."},
         ]
     )
+
+
+def _status_fill(value):
+    normalized = normalize(value)
+    if normalized in {"actualizado", "ok", "calculated", "listo para revisar"}:
+        return PatternFill("solid", fgColor="E9F7EF")
+    if normalized in {"requiere revision", "sin razones", "needs review", "needs_review", "media"}:
+        return PatternFill("solid", fgColor="FFF3D6")
+    if normalized in {"sin documentos", "missing financial dir", "missing_financial_dir", "no existe carpeta de estados financieros", "alta", "error", "unmapped"}:
+        return PatternFill("solid", fgColor="FDE8E8")
+    return PatternFill("solid", fgColor="EAF3FF")
+
+
+def _status_font_color(value):
+    normalized = normalize(value)
+    if normalized in {"actualizado", "ok", "calculated", "listo para revisar"}:
+        return "15803D"
+    if normalized in {"requiere revision", "sin razones", "needs review", "needs_review", "media"}:
+        return "B45309"
+    if normalized in {"sin documentos", "missing financial dir", "missing_financial_dir", "no existe carpeta de estados financieros", "alta", "error", "unmapped"}:
+        return "B91C1C"
+    return "183A59"
+
+
+def _dashboard_action(crm, documents, accounts, concepts, ratios, qa):
+    missing = pd.DataFrame()
+    if not documents.empty and "status" in documents:
+        missing = documents[documents["status"].astype(str).eq("missing_financial_dir")]
+    if not missing.empty:
+        path = _first_nonblank(missing.get("path"))
+        return (
+            "Corregir ruta fuente",
+            "No existe carpeta de estados financieros",
+            "Apuntar clients-root/staging a una carpeta valida y reprocesar.",
+            path,
+        )
+    if len(accounts) == 0:
+        return (
+            "Validar extraccion",
+            "No se extrajeron cuentas",
+            "Confirmar que los PDFs/Excel sean legibles y que el limite de paginas incluya los estados principales.",
+            "",
+        )
+    if len(concepts) == 0:
+        return (
+            "Mapear cuentas",
+            "No hay conceptos mapeados",
+            "Completar Mapping Memory para las etiquetas nuevas y reprocesar.",
+            "",
+        )
+    if len(ratios) == 0:
+        return (
+            "Revisar covenants",
+            "No hay razones calculadas",
+            "Validar facility_covenants, periodos y conceptos requeridos para cada razon.",
+            "",
+        )
+    qa_pending = int(qa["status"].eq("needs_review").sum()) if not qa.empty and "status" in qa else 0
+    ratio_pending = int(ratios["review_status"].eq("needs_review").sum()) if not ratios.empty and "review_status" in ratios else 0
+    if qa_pending or ratio_pending:
+        return (
+            "Resolver alertas",
+            f"{ratio_pending} razones / {qa_pending} QA pendientes",
+            "Abrir Razones y QA, filtrar needs_review y documentar el seguimiento.",
+            "",
+        )
+    return (
+        "Confirmar seguimiento",
+        "Sin alertas principales",
+        "Actualizar Responsable, Proxima accion y Fecha actualizacion si aplica.",
+        "",
+    )
+
+
+def _set_range_border(ws, cell_range, color="C8D3DF"):
+    side = Side(style="thin", color=color)
+    for row in ws[cell_range]:
+        for cell in row:
+            cell.border = Border(top=side, bottom=side, left=side, right=side)
+
+
+def style_inicio_dashboard(ws, crm, documents, accounts, concepts, ratios, qa, output_path):
+    ws.delete_rows(1, ws.max_row)
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "A8"
+    ws.sheet_properties.tabColor = "183A59"
+
+    widths = [19, 18, 18, 18, 24, 28, 24, 34]
+    for col_idx, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    client = _first_nonblank(crm["Cliente"]) if not crm.empty and "Cliente" in crm else "Clientes"
+    facility = _first_nonblank(crm["Facility"]) if not crm.empty and "Facility" in crm else ""
+    status = _first_nonblank(crm["Estatus"]) if not crm.empty and "Estatus" in crm else "Pendiente"
+    priority = _first_nonblank(crm["Prioridad"]) if not crm.empty and "Prioridad" in crm else "Media"
+    credit = _first_nonblank(crm["Credito"]) if not crm.empty and "Credito" in crm else ""
+    product = _first_nonblank(crm["Producto"]) if not crm.empty and "Producto" in crm else ""
+    action, blocker, next_step, missing_path = _dashboard_action(crm, documents, accounts, concepts, ratios, qa)
+    qa_pending = int(qa["status"].eq("needs_review").sum()) if not qa.empty and "status" in qa else 0
+    ratio_pending = int(ratios["review_status"].eq("needs_review").sum()) if not ratios.empty and "review_status" in ratios else 0
+
+    ws.merge_cells("A1:H1")
+    ws["A1"] = "Monitor financiero"
+    ws["A1"].font = Font(bold=True, size=18, color="102033")
+    ws["A1"].fill = PatternFill("solid", fgColor="E7F6F2")
+    ws.row_dimensions[1].height = 28
+
+    ws.merge_cells("A2:H2")
+    ws["A2"] = f"{client}{' | ' + facility if facility else ''} | Export: {Path(output_path).name}"
+    ws["A2"].font = Font(bold=True, color="102033")
+    ws["A2"].fill = PatternFill("solid", fgColor="EAF3FF")
+    ws.row_dimensions[2].height = 22
+
+    kpis = [
+        ("Clientes", len(crm), "Estatus", status, "Razones", len(ratios), "QA pendientes", qa_pending),
+        ("Docs indexados", len(documents), "Prioridad", priority, "Razones a revisar", ratio_pending, "Credito", credit),
+        ("Cuentas extraidas", len(accounts), "Bloqueo", blocker, "Conceptos", len(concepts), "Producto", product),
+    ]
+    for row_idx, values in enumerate(kpis, start=4):
+        for col_idx, value in enumerate(values, start=1):
+            cell = ws.cell(row_idx, col_idx)
+            cell.value = value
+            cell.alignment = Alignment(wrap_text=True, vertical="center")
+            if col_idx % 2:
+                cell.font = Font(bold=True, color="536579")
+            else:
+                cell.font = Font(bold=True, size=12, color=_status_font_color(value) if col_idx in {4, 8} else "102033")
+                cell.number_format = "#,##0"
+    _set_range_border(ws, "A4:H6")
+    for row in range(4, 7):
+        for col in range(1, 9):
+            ws.cell(row, col).fill = _status_fill(status) if col in {3, 4} else PatternFill("solid", fgColor="FFFFFF")
+        ws.row_dimensions[row].height = 24
+
+    headers = ["Siguiente accion", "Cliente", "Estatus", "Prioridad", "Bloqueo principal", "Accion sugerida", "Responsable", "Proxima accion"]
+    details = [
+        action,
+        client,
+        status,
+        priority,
+        blocker,
+        next_step,
+        _first_nonblank(crm["Responsable"]) if not crm.empty and "Responsable" in crm else "",
+        _first_nonblank(crm["Proxima accion"]) if not crm.empty and "Proxima accion" in crm else "",
+    ]
+    for col_idx, value in enumerate(headers, start=1):
+        cell = ws.cell(8, col_idx)
+        cell.value = value
+        cell.font = Font(bold=True, color="102033")
+        cell.fill = PatternFill("solid", fgColor="EAF3FF")
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
+    for col_idx, value in enumerate(details, start=1):
+        cell = ws.cell(9, col_idx)
+        cell.value = value
+        cell.fill = _status_fill(status)
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
+        if col_idx in {3, 4}:
+            cell.font = Font(bold=True, color=_status_font_color(value))
+    _set_range_border(ws, "A8:H9")
+    ws.row_dimensions[8].height = 22
+    ws.row_dimensions[9].height = 48
+
+    ws.merge_cells("A12:H12")
+    ws["A12"] = "Diagnostico de la corrida"
+    ws["A12"].font = Font(bold=True, color="102033")
+    ws["A12"].fill = PatternFill("solid", fgColor="E7F6F2")
+    checks = [
+        ("Senal", "Resultado", "Que significa", "Accion"),
+        ("Documentos", len(documents), "Archivos financieros localizados.", "Revisar Documentos para fuente/periodo."),
+        ("Extraccion", len(accounts), "Cuentas leidas desde PDF/Excel.", "Validar PDFs/Excel si el conteo es cero."),
+        ("Conceptos", len(concepts), "Cuentas normalizadas para calculo.", "Actualizar Mapping Memory si falta mapeo."),
+        ("Razones", len(ratios), "Razones financieras calculadas.", "Filtrar Razones por needs_review."),
+        ("QA", qa_pending, "Checks que requieren revision.", "Abrir QA y resolver diferencias."),
+    ]
+    for row_offset, values in enumerate(checks, start=13):
+        for col_idx, value in enumerate(values, start=1):
+            cell = ws.cell(row_offset, col_idx)
+            cell.value = value
+            cell.alignment = Alignment(wrap_text=True, vertical="center")
+            if row_offset == 13:
+                cell.font = Font(bold=True, color="102033")
+                cell.fill = PatternFill("solid", fgColor="EAF3FF")
+            elif col_idx == 1:
+                cell.font = Font(bold=True, color="102033")
+    _set_range_border(ws, "A13:D18")
+    for row in range(14, 19):
+        ws.row_dimensions[row].height = 28
+        ws.cell(row, 2).number_format = "#,##0"
+
+    if missing_path:
+        ws.merge_cells("A21:H22")
+        ws["A21"] = f"Ruta faltante: {missing_path}"
+        ws["A21"].font = Font(bold=True, color="B91C1C")
+        ws["A21"].fill = PatternFill("solid", fgColor="FDE8E8")
+        ws["A21"].alignment = Alignment(wrap_text=True, vertical="center")
+        _set_range_border(ws, "A21:H22", color="F5B7B1")
 
 
 def style_workbook(writer):
@@ -939,12 +1285,61 @@ def style_workbook(writer):
         "media": PatternFill("solid", fgColor="FFF2CC"),
         "baja": PatternFill("solid", fgColor="D9EAD3"),
     }
+    status_headers = {
+        "review_status",
+        "status",
+        "mapping_status",
+        "source_method",
+        "estatus_crm",
+        "prioridad",
+        "Estatus",
+        "Prioridad",
+    }
+    long_headers = {
+        "path",
+        "source_ref",
+        "raw_value",
+        "review_notes",
+        "mapping_notes",
+        "details",
+        "contrato_drive_path",
+        "contrato_drive_link",
+        "proxima_accion",
+        "detalle",
+        "Link contrato",
+        "Proxima accion",
+        "Detalle",
+        "Bloqueo principal",
+        "Accion sugerida",
+        "Notas seguimiento",
+        "Notas",
+        "notes",
+        "formula",
+    }
+    whole_number_headers = {
+        "Docs",
+        "Razones revisar",
+        "QA revisar",
+        "Valor",
+        "count",
+        "file_size_bytes",
+        "unit_scale",
+        "numerator",
+        "denominator",
+        "difference",
+    }
     for ws in writer.book.worksheets:
         if ws.max_row < 1:
             continue
-        ws.sheet_view.showGridLines = False
+        is_front_sheet = ws.title in FRONT_SHEETS
+        ws.sheet_view.showGridLines = not is_front_sheet
         ws.freeze_panes = "A2"
-        ws.auto_filter.ref = ws.dimensions
+        if is_front_sheet:
+            ws.auto_filter.ref = ws.dimensions
+        elif ws.max_row <= 1000 and ws.max_column <= 30:
+            ws.auto_filter.ref = ws.dimensions
+        if ws.title in HIDDEN_SHEETS:
+            ws.sheet_state = "hidden"
         for cell in ws[1]:
             cell.fill = header_fill
             cell.font = header_font
@@ -954,18 +1349,36 @@ def style_workbook(writer):
         for col_idx, header in enumerate(headers, start=1):
             letter = get_column_letter(col_idx)
             width = 14
-            if header in {"path", "source_ref", "raw_value", "review_notes", "mapping_notes", "details", "contrato_drive_path", "contrato_drive_link", "proxima_accion", "detalle", "Link contrato", "Proxima accion", "Detalle"}:
+            if header in long_headers:
                 width = 44
-            elif header in {"filename", "raw_label", "formula", "notas", "Notas"}:
+            elif header in {"filename", "raw_label", "formula", "notas", "Notas", "Notas seguimiento"}:
                 width = 32
-            elif header in {"client", "cliente", "Cliente", "period", "ratio", "concept", "estatus_crm", "producto_principal", "Estatus", "Producto"}:
+            elif header in {"client", "cliente", "Cliente", "period", "ratio", "concept", "estatus_crm", "producto_principal", "Estatus", "Producto", "facility_id", "facility_name", "Facility ID", "Facility"}:
                 width = 20
             elif header in {"responsable", "Responsable", "prioridad", "Prioridad", "ultimo_periodo", "fecha_actualizacion", "Ultimo periodo", "Fecha actualizacion", "Tipo EEFF"}:
                 width = 18
             ws.column_dimensions[letter].width = width
         for row in ws.iter_rows(min_row=2):
             for cell in row:
-                cell.alignment = Alignment(wrap_text=cell.column_letter in {"E", "P", "Q"}, vertical="top")
+                header = headers[cell.column - 1] if cell.column - 1 < len(headers) else ""
+                cell.alignment = Alignment(wrap_text=header in long_headers, vertical="top")
+                if header == "result":
+                    cell.number_format = '0.0%;[Red](0.0%);-'
+                elif header == "result_pct":
+                    cell.number_format = '0.0;[Red](0.0);-'
+                elif header in whole_number_headers:
+                    cell.number_format = '#,##0;[Red](#,##0);-'
+                elif isinstance(cell.value, float):
+                    cell.number_format = '#,##0.00;[Red](#,##0.00);-'
+                if header in status_headers:
+                    fill = status_fills.get(str(cell.value).lower())
+                    if fill:
+                        cell.fill = fill
+        if not is_front_sheet:
+            continue
+        for row in ws.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = Alignment(wrap_text=cell.column_letter in {"D", "E", "G", "O", "P", "Q"}, vertical="top")
                 if isinstance(cell.value, float):
                     cell.number_format = '#,##0.00;[Red](#,##0.00);-'
                 if headers[cell.column - 1] in {"review_status", "status", "mapping_status", "source_method", "estatus_crm", "prioridad", "Estatus", "Prioridad"}:
@@ -985,10 +1398,13 @@ def style_workbook(writer):
                 ws.cell(row_idx, 1).font = Font(bold=True, color="16324F")
                 ws.cell(row_idx, 3).number_format = '#,##0'
         if ws.title == "CRM Clientes":
-            for col_idx in range(8, 13):
+            ws.sheet_view.zoomScale = 90
+            ws.sheet_properties.tabColor = "16324F"
+            ws.freeze_panes = "B2"
+            for col_idx in range(10, 13):
                 for row_idx in range(2, ws.max_row + 1):
                     ws.cell(row_idx, col_idx).number_format = '#,##0'
-            for col_idx in range(4, 7):
+            for col_idx in range(6, 9):
                 for row_idx in range(2, ws.max_row + 1):
                     ws.cell(row_idx, col_idx).font = Font(color="0000FF")
                     ws.cell(row_idx, col_idx).fill = PatternFill("solid", fgColor="FFF2CC")
@@ -1008,8 +1424,8 @@ def style_workbook(writer):
                 ws.row_dimensions[row[0].row].height = 36
 
 
-def export_workbook(path, documents, accounts, concepts, ratios, qa, mapping, credit_evidence):
-    crm = build_crm_clients(documents, ratios, qa)
+def export_workbook(path, documents, accounts, concepts, ratios, qa, mapping, credit_evidence, followups=None):
+    crm = build_crm_clients(documents, ratios, qa, followups=followups)
     inicio = build_inicio(crm, documents, accounts, concepts, ratios, qa)
     update_guide = build_update_guide(path)
     audit = pd.DataFrame(
@@ -1041,6 +1457,7 @@ def export_workbook(path, documents, accounts, concepts, ratios, qa, mapping, cr
         audit.to_excel(writer, sheet_name="Auditoria", index=False)
         mapping.to_excel(writer, sheet_name="Mapping Memory", index=False)
         style_workbook(writer)
+        style_inicio_dashboard(writer.book["Inicio"], crm, documents, accounts, concepts, ratios, qa, path)
 
 
 def main():
@@ -1049,6 +1466,8 @@ def main():
     parser.add_argument("--clients-root", default=str(DEFAULT_CLIENTS_ROOT))
     parser.add_argument("--clients", default="Ventus", help="Comma-separated client folder names")
     parser.add_argument("--client-metadata", default=str(CLIENT_METADATA_PATH))
+    parser.add_argument("--client-followups", default=str(CLIENT_FOLLOWUPS_PATH))
+    parser.add_argument("--facility", default="", help="Facility id or name to isolate in client metadata and report output.")
     parser.add_argument("--from-period", default="2025-01-01")
     parser.add_argument("--to-period", default="")
     parser.add_argument("--max-documents", type=int, default=40)
@@ -1074,6 +1493,9 @@ def main():
     clients_root = Path(args.clients_root)
     clients = [client.strip() for client in args.clients.split(",") if client.strip()]
     metadata = load_client_metadata(args.client_metadata)
+    metadata = filter_client_metadata_by_facility(metadata, args.facility)
+    followups = load_client_followups(args.client_followups)
+    followups = filter_followups_by_clients(followups, clients)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     step = log_step("discovering documents")
@@ -1112,13 +1534,14 @@ def main():
     mapped_accounts = map_accounts(accounts, mapping)
     concepts = best_concepts(mapped_accounts)
     ratios, qa = calculate_ratios(concepts) if not concepts.empty else (pd.DataFrame(), pd.DataFrame())
+    ratios = filter_ratios_by_facility_covenants(ratios, metadata)
     pair_qa = pairing_qa(documents)
     if not pair_qa.empty:
         qa = pd.concat([qa, pair_qa], ignore_index=True)
     log_step(f"mapped concepts={len(concepts)} ratios={len(ratios)}", step)
 
     step = log_step("exporting workbook")
-    export_workbook(Path(args.output), documents, mapped_accounts, concepts, ratios, qa, mapping, credit_evidence)
+    export_workbook(Path(args.output), documents, mapped_accounts, concepts, ratios, qa, mapping, credit_evidence, followups=followups)
     log_step(f"exported {args.output}", step)
     log_step("finished", started)
     print(args.output)
