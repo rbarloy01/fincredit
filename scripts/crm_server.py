@@ -536,7 +536,7 @@ HTML = r"""<!doctype html>
       const data = await api("/api/crm");
       state.rows = data.rows;
       renderMetrics(data.summary);
-      byId("stamp").textContent = data.workbookUpdated ? `Workbook: ${data.workbookUpdated}` : "";
+      byId("stamp").textContent = data.workbookUpdated ? `Workbook: ${data.workbookUpdated} / ${data.version || "sin-version"}` : "";
       renderRows();
       selectClient(state.selected?.["Cliente"] || state.rows[0]?.["Cliente"]);
     }
