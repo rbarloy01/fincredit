@@ -16,6 +16,8 @@ WORKBOOK_PATH = ROOT / "outputs/financial_monitor/financial_monitor_pipeline.xls
 FOLLOWUPS_PATH = ROOT / "config/client_followups.tsv"
 RUN_SCRIPT = ROOT / "scripts/run_finmonitor_prod.sh"
 FOLLOWUP_COLUMNS = ["client", "responsable", "proxima_accion", "fecha_actualizacion", "seguimiento_notas"]
+APP_VERSION = "loan-tape-prod-2026-08-14-2"
+CRM_CACHE = {"mtime_ns": None, "payload": None}
 
 
 HTML = r"""<!doctype html>
@@ -499,9 +501,11 @@ HTML = r"""<!doctype html>
           <td>${clean(row["Producto"])}</td>
         </tr>`;
       }).join("");
-      [...document.querySelectorAll("tbody tr")].forEach((tr) => {
-        tr.addEventListener("click", () => selectClient(tr.dataset.client));
-      });
+    }
+
+    function scheduleRenderRows() {
+      clearTimeout(state.renderTimer);
+      state.renderTimer = setTimeout(renderRows, 80);
     }
 
     function selectClient(client) {
@@ -583,7 +587,11 @@ HTML = r"""<!doctype html>
       }
     }
 
-    byId("search").addEventListener("input", renderRows);
+    byId("rows").addEventListener("click", (event) => {
+      const row = event.target.closest("tr[data-client]");
+      if (row) selectClient(row.dataset.client);
+    });
+    byId("search").addEventListener("input", scheduleRenderRows);
     byId("priority").addEventListener("change", renderRows);
     byId("status").addEventListener("change", renderRows);
     byId("refresh").addEventListener("click", load);
@@ -602,6 +610,7 @@ def _json_response(handler, status, payload):
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
@@ -636,6 +645,22 @@ def read_crm_rows():
       return rows
     finally:
       workbook.close()
+
+
+def read_crm_payload():
+    stat = WORKBOOK_PATH.stat()
+    if CRM_CACHE["payload"] is not None and CRM_CACHE["mtime_ns"] == stat.st_mtime_ns:
+        return CRM_CACHE["payload"]
+    rows = read_crm_rows()
+    updated = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime))
+    payload = {
+        "rows": rows,
+        "summary": summarize(rows),
+        "workbookUpdated": updated,
+        "version": APP_VERSION,
+    }
+    CRM_CACHE.update({"mtime_ns": stat.st_mtime_ns, "payload": payload})
+    return payload
 
 
 def summarize(rows):
@@ -701,15 +726,15 @@ class Handler(BaseHTTPRequestHandler):
             body = HTML.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-CRM-Version", APP_VERSION)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
             return
         if route == "/api/crm":
             try:
-                rows = read_crm_rows()
-                updated = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(WORKBOOK_PATH.stat().st_mtime))
-                _json_response(self, 200, {"rows": rows, "summary": summarize(rows), "workbookUpdated": updated})
+                _json_response(self, 200, read_crm_payload())
             except Exception as exc:
                 _json_response(self, 500, {"error": str(exc)})
             return
@@ -737,6 +762,7 @@ class Handler(BaseHTTPRequestHandler):
                 if result.returncode:
                     _json_response(self, 500, {"error": result.stderr or result.stdout or "Pipeline failed"})
                 else:
+                    CRM_CACHE.update({"mtime_ns": None, "payload": None})
                     lines = [line for line in result.stdout.splitlines() if line.strip()]
                     _json_response(self, 200, {"message": lines[-1] if lines else "Procesado."})
             except Exception as exc:
