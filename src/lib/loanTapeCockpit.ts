@@ -143,7 +143,14 @@ export function buildCockpitData(tapes: LoanTape_DB[]): CockpitData {
   const active = activeRows(all);
   const periods = Array.from(new Set(active.map(r => r.file_date).filter(Boolean) as string[])).sort();
   const labels = periods.map(periodLabel);
-  const byPeriod = (p: string) => active.filter(r => r.file_date === p);
+  const rowsByPeriod = new Map<string, StandardLoan[]>();
+  for (const row of active) {
+    if (!row.file_date) continue;
+    const bucket = rowsByPeriod.get(row.file_date);
+    if (bucket) bucket.push(row);
+    else rowsByPeriod.set(row.file_date, [row]);
+  }
+  const byPeriod = (p: string) => rowsByPeriod.get(p) || [];
 
   const series: CockpitPeriodPoint[] = periods.map((p, i) => {
     const rows = byPeriod(p);
@@ -242,7 +249,9 @@ export function buildVintage(data: CockpitData, period?: string): CockpitVintage
   const m = new Map<string, StandardLoan[]>();
   for (const r of rows) {
     const cohort = r.start_date && /^\d{4}/.test(r.start_date) ? r.start_date.slice(0, 4) : 'Sin fecha';
-    m.set(cohort, [...(m.get(cohort) || []), r]);
+    const bucket = m.get(cohort);
+    if (bucket) bucket.push(r);
+    else m.set(cohort, [r]);
   }
   return [...m.entries()].map(([cohort, items]) => {
     const total = sum(items);

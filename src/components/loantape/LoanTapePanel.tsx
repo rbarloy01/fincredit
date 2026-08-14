@@ -88,31 +88,59 @@ const SEVERITY_COLORS: Record<string, string> = {
 const fmtMoney = (value: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 0 }).format(value || 0);
 const fmtPct = (value: number) => `${((value || 0) * 100).toFixed(1)}%`;
 const fmtNum = (value: number) => Number.isFinite(Number(value)) ? Number(value).toFixed(2) : '—';
+const fmtSignal = (value: string) => value === 'high' ? 'Alta' : value === 'medium' ? 'Media' : value === 'low' ? 'Baja' : '—';
 const QUICK_QUESTIONS = ['qué falta', 'mora', 'top concentración', 'por producto', 'cambios vs mes anterior'];
 const BLOCK_PROMPTS = ['Resumen ejecutivo', 'Gráfica de mora por DPD', 'Top clientes por saldo', 'Cartera por producto', 'Evolución vs mes anterior'];
 function SmallDataTable({ title, rows, columns }: { title: string; rows?: any[]; columns: Array<{ key: string; label: string; format?: (value: any) => string }> }) {
   if (!rows?.length) return null;
   return (
-    <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-      <div className="px-5 py-3 border-b border-slate-100">
-        <p className="text-xs font-black text-slate-700 uppercase tracking-widest">{title}</p>
+    <div className="bg-white rounded-xl border border-slate-300 overflow-hidden shadow-sm">
+      <div className="px-5 py-3 border-b border-slate-200 bg-slate-50">
+        <p className="text-xs font-black text-slate-900 uppercase tracking-widest">{title}</p>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-xs">
           <thead>
-            <tr className="bg-slate-50">
-              {columns.map(c => <th key={c.key} className="text-left px-4 py-2 font-black text-slate-600 uppercase tracking-wider">{c.label}</th>)}
+            <tr className="bg-slate-100">
+              {columns.map(c => <th key={c.key} className="text-left px-4 py-2 font-black text-slate-800 uppercase tracking-wider">{c.label}</th>)}
             </tr>
           </thead>
           <tbody>
             {rows.slice(0, 20).map((row, i) => (
-              <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}>
-                {columns.map(c => <td key={c.key} className="px-4 py-2.5 font-semibold text-slate-800">{c.format ? c.format(row[c.key]) : String(row[c.key] ?? '—')}</td>)}
+              <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
+                {columns.map(c => (
+                  <td key={c.key} className="border-t border-slate-100 px-4 py-2.5 font-semibold text-slate-900">
+                    {c.format ? c.format(row[c.key]) : String(row[c.key] ?? '—')}
+                  </td>
+                ))}
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+function ConcentrationStrip({ rows }: { rows?: any[] }) {
+  if (!rows?.length) return null;
+  const top = rows[0];
+  const top3 = rows.slice(0, 3).reduce((acc, row) => acc + (Number(row.pct) || 0), 0);
+  const top10 = rows.slice(0, 10).reduce((acc, row) => acc + (Number(row.pct) || 0), 0);
+  const metrics = [
+    { label: 'Top cliente', value: top.name || '—', sub: `${fmtPct(top.pct)} del saldo`, tone: top.pct > 0.2 ? 'text-rose-700 bg-rose-50 border-rose-200' : top.pct > 0.1 ? 'text-amber-700 bg-amber-50 border-amber-200' : 'text-slate-800 bg-white border-slate-300' },
+    { label: 'Top 3', value: fmtPct(top3), sub: 'concentración acumulada', tone: top3 > 0.5 ? 'text-rose-700 bg-rose-50 border-rose-200' : 'text-slate-800 bg-white border-slate-300' },
+    { label: 'Top 10', value: fmtPct(top10), sub: `${Math.min(rows.length, 10)} clientes medidos`, tone: 'text-slate-800 bg-white border-slate-300' },
+  ];
+  return (
+    <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+      {metrics.map(item => (
+        <div key={item.label} className={`rounded-xl border p-4 ${item.tone}`}>
+          <p className="text-[10px] font-black uppercase tracking-widest opacity-80">{item.label}</p>
+          <p className="mt-1 truncate text-lg font-black">{item.value}</p>
+          <p className="mt-0.5 text-xs font-bold opacity-80">{item.sub}</p>
+        </div>
+      ))}
     </div>
   );
 }
@@ -674,6 +702,9 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                   />
 
                   <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                    <div className="xl:col-span-2">
+                      <ConcentrationStrip rows={analysis.concentrations?.by_client} />
+                    </div>
                     <SmallDataTable
                       title="Concentración por Cliente"
                       rows={analysis.concentrations?.by_client}
@@ -682,6 +713,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                         { key: 'count', label: 'Créditos' },
                         { key: 'balance', label: 'Saldo', format: fmtMoney },
                         { key: 'pct', label: '%', format: fmtPct },
+                        { key: 'severity', label: 'Señal', format: fmtSignal },
                       ]}
                     />
                     <SmallDataTable

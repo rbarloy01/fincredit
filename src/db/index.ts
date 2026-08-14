@@ -1647,6 +1647,17 @@ export const db = {
     }, {} as Record<string, FinancialStatement_DB[]>);
   },
 
+  async getDashboardStatementsForClients(clientIds: string[]): Promise<Record<string, FinancialStatement_DB[]>> {
+    if (!clientIds.length) return {};
+    const columns = 'id,client_id,source_document_id,source_company_name,document_type,period,period_date,upload_date,file_name,mapped_data';
+    const { data, error } = await supabase.from('financial_statements').select(columns).in('client_id', clientIds).order('period_date');
+    if (error) err('getDashboardStatementsForClients', error);
+    return mergeStatementRows((data || []).map(toStatement)).reduce((acc, statement) => {
+      (acc[statement.clientId] ||= []).push(statement);
+      return acc;
+    }, {} as Record<string, FinancialStatement_DB[]>);
+  },
+
   async getStatementById(id: string): Promise<FinancialStatement_DB | undefined> {
     const { data, error } = await supabase.from('financial_statements').select('*').eq('id', id).maybeSingle();
     if (error) err('getStatementById', error);

@@ -262,7 +262,9 @@ export function groupBy(rows: StandardLoan[], field: keyof StandardLoan, limit =
   for (const row of rows) {
     const key = String(row[field] || '').trim();
     if (!key || ['total', 'top', 'otros'].includes(normalize(key))) continue;
-    map.set(key, [...(map.get(key) || []), row]);
+    const bucket = map.get(key);
+    if (bucket) bucket.push(row);
+    else map.set(key, [row]);
   }
   return Array.from(map.entries())
     .map(([name, items]) => {
@@ -300,7 +302,9 @@ export function loanTypeProfile(rows: StandardLoan[]) {
   for (const row of rows) {
     const key = String(row.loan_type || '').trim();
     if (!key) continue;
-    map.set(key, [...(map.get(key) || []), row]);
+    const bucket = map.get(key);
+    if (bucket) bucket.push(row);
+    else map.set(key, [row]);
   }
   return Array.from(map.entries()).map(([name, items]) => {
     const balance = sum(items);

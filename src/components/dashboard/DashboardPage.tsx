@@ -33,6 +33,12 @@ function fmtDate(value?: string | Date | null) {
   return new Intl.DateTimeFormat('es-MX', { dateStyle: 'medium' }).format(d);
 }
 
+const DETAIL_BATCH_SIZE = 10;
+
+function yieldToBrowser() {
+  return new Promise<void>(resolve => window.setTimeout(resolve, 0));
+}
+
 const RISK_LABEL: Record<string, string> = { low: 'Bajo', medium: 'Medio', high: 'Alto', unknown: 'Sin datos' };
 const RISK_TONE: Record<string, string> = {
   low: 'bg-emerald-500', medium: 'bg-amber-500', high: 'bg-rose-500', unknown: 'bg-slate-300',
@@ -58,16 +64,16 @@ const StatTile: React.FC<{
       type="button"
       onClick={onClick}
       disabled={!onClick}
-      className={`text-left rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition-shadow ${onClick ? 'hover:shadow-md cursor-pointer' : 'cursor-default'}`}
+      className={`text-left rounded-xl border border-slate-300 bg-white p-5 shadow-sm transition-shadow ${onClick ? 'hover:shadow-md cursor-pointer' : 'cursor-default'}`}
     >
       <div className="flex items-center justify-between gap-3">
-        <p className="text-[11px] font-black uppercase tracking-widest text-slate-500">{label}</p>
+        <p className="text-[11px] font-black uppercase tracking-widest text-slate-700">{label}</p>
         <span className={`inline-flex h-8 w-8 items-center justify-center rounded-xl ${tones[tone]}`}>
           <Icon className="h-4 w-4" />
         </span>
       </div>
       <p className="mt-3 truncate text-3xl font-black tracking-tight text-slate-950">{value}</p>
-      {hint && <p className="mt-1 truncate text-xs font-bold text-slate-400">{hint}</p>}
+      {hint && <p className="mt-1 truncate text-xs font-bold text-slate-600">{hint}</p>}
     </button>
   );
 };
@@ -79,14 +85,14 @@ const SectionCard: React.FC<{
   accent?: string;
   children: React.ReactNode;
 }> = ({ title, count, icon: Icon, accent = 'text-slate-500', children }) => (
-  <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-    <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3.5">
+  <div className="rounded-xl border border-slate-300 bg-white shadow-sm">
+    <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-5 py-3.5">
       <div className="flex items-center gap-2">
         <Icon className={`h-4 w-4 ${accent}`} />
-        <p className="text-xs font-black uppercase tracking-widest text-slate-700">{title}</p>
+        <p className="text-xs font-black uppercase tracking-widest text-slate-900">{title}</p>
       </div>
       {typeof count === 'number' && (
-        <span className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-black text-slate-600">{count}</span>
+        <span className="rounded-lg bg-slate-200 px-2.5 py-1 text-xs font-black text-slate-800">{count}</span>
       )}
     </div>
     <div className="p-3">{children}</div>
@@ -114,11 +120,11 @@ const ClientRow: React.FC<{ signal: ClientSignal; onSelect: () => void; right: R
     tabIndex={0}
     onClick={onSelect}
     onKeyDown={e => { if (e.key === 'Enter') onSelect(); }}
-    className="group flex w-full cursor-pointer items-center justify-between gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-indigo-50/70"
+    className="group flex w-full cursor-pointer items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-indigo-50/80"
   >
     <div className="min-w-0 flex-1">
-      <p className="truncate text-sm font-black text-slate-900 group-hover:text-indigo-700">{signal.client.name}</p>
-      {sub && <p className="truncate text-xs font-semibold text-slate-500">{sub}</p>}
+      <p className="truncate text-sm font-black text-slate-950 group-hover:text-indigo-700">{signal.client.name}</p>
+      {sub && <p className="truncate text-xs font-semibold text-slate-600">{sub}</p>}
     </div>
     <div className="flex flex-shrink-0 items-center gap-2">
       {right}
@@ -181,19 +187,23 @@ const DashboardPage: React.FC<Props> = ({ onSelectClient }) => {
       setDetailsLoading(true);
       setError('');
       try {
-        const [nextStatements, nextCovenants, nextTransactions, nextActivities] = await Promise.all([
-          db.getStatementsForClients(missing),
-          db.getCovenantsForClients(missing),
-          db.getTransactionsForClients(missing),
-          db.getCrmActivitiesForClients(missing),
-        ]);
-        if (!active) return;
-        setStatementsByClient(prev => ({ ...prev, ...nextStatements }));
-        setCovenantsByClient(prev => ({ ...prev, ...nextCovenants }));
-        setTransactionsByClient(prev => ({ ...prev, ...nextTransactions }));
-        setActivitiesByClient(prev => ({ ...prev, ...nextActivities }));
-        // Marca como cargados aunque no tengan datos, para no reintentar en cada cambio de filtro.
-        missing.forEach(id => loadedDetailIds.current.add(id));
+        for (let i = 0; i < missing.length; i += DETAIL_BATCH_SIZE) {
+          const batch = missing.slice(i, i + DETAIL_BATCH_SIZE);
+          const [nextStatements, nextCovenants, nextTransactions, nextActivities] = await Promise.all([
+            db.getDashboardStatementsForClients(batch),
+            db.getCovenantsForClients(batch),
+            db.getTransactionsForClients(batch),
+            db.getCrmActivitiesForClients(batch),
+          ]);
+          if (!active) return;
+          setStatementsByClient(prev => ({ ...prev, ...nextStatements }));
+          setCovenantsByClient(prev => ({ ...prev, ...nextCovenants }));
+          setTransactionsByClient(prev => ({ ...prev, ...nextTransactions }));
+          setActivitiesByClient(prev => ({ ...prev, ...nextActivities }));
+          // Marca como cargados aunque no tengan datos, para no reintentar en cada cambio de filtro.
+          batch.forEach(id => loadedDetailIds.current.add(id));
+          await yieldToBrowser();
+        }
       } catch (err: any) {
         if (active) setError(err.message || 'No se pudieron cargar los datos del portafolio.');
       } finally {
@@ -280,7 +290,7 @@ const DashboardPage: React.FC<Props> = ({ onSelectClient }) => {
   };
 
   return (
-    <div className="relative flex-1 bg-slate-50 min-h-screen p-6 md:p-8">
+    <div className="relative flex-1 bg-slate-100 min-h-screen p-6 md:p-8">
       <WorkingOverlay show={loading} title="Cargando portafolio" />
 
       <div className="mb-6 flex flex-col gap-3 border-b border-slate-200 pb-5 xl:flex-row xl:items-end xl:justify-between">
@@ -332,13 +342,13 @@ const DashboardPage: React.FC<Props> = ({ onSelectClient }) => {
       </div>
 
       {/* Risk distribution */}
-      <div className="mb-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="mb-5 rounded-xl border border-slate-300 bg-white p-5 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Gauge className="h-4 w-4 text-indigo-500" />
-            <p className="text-xs font-black uppercase tracking-widest text-slate-700">Distribución de riesgo</p>
+            <p className="text-xs font-black uppercase tracking-widest text-slate-900">Distribución de riesgo</p>
           </div>
-          <div className="flex flex-wrap items-center gap-4 text-xs font-bold text-slate-600">
+          <div className="flex flex-wrap items-center gap-4 text-xs font-bold text-slate-700">
             {(['low', 'medium', 'high', 'unknown'] as const).map(band => (
               <span key={band} className="flex items-center gap-1.5">
                 <span className={`h-2.5 w-2.5 rounded-full ${RISK_TONE[band]}`} />
@@ -354,7 +364,7 @@ const DashboardPage: React.FC<Props> = ({ onSelectClient }) => {
             return <div key={band} className={RISK_TONE[band]} style={{ width: `${w}%` }} title={`${RISK_LABEL[band]}: ${summary.riskDistribution[band]}`} />;
           })}
         </div>
-        <p className="mt-3 flex items-start gap-1.5 text-[11px] font-semibold leading-4 text-slate-400">
+        <p className="mt-3 flex items-start gap-1.5 text-[11px] font-semibold leading-4 text-slate-600">
           <ShieldCheck className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
           {CREDIT_RISK_DISCLAIMER}
         </p>
