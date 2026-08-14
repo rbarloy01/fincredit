@@ -59,3 +59,79 @@ El pipeline acepta dos estructuras:
 
 - Carpeta tradicional de cliente con `1. Data Room/3. Información Financiera/1. Estados Financieros`.
 - Carpeta plana por cliente, como `EEFF_Covenants_Source/Ventus`, incluyendo links `.webloc` para inventario.
+
+## AI Orchestrator MVP
+
+Este repo incluye un MVP aislado para que una app llame a un solo orchestrator y este decida que provider/modelo usar.
+
+Arquitectura:
+
+```text
+Tu app -> scripts/run_ai_orchestrator.py -> ai_orchestrator -> provider OpenAI-compatible
+                                         -> memory/project-memory.md
+                                         -> memory/agents/*.md
+                                         -> memory/runs/*.md
+```
+
+Providers configurados en `config/ai_orchestrator.example.json`:
+
+- `openrouter`: gateway multi-modelo.
+- `bytez`: API OpenAI-compatible de Bytez.
+- `nvidia_nim`: NVIDIA NIM usando `/v1/chat/completions`.
+- `local_vllm`: servidor local compatible, por ejemplo vLLM.
+
+Variables necesarias:
+
+```bash
+cp .env.example .env
+export OPENROUTER_API_KEY="..."
+export BYTEZ_API_KEY="..."
+export NVIDIA_NIM_API_KEY="..."
+```
+
+Prueba:
+
+```bash
+python3 scripts/run_ai_orchestrator.py "Disena una arquitectura de agentes para mi app"
+```
+
+Ver exactamente que provider/modelo usaria sin llamar APIs:
+
+```bash
+python3 scripts/run_ai_orchestrator.py --dry-run --task default "Prueba de routing"
+```
+
+Cambiar el modelo para una corrida:
+
+```bash
+python3 scripts/run_ai_orchestrator.py \
+  --provider openrouter \
+  --model "openrouter/auto" \
+  "Disena una arquitectura de agentes para mi app"
+```
+
+Cambiar solo un agente:
+
+```bash
+python3 scripts/run_ai_orchestrator.py \
+  --agent-provider worker=bytez \
+  --agent-model worker="Qwen/Qwen3-4B" \
+  --agent-provider reviewer=openrouter \
+  --agent-model reviewer="openrouter/auto" \
+  "Revisa este plan"
+```
+
+Rutas disponibles:
+
+```bash
+python3 scripts/run_ai_orchestrator.py --task cheap "Resume esta idea"
+python3 scripts/run_ai_orchestrator.py --task review "Revisa este plan"
+```
+
+Notas:
+
+- Sin llaves reales, el runner valida estructura pero no puede llamar providers externos.
+- Bytez puede necesitar `BYTEZ_PROVIDER_KEY` cuando el modelo elegido usa un proveedor cerrado detrás.
+- Para usar modelos locales, levanta un endpoint compatible con OpenAI en `http://localhost:8000/v1` y ajusta `LOCAL_LLM_API_KEY`.
+- Tambien puedes fijar modelos por variable de entorno: `AI_MODEL_PLANNER`, `AI_MODEL_WORKER`, `AI_MODEL_REVIEWER`.
+- Si cambias a un modelo de otro proveedor, cambia tambien el provider con `--provider`, `--agent-provider`, `AI_PROVIDER_PLANNER`, `AI_PROVIDER_WORKER` o `AI_PROVIDER_REVIEWER`.
