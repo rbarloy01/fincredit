@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -33,11 +33,47 @@ class OrchestratorConfig:
     routing: dict[str, list[str]]
     memory_dir: Path
 
+    def with_model_overrides(
+        self,
+        *,
+        default_provider: str = "",
+        default_model: str = "",
+        agent_providers: dict[str, str] | None = None,
+        agent_models: dict[str, str] | None = None,
+    ) -> "OrchestratorConfig":
+        provider_overrides = agent_providers or {}
+        model_overrides = agent_models or {}
+        agents = {}
+        for name, agent in self.agents.items():
+            provider = (
+                provider_overrides.get(name)
+                or _env_agent_provider(name)
+                or default_provider
+                or agent.provider
+            )
+            if provider not in self.providers:
+                raise ValueError(f"Unknown provider override for agent {name}: {provider}")
+            model = model_overrides.get(name) or _env_agent_model(name) or default_model
+            if not model and provider != agent.provider:
+                model = self.providers[provider].default_model
+            agents[name] = replace(agent, provider=provider, model=model or agent.model)
+        return replace(self, agents=agents)
+
 
 def _expand_env(value: str) -> str:
     if value.startswith("$"):
         return os.environ.get(value[1:], "")
     return value
+
+
+def _env_agent_model(agent_name: str) -> str:
+    env_name = f"AI_MODEL_{agent_name.upper().replace('-', '_')}"
+    return os.environ.get(env_name, "").strip()
+
+
+def _env_agent_provider(agent_name: str) -> str:
+    env_name = f"AI_PROVIDER_{agent_name.upper().replace('-', '_')}"
+    return os.environ.get(env_name, "").strip()
 
 
 def load_config(path: str | Path) -> OrchestratorConfig:
