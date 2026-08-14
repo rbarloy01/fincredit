@@ -322,7 +322,7 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
       temperature: 0,
       max_tokens: 8192,
     };
-    const res = await fetchAIWithRetry(provider === 'bytez' ? '/api/bytez' : '/api/nvidia-nim', { apiKey, payload });
+    const res = await fetchAIWithRetry('/api/bytez', { provider, apiKey, payload });
     const data = await readAIResponseJson(res, provider === 'bytez' ? 'Bytez' : 'NVIDIA NIM');
     if (!res.ok) throw new Error(data.error?.message || data.error || `${provider} error`);
     return data.choices?.[0]?.message?.content || '';
