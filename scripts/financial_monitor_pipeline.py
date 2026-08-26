@@ -1,14 +1,19 @@
 import argparse
+import calendar
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import hashlib
 import json
+import os
 import re
 import signal
+import threading
 import time
 import unicodedata
 from pathlib import Path
 
 import pandas as pd
 import pdfplumber
+from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -24,15 +29,49 @@ CLIENT_METADATA_PATH = WORKSPACE / "config/client_metadata_template.tsv"
 CLIENT_FOLLOWUPS_PATH = WORKSPACE / "config/client_followups.tsv"
 OUTPUT_DIR = WORKSPACE / "outputs/financial_monitor"
 CACHE_DIR = WORKSPACE / "outputs/.cache/pdf_accounts"
+AUXILIARY_SOURCE_ROOTS = [
+    Path(
+        "/Users/syscap/Library/CloudStorage/GoogleDrive-rbarron@syscap.com.mx/Shared drives/"
+        "Axcess - Crédito y Riesgo/4. Proyectos Estratégicos/"
+        "Automatización Estados Financieros - Denise/Documentos de avances"
+    )
+]
 AMOUNT_RE = r"\(?-?\s*(?:\d+\s+)?\d{1,3}(?:\s*,\s*\d{3})+(?:\.\d+)?\)?|\(?-?\s*\d+(?:\.\d+)?\)?"
 PAGE_TIMEOUT_SECONDS = 18
 SUPPORTED_SUFFIXES = {".pdf", ".xlsx", ".xls", ".webloc"}
 EXTRACTABLE_SUFFIXES = {".pdf", ".xlsx", ".xls"}
-FRONT_SHEETS = {"Inicio", "CRM Clientes", "Loan Tape Cliente", "Actualizar"}
+FRONT_SHEETS = {"Inicio", "CRM Clientes", "Loan Tape Cliente", "Estados Financieros", "Actualizar"}
 HIDDEN_SHEETS = {"Conceptos", "Cuentas Extraidas", "Credit Evidence", "Golden Sample", "Mapping Memory"}
-FILTERABLE_FRONT_SHEETS = {"CRM Clientes", "Loan Tape Cliente", "Actualizar"}
+FILTERABLE_FRONT_SHEETS = {"CRM Clientes", "Loan Tape Cliente", "Estados Financieros", "Actualizar"}
 FOLLOWUP_COLUMNS = ["responsable", "proxima_accion", "fecha_actualizacion", "seguimiento_notas"]
 FACILITY_COLUMNS = ["facility_id", "facility_name", "facility_covenants"]
+FINANCIAL_STATEMENT_LAYOUT = [
+    ("BG", "Activo", "Efectivo e inversiones", "efectivo_inversiones"),
+    ("BG", "Activo", "Clientes arrendamiento", "clientes_arrendamiento"),
+    ("BG", "Activo", "Clientes factoraje", "clientes_factoraje"),
+    ("BG", "Activo", "Estimacion preventiva", "estimacion_preventiva"),
+    ("BG", "Activo", "Cartera bruta", "cartera_bruta"),
+    ("BG", "Activo", "Cartera neta credito", "cartera_neta_credito"),
+    ("BG", "Activo", "Otros activos generadores", "otros_activos_generadores"),
+    ("BG", "Activo", "Total activo", "total_activo"),
+    ("BG", "Pasivo", "Fondeadores CP", "fondeadores_cp"),
+    ("BG", "Pasivo", "Fondeadores LP", "fondeadores_lp"),
+    ("BG", "Pasivo", "Deuda CP proxy", "deuda_cp_proxy"),
+    ("BG", "Pasivo", "Deuda LP proxy", "deuda_lp_proxy"),
+    ("BG", "Pasivo", "Total pasivo", "total_pasivo"),
+    ("BG", "Capital", "Total capital contable", "total_capital_contable"),
+    ("ER", "Ingresos", "Ingresos totales", "ingresos_totales"),
+    ("ER", "Ingresos", "Ingresos intereses", "ingresos_intereses"),
+    ("ER", "Ingresos", "Ingresos por comisiones", "ingresos_por_comisiones"),
+    ("ER", "Costos", "Costo de ventas", "costo_ventas"),
+    ("ER", "Resultado", "Utilidad bruta", "utilidad_bruta"),
+    ("ER", "Gastos", "Gastos de operacion", "gastos_operacion"),
+    ("ER", "Gastos", "Gastos financieros", "gastos_financieros"),
+    ("ER", "Ingresos", "Productos financieros", "productos_financieros"),
+    ("ER", "Ingresos", "Intereses a favor", "intereses_a_favor"),
+    ("ER", "Resultado", "Utilidad operacion", "utilidad_operacion"),
+    ("ER", "Resultado", "Utilidad neta", "utilidad_neta"),
+]
 FIN_MONITOR_PROCESSES = [
     {
         "process": "Dashboard Comercial",
@@ -120,6 +159,10 @@ def timeout_handler(signum, frame):
     raise PageTimeout(f"page extraction timed out after {PAGE_TIMEOUT_SECONDS}s")
 
 
+def _can_use_signal_alarm():
+    return threading.current_thread() is threading.main_thread()
+
+
 def normalize(text):
     text = "" if text is None else str(text)
     text = unicodedata.normalize("NFKD", text)
@@ -173,6 +216,32 @@ def period_from_name(path):
     return f"20{token[:2]}-{token[2:4]}-{token[4:6]}"
 
 
+def month_end_period(year, month):
+    day = calendar.monthrange(int(year), int(month))[1]
+    return f"{int(year):04d}-{int(month):02d}-{day:02d}"
+
+
+def period_from_label(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    if hasattr(value, "year") and hasattr(value, "month"):
+        return month_end_period(value.year, value.month)
+    text = str(value).strip()
+    if not text:
+        return ""
+    match = re.search(r"\b(20\d{2})[-/](\d{1,2})(?:[-/]\d{1,2})?\b", text)
+    if match:
+        return month_end_period(match.group(1), match.group(2))
+    normalized = normalize(text)
+    month_match = re.search(
+        r"\b(ene|enero|feb|febrero|mar|marzo|abr|abril|may|mayo|jun|junio|jul|julio|ago|agosto|sep|sept|septiembre|oct|octubre|nov|noviembre|dic|diciembre)\b\s*(20\d{2})\b",
+        normalized,
+    )
+    if month_match:
+        return month_end_period(month_match.group(2), MONTHS[month_match.group(1)])
+    return ""
+
+
 def classify_statement(path):
     name = normalize(path.name)
     if re.search(r"\bbg\b|balance|situacion financiera", name):
@@ -181,6 +250,17 @@ def classify_statement(path):
         return "ER"
     if re.search(r"\bef\b|eeff|estados financieros", name):
         return "EF"
+    return "UNKNOWN"
+
+
+def classify_statement_name(value):
+    name = normalize(value)
+    if re.search(r"\bbg\b|balance|situacion financiera", name):
+        return "BG"
+    if re.search(r"\ber\b|estado de resultados|resultados", name):
+        return "ER"
+    if re.search(r"\bflujo\b|cash flow", name):
+        return "CF"
     return "UNKNOWN"
 
 
@@ -284,7 +364,7 @@ def client_root_dir(clients_root, client):
 
 def find_financial_dirs(clients_root, client):
     root = client_root_dir(clients_root, client)
-    direct = client_financial_dir(clients_root, client)
+    direct = root / "1. Data Room/3. Información Financiera/1. Estados Financieros"
     dirs = []
     if direct.exists():
         dirs.append(direct)
@@ -440,9 +520,25 @@ def filter_followups_by_clients(followups, clients):
 def enrich_with_client_metadata(df, metadata):
     if df.empty or metadata.empty:
         return df
+    metadata = metadata.copy()
     metadata_cols = [col for col in metadata.columns if col != "client"]
     if metadata["client"].duplicated().any():
-        metadata = metadata.drop_duplicates(["client", *[col for col in FACILITY_COLUMNS if col in metadata.columns]])
+        rows = []
+        for client, group in metadata.groupby(metadata["client"].astype(str), sort=False):
+            row = {"client": client}
+            facility_values = group[[col for col in FACILITY_COLUMNS if col in group.columns]].fillna("").astype(str)
+            has_multiple_facilities = len(facility_values.drop_duplicates()) > 1
+            for col in metadata_cols:
+                values = [value for value in group[col].tolist() if pd.notna(value) and str(value).strip()]
+                if col in FACILITY_COLUMNS and has_multiple_facilities:
+                    row[col] = ""
+                else:
+                    row[col] = values[0] if values else ""
+            if has_multiple_facilities:
+                notes = [str(value).strip() for value in group.get("notes", pd.Series(dtype=str)).tolist() if pd.notna(value) and str(value).strip()]
+                row["notes"] = "Multiples facilities en metadata; usa --facility para aislar covenants. " + " ".join(notes)
+            rows.append(row)
+        metadata = pd.DataFrame(rows)
     return df.merge(metadata[["client", *metadata_cols]], on="client", how="left")
 
 
@@ -451,7 +547,7 @@ def discover_documents(clients_root, clients, from_period="", to_period="", max_
     for client in clients:
         financial_dirs = find_financial_dirs(clients_root, client)
         if not financial_dirs:
-            base = client_financial_dir(clients_root, client)
+            base = client_root_dir(clients_root, client) / "1. Data Room/3. Información Financiera/1. Estados Financieros"
             rows.append(
                 {
                     "client": client,
@@ -495,9 +591,74 @@ def discover_documents(clients_root, clients, from_period="", to_period="", max_
     df = pd.DataFrame(rows)
     if not df.empty:
         df = df.sort_values(["client", "period", "statement", "filename"])
+        df = df.drop_duplicates(["client", "path"], keep="last")
     if max_documents and len(df) > max_documents:
         df = df.groupby("client", group_keys=False).tail(max(1, max_documents // max(1, len(clients))))
     return enrich_with_client_metadata(df, metadata if metadata is not None else pd.DataFrame())
+
+
+def append_extra_sources(documents, clients, extra_sources, metadata=None):
+    if not extra_sources:
+        return documents
+    rows = []
+    for source in extra_sources:
+        for item in str(source).split("|"):
+            path = Path(item).expanduser()
+            if not item.strip() or not path.exists() or not path.is_file():
+                continue
+            suffix = path.suffix.lower()
+            if suffix not in SUPPORTED_SUFFIXES:
+                continue
+            matched_clients = [client for client in clients if normalize(client) in normalize(path)]
+            client = matched_clients[0] if matched_clients else (clients[0] if len(clients) == 1 else "")
+            if not client:
+                continue
+            period = period_from_name(path)
+            statement = classify_statement(path)
+            if statement == "UNKNOWN" and suffix in {".xlsx", ".xls"}:
+                statement = "EF"
+            rows.append(
+                {
+                    "client": client,
+                    "path": str(path),
+                    "filename": path.name,
+                    "file_size_bytes": path.stat().st_size,
+                    "period": period,
+                    "statement": statement,
+                    "source_quality": classify_source_quality(path),
+                    "statement_frequency": infer_statement_frequency(path),
+                    "unit_scale": infer_unit_scale(path),
+                    "pair_key": f"{client}|{period}",
+                    "status": "indexed" if suffix in EXTRACTABLE_SUFFIXES else "link_only",
+                }
+            )
+    if not rows:
+        return documents
+    extra = enrich_with_client_metadata(pd.DataFrame(rows), metadata if metadata is not None else pd.DataFrame())
+    combined = pd.concat([documents, extra], ignore_index=True) if not documents.empty else extra
+    return combined.drop_duplicates(["client", "path"], keep="last")
+
+
+def discover_auxiliary_sources(clients):
+    sources = []
+    for client in clients:
+        client_key = normalize(client)
+        matches = []
+        for root in AUXILIARY_SOURCE_ROOTS:
+            if not root.exists():
+                continue
+            for path in root.glob("*.xls*"):
+                name = normalize(path.name)
+                if client_key not in name:
+                    continue
+                if "modelo" in name or "proyeccion" in name:
+                    continue
+                if not re.search(r"\beeff\b|estado financiero|estados financieros", name):
+                    continue
+                matches.append(path)
+        if matches:
+            sources.append(str(sorted(matches, key=lambda path: path.name, reverse=True)[0]))
+    return sources
 
 
 def pair_label_value_tables(tables):
@@ -528,6 +689,87 @@ def pair_label_value_tables(tables):
     return rows
 
 
+def _xlsx_number(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)) and not pd.isna(value):
+        return float(value)
+    if isinstance(value, str):
+        return clean_number(value)
+    return None
+
+
+def _xlsx_label(row):
+    for value in row[:4]:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _find_period_columns(rows):
+    best = []
+    for row_idx, row in enumerate(rows[:25], start=1):
+        periods = []
+        for col_idx, value in enumerate(row, start=1):
+            period = period_from_label(value)
+            if period:
+                periods.append((col_idx, period, value))
+        if len(periods) >= 2 and len(periods) > len(best):
+            best = periods
+    return best
+
+
+def extract_xlsx_accounts(document, max_rows_per_sheet=400):
+    rows = []
+    path = Path(document["path"])
+    try:
+        workbook = load_workbook(path, read_only=True, data_only=True)
+        try:
+            for sheet in workbook.worksheets:
+                statement = classify_statement_name(sheet.title)
+                if statement == "UNKNOWN":
+                    continue
+                sheet_rows = []
+                for row_no, values in enumerate(sheet.iter_rows(values_only=True), start=1):
+                    sheet_rows.append(values)
+                    if row_no >= max_rows_per_sheet:
+                        break
+                period_cols = _find_period_columns(sheet_rows)
+                if not period_cols:
+                    continue
+                for row_no, values in enumerate(sheet_rows, start=1):
+                    label = _xlsx_label(values)
+                    if not label or normalize(label) in {"concepto", "activo", "pasivo", "capital", "menos"}:
+                        continue
+                    for col_idx, period, header in period_cols:
+                        if col_idx > len(values):
+                            continue
+                        number = _xlsx_number(values[col_idx - 1])
+                        if number is None:
+                            continue
+                        rows.append(
+                            {
+                                "raw_label": label,
+                                "value": number,
+                                "raw_value": f"{sheet.title}!R{row_no}C{col_idx} ({header})",
+                                "source_method": "xlsx_period_column",
+                                "page": None,
+                                "period": period,
+                                "statement": statement,
+                                "sheet": sheet.title,
+                                "row": row_no,
+                            }
+                        )
+        finally:
+            workbook.close()
+    except Exception as exc:
+        return [], str(exc)
+    return rows, ""
+
+
 def extract_pdf_accounts(document, max_pages=5, max_file_mb=8):
     rows = []
     path = Path(document["path"])
@@ -540,8 +782,10 @@ def extract_pdf_accounts(document, max_pages=5, max_file_mb=8):
             if total_pages > max_pages:
                 return [], f"skipped_heavy_pdf_pages={total_pages}"
             for page_no, page in enumerate(pdf.pages, start=1):
-                signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(PAGE_TIMEOUT_SECONDS)
+                use_alarm = _can_use_signal_alarm()
+                if use_alarm:
+                    signal.signal(signal.SIGALRM, timeout_handler)
+                    signal.alarm(PAGE_TIMEOUT_SECONDS)
                 try:
                     page_text = page.extract_text() or ""
                 except PageTimeout as exc:
@@ -556,9 +800,11 @@ def extract_pdf_accounts(document, max_pages=5, max_file_mb=8):
                     )
                     continue
                 finally:
-                    signal.alarm(0)
+                    if use_alarm:
+                        signal.alarm(0)
                 full_text.append(page_text)
-                signal.alarm(PAGE_TIMEOUT_SECONDS)
+                if use_alarm:
+                    signal.alarm(PAGE_TIMEOUT_SECONDS)
                 try:
                     tables = page.extract_tables() or []
                 except PageTimeout as exc:
@@ -575,7 +821,8 @@ def extract_pdf_accounts(document, max_pages=5, max_file_mb=8):
                 except Exception:
                     tables = []
                 finally:
-                    signal.alarm(0)
+                    if use_alarm:
+                        signal.alarm(0)
                 for account in pair_label_value_tables(tables):
                     account.update({"page": page_no})
                     rows.append(account)
@@ -615,55 +862,166 @@ def extract_pdf_accounts_cached(document, max_pages=5, max_file_mb=8, refresh_ca
     return rows, error, False
 
 
-def extract_accounts(documents, max_pages=5, max_file_mb=8, refresh_cache=False):
+def _extract_pdf_accounts_task(document, max_pages, max_file_mb, refresh_cache):
+    rows, error, cache_hit = extract_pdf_accounts_cached(
+        document,
+        max_pages=max_pages,
+        max_file_mb=max_file_mb,
+        refresh_cache=refresh_cache,
+    )
+    return rows, error, cache_hit
+
+
+def _run_pdf_tasks_in_executor(executor_class, pending, worker_count, max_pages, max_file_mb, refresh_cache):
+    results = {}
+    with executor_class(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(_extract_pdf_accounts_task, document, max_pages, max_file_mb, refresh_cache): (
+                position,
+                document,
+            )
+            for position, document in pending
+        }
+        for future in as_completed(futures):
+            position, document = futures[future]
+            try:
+                rows, error, cache_hit = future.result()
+            except Exception as exc:
+                rows, error, cache_hit = [], str(exc), False
+            results[position] = (document, rows, error, cache_hit)
+    return results
+
+
+def _account_rows_for_document(document, rows, error):
+    if error:
+        return [
+            {
+                **document,
+                "raw_label": "",
+                "normalized_label": "",
+                "value": None,
+                "raw_value": "",
+                "page": None,
+                "source_method": "error",
+                "extract_error": error,
+            }
+        ]
+    account_rows = []
+    for row in rows:
+        unit_scale = document.get("unit_scale", 1) or 1
+        account_document = {
+            **document,
+            "period": row.get("period") or document.get("period"),
+            "statement": row.get("statement") or document.get("statement"),
+        }
+        source_suffix = f"#{row.get('sheet')}!R{row.get('row')}" if row.get("sheet") and row.get("row") else ""
+        account_rows.append(
+            {
+                **account_document,
+                "raw_label": row["raw_label"],
+                "normalized_label": normalize(row["raw_label"]),
+                "value": row["value"] * unit_scale if row["value"] is not None else None,
+                "original_value": row["value"],
+                "unit_scale_applied": unit_scale,
+                "raw_value": row["raw_value"],
+                "page": row["page"],
+                "source_method": row["source_method"],
+                "source_ref": f"{document.get('path')}#page={row['page']}" if row.get("page") else f"{document.get('path')}{source_suffix}",
+                "extract_error": "",
+            }
+        )
+    return account_rows
+
+
+def extract_accounts(documents, max_pages=5, max_file_mb=8, refresh_cache=False, pdf_workers=1):
     account_rows = []
     cache_hits = 0
-    pdf_count = 0
-    for _, document in documents.iterrows():
-        if Path(document["path"]).suffix.lower() != ".pdf":
-            continue
-        pdf_count += 1
-        rows, error, cache_hit = extract_pdf_accounts_cached(
-            document,
-            max_pages=max_pages,
-            max_file_mb=max_file_mb,
-            refresh_cache=refresh_cache,
-        )
+    pdf_documents = []
+    xlsx_count = 0
+    for position, document in documents.iterrows():
+        document = document.to_dict()
+        suffix = Path(document["path"]).suffix.lower()
+        if suffix == ".pdf":
+            pdf_documents.append((position, document))
+        elif suffix in {".xlsx", ".xls"}:
+            xlsx_count += 1
+            rows, error = extract_xlsx_accounts(document)
+            account_rows.extend(_account_rows_for_document(document, rows, error))
+
+    pdf_count = len(pdf_documents)
+    if pdf_count == 0:
+        accounts = pd.DataFrame(account_rows)
+        accounts.attrs["pdf_count"] = pdf_count
+        accounts.attrs["cache_hits"] = cache_hits
+        accounts.attrs["xlsx_count"] = xlsx_count
+        return accounts
+
+    pdf_workers = max(1, int(pdf_workers or 1))
+    if pdf_workers == 1 or pdf_count == 1:
+        results = []
+        for position, document in pdf_documents:
+            rows, error, cache_hit = extract_pdf_accounts_cached(
+                document,
+                max_pages=max_pages,
+                max_file_mb=max_file_mb,
+                refresh_cache=refresh_cache,
+            )
+            results.append((position, document, rows, error, cache_hit))
+    else:
+        results_by_position = {}
+        pending = []
+        if refresh_cache:
+            pending = pdf_documents
+        else:
+            for position, document in pdf_documents:
+                cached = read_pdf_cache(Path(document["path"]), max_pages, max_file_mb)
+                if cached is None:
+                    pending.append((position, document))
+                else:
+                    results_by_position[position] = (
+                        document,
+                        cached.get("rows", []),
+                        cached.get("error", ""),
+                        True,
+                    )
+
+        worker_count = min(pdf_workers, len(pending))
+        if worker_count:
+            try:
+                results_by_position.update(
+                    _run_pdf_tasks_in_executor(
+                        ProcessPoolExecutor,
+                        pending,
+                        worker_count,
+                        max_pages,
+                        max_file_mb,
+                        refresh_cache,
+                    )
+                )
+            except (OSError, PermissionError):
+                results_by_position.update(
+                    _run_pdf_tasks_in_executor(
+                        ThreadPoolExecutor,
+                        pending,
+                        worker_count,
+                        max_pages,
+                        max_file_mb,
+                        refresh_cache,
+                    )
+                )
+
+        results = [
+            (position, *results_by_position[position])
+            for position, _document in sorted(pdf_documents, key=lambda item: item[0])
+        ]
+
+    for _position, document, rows, error, cache_hit in results:
         cache_hits += int(cache_hit)
-        if error:
-            account_rows.append(
-                {
-                    **document.to_dict(),
-                    "raw_label": "",
-                    "normalized_label": "",
-                    "value": None,
-                    "raw_value": "",
-                    "page": None,
-                    "source_method": "error",
-                    "extract_error": error,
-                }
-            )
-            continue
-        for row in rows:
-            unit_scale = document.get("unit_scale", 1) or 1
-            account_rows.append(
-                {
-                    **document.to_dict(),
-                    "raw_label": row["raw_label"],
-                    "normalized_label": normalize(row["raw_label"]),
-                    "value": row["value"] * unit_scale if row["value"] is not None else None,
-                    "original_value": row["value"],
-                    "unit_scale_applied": unit_scale,
-                    "raw_value": row["raw_value"],
-                    "page": row["page"],
-                    "source_method": row["source_method"],
-                    "source_ref": f"{document.get('path')}#page={row['page']}" if row.get("page") else str(document.get("path")),
-                    "extract_error": "",
-                }
-            )
+        account_rows.extend(_account_rows_for_document(document, rows, error))
     accounts = pd.DataFrame(account_rows)
     accounts.attrs["pdf_count"] = pdf_count
     accounts.attrs["cache_hits"] = cache_hits
+    accounts.attrs["xlsx_count"] = xlsx_count
     return accounts
 
 
@@ -778,6 +1136,12 @@ def calc_ratio(numerator, denominator):
     if numerator is None or denominator in (None, 0):
         return None
     return numerator / denominator
+
+
+def abs_value(value):
+    if value is None or pd.isna(value):
+        return None
+    return abs(value)
 
 
 def client_meta_for(concepts, client):
@@ -900,6 +1264,28 @@ def calculate_ratios(concepts):
             if efectivo is not None or cartera_neta is not None or otros:
                 activos_productivos = (efectivo or 0) + (cartera_neta or 0) + otros + dep
 
+            ingresos_intereses = value(concepts, client, period, "ingresos_intereses")
+            ingresos_comisiones = concepts[
+                concepts["client"].eq(client)
+                & concepts["period"].eq(period)
+                & concepts["concept"].eq("ingresos_por_comisiones")
+            ]["value"].sum()
+            gastos_operacion = value(concepts, client, period, "gastos_operacion")
+            cartera_vigente = value(concepts, client, period, "cartera_vigente")
+            cartera_atrasada = value(concepts, client, period, "cartera_atrasada")
+            cartera_vencida = value(concepts, client, period, "cartera_vencida")
+            cartera_bruta = value(concepts, client, period, "cartera_bruta")
+            cartera_neta_credito = value(concepts, client, period, "cartera_neta_credito")
+            estimacion_preventiva = abs_value(value(concepts, client, period, "estimacion_preventiva"))
+            cartera_total_contractual = None
+            if cartera_bruta is not None:
+                cartera_total_contractual = cartera_bruta
+            elif cartera_vigente is not None or cartera_atrasada is not None or cartera_vencida is not None:
+                cartera_total_contractual = (cartera_vigente or 0) + (cartera_atrasada or 0) + (cartera_vencida or 0)
+            ingresos_operativos = None
+            if ingresos_intereses is not None or ingresos_comisiones:
+                ingresos_operativos = (ingresos_intereses or 0) + ingresos_comisiones
+
             specs = [
                 ("Margen Operativo", value(concepts, client, period, "utilidad_operacion"), value(concepts, client, period, "ingresos_totales"), "utilidad_operacion / ingresos_totales", "calculated", ""),
                 ("Margen Neto", value(concepts, client, period, "utilidad_neta"), value(concepts, client, period, "ingresos_totales"), "utilidad_neta / ingresos_totales", "calculated", ""),
@@ -910,6 +1296,10 @@ def calculate_ratios(concepts):
                 ("ICAP", total_capital, total_activo, "total_capital_contable / total_activo", "calculated", ""),
                 ("ICAP Ajustado", total_capital, cartera_neta, "total_capital_contable / cartera_neta", "needs_review", "Cartera neta derivada; validar definicion."),
                 ("Cobertura de Deuda", activos_productivos, total_pasivo, "activos_productivos / total_pasivo", "needs_review", "Activos productivos derivado; validar definicion."),
+                ("Rentabilidad Operativa", abs_value(gastos_operacion), ingresos_operativos, "abs(gastos_operacion) / (ingresos_intereses + ingresos_por_comisiones)", "calculated", "Covenant Cofine segun ficha contractual."),
+                ("Cartera Vencida Neta", (cartera_vencida or 0) - (estimacion_preventiva or 0) if cartera_vencida is not None or estimacion_preventiva is not None else None, cartera_total_contractual, "(cartera_vencida - estimacion_preventiva) / cartera_total", "calculated", "Covenant Cofine segun ficha contractual."),
+                ("Capitalización", cartera_neta_credito, total_capital, "cartera_neta_credito / total_capital_contable", "calculated", "Covenant Cofine segun ficha contractual."),
+                ("Estimación preventiva de riesgos", estimacion_preventiva, cartera_vencida, "estimacion_preventiva / cartera_vencida", "calculated", "Covenant Cofine segun ficha contractual."),
             ]
             for name, numerator, denominator, formula, base_status, note in specs:
                 result = calc_ratio(numerator, denominator)
@@ -958,14 +1348,21 @@ def _selected_covenant_names(value):
     return {normalize(part) for part in re.split(r"[|,;/]+", str(value)) if normalize(part)}
 
 
-def filter_ratios_by_facility_covenants(ratios, metadata):
+def filter_ratios_by_facility_covenants(ratios, metadata, facility=""):
     if ratios.empty or metadata.empty or "facility_covenants" not in metadata.columns:
         return ratios
     covenant_map = {}
-    for _, row in metadata.iterrows():
-        selected = _selected_covenant_names(row.get("facility_covenants"))
-        if selected:
-            covenant_map.setdefault(str(row["client"]), set()).update(selected)
+    for client, group in metadata.groupby(metadata["client"].astype(str), sort=False):
+        covenant_sets = [
+            _selected_covenant_names(row.get("facility_covenants"))
+            for _, row in group.iterrows()
+            if _selected_covenant_names(row.get("facility_covenants"))
+        ]
+        unique_sets = {tuple(sorted(items)) for items in covenant_sets}
+        if not unique_sets:
+            continue
+        if facility or len(unique_sets) == 1:
+            covenant_map[str(client)] = set().union(*covenant_sets)
     if not covenant_map:
         return ratios
 
@@ -976,6 +1373,41 @@ def filter_ratios_by_facility_covenants(ratios, metadata):
         return normalize(row.get("ratio")) in selected
 
     return ratios[ratios.apply(keep, axis=1)].copy()
+
+
+def facility_selection_qa(metadata, facility=""):
+    if metadata.empty or "client" not in metadata or "facility_covenants" not in metadata:
+        return pd.DataFrame()
+    rows = []
+    for client, group in metadata.groupby(metadata["client"].astype(str), sort=False):
+        covenant_sets = [
+            tuple(sorted(_selected_covenant_names(row.get("facility_covenants"))))
+            for _, row in group.iterrows()
+            if _selected_covenant_names(row.get("facility_covenants"))
+        ]
+        if not covenant_sets:
+            rows.append(
+                {
+                    "client": client,
+                    "period": "",
+                    "check": "facility_covenants_configured",
+                    "difference": "",
+                    "status": "needs_review",
+                    "details": "No hay facility_covenants configurados; no se puede elegir covenants de facility.",
+                }
+            )
+        elif not facility and len(set(covenant_sets)) > 1:
+            rows.append(
+                {
+                    "client": client,
+                    "period": "",
+                    "check": "facility_filter_required",
+                    "difference": "",
+                    "status": "needs_review",
+                    "details": "Hay varias facilities con covenants distintos; corre con --facility para no mezclar.",
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 def golden_sample_scaffold(ratios):
@@ -1082,6 +1514,68 @@ def build_loan_tape_by_client(concepts):
                 }
             )
     return pd.DataFrame(rows, columns=columns)
+
+
+def _source_label_from_concept(row):
+    if row is None or row.empty:
+        return ""
+    source_ref = str(row.get("source_ref") or "").strip()
+    page_ref = ""
+    if "#page=" in source_ref:
+        page_ref = "#" + source_ref.split("#", 1)[1]
+    filename = str(row.get("filename") or "").strip()
+    if not filename and source_ref:
+        filename = Path(source_ref.split("#", 1)[0]).name
+    parts = [
+        str(row.get("raw_label") or "").strip(),
+        f"{filename}{page_ref}" if filename else page_ref,
+    ]
+    return " | ".join(part for part in parts if part)
+
+
+def build_financial_statements_view(concepts):
+    base_columns = ["Cliente", "Estado", "Categoria", "Concepto", "Concepto normalizado"]
+    audit_columns = ["Fuente ultimo periodo", "Etiqueta fuente", "Mapping", "Notas"]
+    if concepts.empty or "client" not in concepts or "period" not in concepts:
+        return pd.DataFrame(columns=[*base_columns, *audit_columns])
+
+    concepts = concepts.copy()
+    concepts["client"] = concepts["client"].astype(str)
+    concepts["period"] = concepts["period"].astype(str)
+    periods = sorted(period for period in concepts["period"].dropna().unique() if period)
+    rows = []
+
+    for client in sorted(concepts["client"].dropna().unique()):
+        client_concepts = concepts[concepts["client"].eq(client)]
+        for statement, category, label, concept in FINANCIAL_STATEMENT_LAYOUT:
+            subset = client_concepts[client_concepts["concept"].eq(concept)].sort_values("period")
+            row = {
+                "Cliente": client,
+                "Estado": statement,
+                "Categoria": category,
+                "Concepto": label,
+                "Concepto normalizado": concept,
+            }
+            for period in periods:
+                period_subset = subset[subset["period"].eq(period)]
+                row[period] = None if period_subset.empty else period_subset.iloc[0].get("value")
+            if subset.empty:
+                latest = None
+                notes = "No mapeado en periodos procesados."
+            else:
+                latest = subset.iloc[-1]
+                notes = latest.get("mapping_notes")
+            row.update(
+                {
+                    "Fuente ultimo periodo": "" if latest is None else latest.get("filename", ""),
+                    "Etiqueta fuente": _source_label_from_concept(latest),
+                    "Mapping": "" if latest is None else latest.get("mapping_status", ""),
+                    "Notas": "" if pd.isna(notes) else notes,
+                }
+            )
+            rows.append(row)
+
+    return pd.DataFrame(rows, columns=[*base_columns, *periods, *audit_columns])
 
 
 def _first_nonblank(series, default=""):
@@ -1228,6 +1722,57 @@ def build_inicio(crm, documents, accounts, concepts, ratios, qa, loan_tape=None)
             },
         ]
     )
+
+
+def _json_ready(value):
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if hasattr(value, "item"):
+        value = value.item()
+    if hasattr(value, "isoformat"):
+        return value.isoformat()[:10]
+    return value
+
+
+def _records_for_json(frame, max_rows=None):
+    if frame is None or frame.empty:
+        return []
+    records = [
+        {str(key): _json_ready(value) for key, value in row.items()}
+        for row in frame.to_dict("records")
+    ]
+    return records[:max_rows] if max_rows else records
+
+
+def write_crm_sidecar(
+    path,
+    crm,
+    ratios=None,
+    qa=None,
+    documents=None,
+    concepts=None,
+    loan_tape=None,
+    financial_statements=None,
+):
+    sidecar_path = path.with_suffix(".crm.json")
+    rows = _records_for_json(crm)
+    payload = {
+        "source_workbook": str(path),
+        "source_mtime_ns": path.stat().st_mtime_ns if path.exists() else None,
+        "rows": rows,
+        "ratios": _records_for_json(ratios),
+        "qa": _records_for_json(qa),
+        "documents": _records_for_json(documents),
+        "concepts": _records_for_json(concepts, max_rows=5000),
+        "loanTape": _records_for_json(loan_tape),
+        "financialStatements": _records_for_json(financial_statements),
+    }
+    sidecar_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
 def build_update_guide(output_path):
@@ -1564,6 +2109,8 @@ def style_workbook(writer):
         "Fuente arrendamiento",
         "Fuente factoraje",
         "Fuente estimacion",
+        "Fuente ultimo periodo",
+        "Etiqueta fuente",
         "Formula",
     }
     whole_number_headers = {
@@ -1612,7 +2159,7 @@ def style_workbook(writer):
                 width = 44
             elif header in {"filename", "raw_label", "formula", "notas", "Notas", "Notas seguimiento"}:
                 width = 32
-            elif header in {"client", "cliente", "Cliente", "period", "Periodo", "ratio", "concept", "estatus_crm", "producto_principal", "Estatus", "Producto", "facility_id", "facility_name", "Facility ID", "Facility", "Calidad cartera"}:
+            elif header in {"client", "cliente", "Cliente", "period", "Periodo", "ratio", "concept", "Concepto", "Concepto normalizado", "Categoria", "Estado", "estatus_crm", "producto_principal", "Estatus", "Producto", "facility_id", "facility_name", "Facility ID", "Facility", "Calidad cartera"}:
                 width = 20
             elif header in {"responsable", "Responsable", "prioridad", "Prioridad", "ultimo_periodo", "fecha_actualizacion", "Ultimo periodo", "Fecha actualizacion", "Tipo EEFF"}:
                 width = 18
@@ -1627,7 +2174,7 @@ def style_workbook(writer):
                     cell.number_format = '0.0%;[Red](0.0%);-'
                 elif header == "result_pct":
                     cell.number_format = '0.0;[Red](0.0);-'
-                elif header in whole_number_headers:
+                elif header in whole_number_headers or re.match(r"^20\d{2}-\d{2}-\d{2}$", str(header)):
                     cell.number_format = '#,##0;[Red](#,##0);-'
                 elif isinstance(cell.value, float):
                     cell.number_format = '#,##0.00;[Red](#,##0.00);-'
@@ -1638,16 +2185,6 @@ def style_workbook(writer):
                         cell.font = Font(bold=True, color=status_font_colors.get(str(cell.value).lower(), "102033"))
         if not is_front_sheet:
             continue
-        for row in ws.iter_rows(min_row=2):
-            for cell in row:
-                cell.alignment = Alignment(wrap_text=cell.column_letter in {"D", "E", "G", "O", "P", "Q"}, vertical="top")
-                if isinstance(cell.value, float):
-                    cell.number_format = '#,##0.00;[Red](#,##0.00);-'
-                if headers[cell.column - 1] in {"review_status", "status", "mapping_status", "source_method", "estatus_crm", "prioridad", "Estatus", "Prioridad"}:
-                    fill = status_fills.get(str(cell.value).lower())
-                    if fill:
-                        cell.fill = fill
-                        cell.font = Font(bold=True, color=status_font_colors.get(str(cell.value).lower(), "102033"))
         if ws.title in {"Inicio", "CRM Clientes", "Actualizar"}:
             for cell in ws[1]:
                 cell.fill = title_fill
@@ -1667,11 +2204,10 @@ def style_workbook(writer):
             for col_idx in range(10, 13):
                 for row_idx in range(2, ws.max_row + 1):
                     ws.cell(row_idx, col_idx).number_format = '#,##0'
-            for header in {"Cartera neta"}:
-                if header in headers:
-                    col_idx = headers.index(header) + 1
-                    for row_idx in range(2, ws.max_row + 1):
-                        ws.cell(row_idx, col_idx).number_format = '#,##0;[Red](#,##0);-'
+            if "Cartera neta" in headers:
+                col_idx = headers.index("Cartera neta") + 1
+                for row_idx in range(2, ws.max_row + 1):
+                    ws.cell(row_idx, col_idx).number_format = '#,##0;[Red](#,##0);-'
             for col_idx in range(6, 9):
                 for row_idx in range(2, ws.max_row + 1):
                     ws.cell(row_idx, col_idx).font = Font(color="0000FF")
@@ -1694,6 +2230,21 @@ def style_workbook(writer):
                 row[14].alignment = Alignment(wrap_text=True, vertical="top")
                 row[15].alignment = Alignment(wrap_text=True, vertical="top")
                 ws.row_dimensions[row[0].row].height = 42
+        if ws.title == "Estados Financieros":
+            ws.sheet_view.zoomScale = 90
+            ws.sheet_properties.tabColor = "2563EB"
+            ws.freeze_panes = "F2"
+            for col_idx, header in enumerate(headers, start=1):
+                if re.match(r"^20\d{2}-\d{2}-\d{2}$", str(header)):
+                    ws.column_dimensions[get_column_letter(col_idx)].width = 15
+            concept_col = headers.index("Concepto") if "Concepto" in headers else None
+            wrap_cols = [headers.index(header) for header in ("Fuente ultimo periodo", "Etiqueta fuente") if header in headers]
+            for row in ws.iter_rows(min_row=2):
+                if concept_col is not None:
+                    row[concept_col].font = Font(bold=True, color="102033")
+                for col_idx in wrap_cols:
+                    row[col_idx].alignment = Alignment(wrap_text=True, vertical="top")
+                ws.row_dimensions[row[0].row].height = 34
         if ws.title == "Actualizar":
             ws.column_dimensions["A"].width = 10
             ws.column_dimensions["B"].width = 24
@@ -1705,6 +2256,7 @@ def style_workbook(writer):
 
 def export_workbook(path, documents, accounts, concepts, ratios, qa, mapping, credit_evidence, followups=None):
     loan_tape = build_loan_tape_by_client(concepts)
+    financial_statements = build_financial_statements_view(concepts)
     crm = build_crm_clients(documents, ratios, qa, followups=followups, loan_tape=loan_tape)
     inicio = build_inicio(crm, documents, accounts, concepts, ratios, qa, loan_tape=loan_tape)
     update_guide = build_update_guide(path)
@@ -1714,6 +2266,7 @@ def export_workbook(path, documents, accounts, concepts, ratios, qa, mapping, cr
             {"category": "accounts", "detail": "extracted", "count": len(accounts)},
             {"category": "accounts", "detail": "pdfs_seen", "count": accounts.attrs.get("pdf_count", 0)},
             {"category": "accounts", "detail": "pdf_cache_hits", "count": accounts.attrs.get("cache_hits", 0)},
+            {"category": "accounts", "detail": "xlsx_seen", "count": accounts.attrs.get("xlsx_count", 0)},
             {"category": "concepts", "detail": "mapped", "count": len(concepts)},
             {"category": "ratios", "detail": "total", "count": len(ratios)},
             {"category": "ratios", "detail": "calculated", "count": int(ratios["review_status"].eq("calculated").sum()) if not ratios.empty else 0},
@@ -1728,6 +2281,7 @@ def export_workbook(path, documents, accounts, concepts, ratios, qa, mapping, cr
         crm.to_excel(writer, sheet_name="CRM Clientes", index=False)
         update_guide.to_excel(writer, sheet_name="Actualizar", index=False)
         loan_tape.to_excel(writer, sheet_name="Loan Tape Cliente", index=False)
+        financial_statements.to_excel(writer, sheet_name="Estados Financieros", index=False)
         ratios.to_excel(writer, sheet_name="Razones", index=False)
         qa.to_excel(writer, sheet_name="QA", index=False)
         documents.to_excel(writer, sheet_name="Documentos", index=False)
@@ -1739,6 +2293,16 @@ def export_workbook(path, documents, accounts, concepts, ratios, qa, mapping, cr
         mapping.to_excel(writer, sheet_name="Mapping Memory", index=False)
         style_workbook(writer)
         style_inicio_dashboard(writer.book["Inicio"], crm, documents, accounts, concepts, ratios, qa, loan_tape, path)
+    write_crm_sidecar(
+        path,
+        crm,
+        ratios=ratios,
+        qa=qa,
+        documents=documents,
+        concepts=concepts,
+        loan_tape=loan_tape,
+        financial_statements=financial_statements,
+    )
 
 
 def main():
@@ -1754,14 +2318,30 @@ def main():
     parser.add_argument("--max-documents", type=int, default=40)
     parser.add_argument("--max-pages-per-pdf", type=int, default=5)
     parser.add_argument("--max-file-mb", type=int, default=8)
+    parser.add_argument(
+        "--pdf-workers",
+        type=int,
+        default=max(1, min(4, (os.cpu_count() or 2) - 1)),
+        help="Parallel PDF extraction workers. Cache hits are still read in-process for fast warm runs.",
+    )
     parser.add_argument("--include-undated", action="store_true")
+    parser.add_argument(
+        "--extra-source",
+        action="append",
+        default=[],
+        help="Additional source file path to include in document discovery. Repeat it or separate paths with '|'.",
+    )
+    parser.add_argument("--skip-auxiliary-sources", action="store_true", help="Do not auto-include known auxiliary EEFF workbooks.")
     parser.add_argument("--refresh-cache", action="store_true", help="Ignore cached PDF extraction results.")
     parser.add_argument("--skip-credit-evidence", action="store_true", help="Skip broader Drive scan for credit contract evidence.")
     parser.add_argument("--output", default=str(OUTPUT_DIR / "financial_monitor_pipeline.xlsx"))
     args = parser.parse_args()
 
+    clients = [client.strip() for client in args.clients.split(",") if client.strip()]
+
     if args.profile == "prod":
-        if args.clients_root == str(DEFAULT_CLIENTS_ROOT):
+        default_prod_closed_clients = {normalize(client) for client in clients} == {"ventus"}
+        if args.clients_root == str(DEFAULT_CLIENTS_ROOT) and default_prod_closed_clients:
             args.clients_root = (
                 "/Users/syscap/Library/CloudStorage/GoogleDrive-rbarron@syscap.com.mx/Shared drives/"
                 "Axcess - Crédito y Riesgo/1. Clientes/3. Cerrados, Dormant & Rechazados"
@@ -1772,7 +2352,6 @@ def main():
 
     started = log_step("starting")
     clients_root = Path(args.clients_root)
-    clients = [client.strip() for client in args.clients.split(",") if client.strip()]
     metadata = load_client_metadata(args.client_metadata)
     metadata = filter_client_metadata_by_facility(metadata, args.facility)
     followups = load_client_followups(args.client_followups)
@@ -1789,6 +2368,8 @@ def main():
         metadata=metadata,
         include_undated=args.include_undated,
     )
+    auxiliary_sources = [] if args.skip_auxiliary_sources else discover_auxiliary_sources(clients)
+    documents = append_extra_sources(documents, clients, [*auxiliary_sources, *args.extra_source], metadata=metadata)
     log_step(f"discovered documents={len(documents)}", step)
 
     if args.skip_credit_evidence:
@@ -1804,9 +2385,10 @@ def main():
         max_pages=args.max_pages_per_pdf,
         max_file_mb=args.max_file_mb,
         refresh_cache=args.refresh_cache,
+        pdf_workers=args.pdf_workers,
     )
     log_step(
-        f"extracted accounts={len(accounts)} pdfs={accounts.attrs.get('pdf_count', 0)} cache_hits={accounts.attrs.get('cache_hits', 0)}",
+        f"extracted accounts={len(accounts)} pdfs={accounts.attrs.get('pdf_count', 0)} xlsx={accounts.attrs.get('xlsx_count', 0)} cache_hits={accounts.attrs.get('cache_hits', 0)}",
         step,
     )
 
@@ -1815,10 +2397,13 @@ def main():
     mapped_accounts = map_accounts(accounts, mapping)
     concepts = best_concepts(mapped_accounts)
     ratios, qa = calculate_ratios(concepts) if not concepts.empty else (pd.DataFrame(), pd.DataFrame())
-    ratios = filter_ratios_by_facility_covenants(ratios, metadata)
+    ratios = filter_ratios_by_facility_covenants(ratios, metadata, facility=args.facility)
     pair_qa = pairing_qa(documents)
     if not pair_qa.empty:
         qa = pd.concat([qa, pair_qa], ignore_index=True)
+    facility_qa = facility_selection_qa(metadata, facility=args.facility)
+    if not facility_qa.empty:
+        qa = pd.concat([qa, facility_qa], ignore_index=True)
     log_step(f"mapped concepts={len(concepts)} ratios={len(ratios)}", step)
 
     step = log_step("exporting workbook")

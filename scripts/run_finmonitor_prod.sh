@@ -16,4 +16,5 @@ fi
 "$PYTHON_BIN" scripts/financial_monitor_pipeline.py \
   --profile prod \
   --clients "Ventus" \
-  --output outputs/financial_monitor/financial_monitor_pipeline.xlsx
+  --output outputs/financial_monitor/financial_monitor_pipeline.xlsx \
+  "$@"
