@@ -754,7 +754,7 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
               {timeline.length === 0 && <p className="py-8 text-center text-sm font-semibold text-slate-400">Aún no hay historia CRM para este cliente</p>}
               {timeline.length > 0 && <span className="absolute left-4 top-2 bottom-2 w-px bg-slate-200" aria-hidden />}
               <div className="space-y-5">
-                {timeline.slice(0, 20).map(item => {
+                {timeline.map(item => {
                   const nodeStyle = timelineNodeStyle(item);
                   const chip = timelineStatusChip(item);
                   return (
