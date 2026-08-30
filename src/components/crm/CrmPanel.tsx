@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, Clock, Mail, Phone, Plus, Star, Trash2, UserRound, UsersRound } from 'lucide-react';
+import { CheckCircle2, Clock, Mail, Pencil, Phone, Plus, Save, Star, Trash2, UserRound, UsersRound, X } from 'lucide-react';
 import { CrmActivity, CrmActivityType, CrmContact, CrmInfluence, CrmPriority, CrmRelationship, CrmTimelineItem, db } from '../../db/index';
 import { Session } from '../../services/auth';
 
@@ -9,6 +9,14 @@ interface Props {
 }
 
 const todayDateTime = () => `${new Date().toISOString().slice(0, 10)}T09:00`;
+
+function toDateTimeInput(value?: string) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value.slice(0, 16);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
 
 const emptyContact = (): Omit<CrmContact, 'id' | 'createdAt' | 'updatedAt'> => ({
   clientId: '',
@@ -113,6 +121,8 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
   const [timeline, setTimeline] = useState<CrmTimelineItem[]>([]);
   const [contactDraft, setContactDraft] = useState(emptyContact);
   const [activityDraft, setActivityDraft] = useState(emptyActivity);
+  const [editingContact, setEditingContact] = useState<CrmContact | null>(null);
+  const [editingActivity, setEditingActivity] = useState<CrmActivity | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -199,6 +209,67 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
       completedAt: new Date().toISOString(),
     });
     await loadCrm();
+  };
+
+  const saveEditedContact = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editingContact?.name.trim()) return;
+    setSaving(true);
+    setError('');
+    try {
+      await db.updateCrmContact(editingContact.id, {
+        name: editingContact.name.trim(),
+        title: editingContact.title.trim(),
+        department: editingContact.department.trim(),
+        email: editingContact.email.trim(),
+        phone: editingContact.phone.trim(),
+        influence: editingContact.influence,
+        relationship: editingContact.relationship,
+        isPrimary: editingContact.isPrimary,
+        notes: editingContact.notes.trim(),
+      });
+      setEditingContact(null);
+      await loadCrm();
+    } catch (err: any) {
+      setError(err.message || 'No se pudo actualizar el contacto.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveEditedActivity = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const subject = editingActivity?.subject.trim() || editingActivity?.quickNote.trim() || editingActivity?.nextStep.trim();
+    if (!editingActivity || !subject) return;
+    setSaving(true);
+    setError('');
+    try {
+      const isDone = editingActivity.status === 'done';
+      await db.updateCrmActivity(editingActivity.id, {
+        contactId: editingActivity.contactId || undefined,
+        type: editingActivity.type,
+        phase: editingActivity.phase,
+        recordType: editingActivity.recordType,
+        nextStage: editingActivity.nextStage,
+        contactName: editingActivity.contactName || contacts.find(contact => contact.id === editingActivity.contactId)?.name || '',
+        analystName: editingActivity.analystName.trim(),
+        subject,
+        quickNote: editingActivity.quickNote.trim(),
+        nextStep: editingActivity.nextStep.trim(),
+        detail: editingActivity.detail.trim(),
+        status: editingActivity.status,
+        priority: editingActivity.priority,
+        dueAt: editingActivity.dueAt || undefined,
+        completedAt: isDone ? editingActivity.completedAt || new Date().toISOString() : '',
+        ownerId: editingActivity.ownerId || session.userId,
+      });
+      setEditingActivity(null);
+      await loadCrm();
+    } catch (err: any) {
+      setError(err.message || 'No se pudo actualizar la actividad.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const removeContact = async (contact: CrmContact) => {
@@ -323,29 +394,102 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
           <div className="space-y-3">
             {contacts.map(contact => (
               <article key={contact.id} className="crm-card p-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <h3 className="truncate text-sm font-black text-slate-900">{contact.name}</h3>
-                      {contact.isPrimary && <Star className="h-3.5 w-3.5 fill-amber-400 text-amber-400" />}
+                {editingContact?.id === contact.id ? (
+                  <form onSubmit={saveEditedContact} className="space-y-3">
+                    <label>
+                      <span className={labelClass}>Nombre</span>
+                      <input className={inputClass} value={editingContact.name} onChange={e => setEditingContact(prev => prev ? ({ ...prev, name: e.target.value }) : prev)} />
+                    </label>
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                      <label>
+                        <span className={labelClass}>Cargo</span>
+                        <input className={inputClass} value={editingContact.title} onChange={e => setEditingContact(prev => prev ? ({ ...prev, title: e.target.value }) : prev)} />
+                      </label>
+                      <label>
+                        <span className={labelClass}>Área</span>
+                        <input className={inputClass} value={editingContact.department} onChange={e => setEditingContact(prev => prev ? ({ ...prev, department: e.target.value }) : prev)} />
+                      </label>
                     </div>
-                    <p className="mt-1 text-xs font-bold text-slate-500">{[contact.title, contact.department].filter(Boolean).join(' · ') || 'Sin cargo'}</p>
-                  </div>
-                  <button onClick={() => removeContact(contact)} className="rounded-md p-2 text-slate-400 hover:bg-rose-50 hover:text-rose-600" title="Eliminar contacto">
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase tracking-wider ${relationshipClass(contact.relationship)}`}>{contact.relationship}</span>
-                  <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-600">{contact.influence}</span>
-                </div>
-                {(contact.email || contact.phone) && (
-                  <div className="mt-3 space-y-1 text-xs font-semibold text-slate-500">
-                    {contact.email && <p className="flex items-center gap-2"><Mail className="h-3.5 w-3.5" />{contact.email}</p>}
-                    {contact.phone && <p className="flex items-center gap-2"><Phone className="h-3.5 w-3.5" />{contact.phone}</p>}
-                  </div>
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                      <label>
+                        <span className={labelClass}>Email</span>
+                        <input className={inputClass} type="email" value={editingContact.email} onChange={e => setEditingContact(prev => prev ? ({ ...prev, email: e.target.value }) : prev)} />
+                      </label>
+                      <label>
+                        <span className={labelClass}>Teléfono</span>
+                        <input className={inputClass} value={editingContact.phone} onChange={e => setEditingContact(prev => prev ? ({ ...prev, phone: e.target.value }) : prev)} />
+                      </label>
+                    </div>
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                      <label>
+                        <span className={labelClass}>Influencia</span>
+                        <select className={inputClass} value={editingContact.influence} onChange={e => setEditingContact(prev => prev ? ({ ...prev, influence: e.target.value as CrmInfluence }) : prev)}>
+                          <option value="medium">Media</option>
+                          <option value="high">Alta</option>
+                          <option value="decision_maker">Decisor</option>
+                          <option value="low">Baja</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span className={labelClass}>Relación</span>
+                        <select className={inputClass} value={editingContact.relationship} onChange={e => setEditingContact(prev => prev ? ({ ...prev, relationship: e.target.value as CrmRelationship }) : prev)}>
+                          <option value="neutral">Neutral</option>
+                          <option value="champion">Aliado</option>
+                          <option value="risk">Riesgo</option>
+                        </select>
+                      </label>
+                    </div>
+                    <label className="flex items-center gap-2 text-sm font-bold text-slate-600">
+                      <input className="h-4 w-4 rounded border-slate-300 text-blue-600" type="checkbox" checked={editingContact.isPrimary} onChange={e => setEditingContact(prev => prev ? ({ ...prev, isPrimary: e.target.checked }) : prev)} />
+                      Contacto principal
+                    </label>
+                    <label>
+                      <span className={labelClass}>Notas</span>
+                      <textarea className={`${inputClass} min-h-20`} value={editingContact.notes} onChange={e => setEditingContact(prev => prev ? ({ ...prev, notes: e.target.value }) : prev)} />
+                    </label>
+                    <div className="flex items-center justify-end gap-2">
+                      <button type="button" onClick={() => setEditingContact(null)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-black text-slate-600 hover:bg-slate-50">
+                        <X className="mr-1 inline h-3.5 w-3.5" />
+                        Cancelar
+                      </button>
+                      <button disabled={saving || !editingContact.name.trim()} className="rounded-lg bg-blue-700 px-3 py-2 text-xs font-black text-white hover:bg-blue-600 disabled:opacity-50">
+                        <Save className="mr-1 inline h-3.5 w-3.5" />
+                        Guardar
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <h3 className="truncate text-sm font-black text-slate-900">{contact.name}</h3>
+                          {contact.isPrimary && <Star className="h-3.5 w-3.5 fill-amber-400 text-amber-400" />}
+                        </div>
+                        <p className="mt-1 text-xs font-bold text-slate-500">{[contact.title, contact.department].filter(Boolean).join(' · ') || 'Sin cargo'}</p>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button onClick={() => setEditingContact(contact)} className="rounded-md p-2 text-slate-500 hover:bg-blue-50 hover:text-blue-700" title="Editar contacto">
+                          <Pencil className="h-4 w-4" />
+                        </button>
+                        <button onClick={() => removeContact(contact)} className="rounded-md p-2 text-slate-400 hover:bg-rose-50 hover:text-rose-600" title="Eliminar contacto">
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <span className={`rounded-md border px-2 py-1 text-[10px] font-black uppercase tracking-wider ${relationshipClass(contact.relationship)}`}>{contact.relationship}</span>
+                      <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-600">{contact.influence}</span>
+                    </div>
+                    {(contact.email || contact.phone) && (
+                      <div className="mt-3 space-y-1 text-xs font-semibold text-slate-500">
+                        {contact.email && <p className="flex items-center gap-2"><Mail className="h-3.5 w-3.5" />{contact.email}</p>}
+                        {contact.phone && <p className="flex items-center gap-2"><Phone className="h-3.5 w-3.5" />{contact.phone}</p>}
+                      </div>
+                    )}
+                    {contact.notes && <p className="mt-3 text-sm leading-6 text-slate-600">{contact.notes}</p>}
+                  </>
                 )}
-                {contact.notes && <p className="mt-3 text-sm leading-6 text-slate-600">{contact.notes}</p>}
               </article>
             ))}
           </div>
@@ -467,29 +611,135 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
               {openActivities.length === 0 && <p className="px-5 py-8 text-center text-sm font-semibold text-slate-400">Sin actividades pendientes</p>}
               {openActivities.map(activity => (
                 <article key={activity.id} className="p-5">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-black text-slate-900">{activity.subject}</p>
-                      <p className="mt-1 text-xs font-bold text-slate-500">{activity.phase || 'Sin fase'} · {activity.recordType || typeLabel(activity.type)} · {fmtDate(activity.dueAt)}</p>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <button onClick={() => completeActivity(activity)} className="rounded-md p-2 text-emerald-600 hover:bg-emerald-50" title="Marcar como completada">
-                        <CheckCircle2 className="h-4 w-4" />
-                      </button>
-                      <button onClick={() => removeActivity(activity)} className="rounded-md p-2 text-slate-400 hover:bg-rose-50 hover:text-rose-600" title="Eliminar actividad">
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <span className={`rounded-md px-2 py-1 text-[10px] font-black uppercase tracking-wider ${priorityClass(activity.priority)}`}>{activity.priority}</span>
-                    {(activity.contactName || activity.contactId) && <span className="rounded-md bg-slate-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-600">{activity.contactName || contacts.find(c => c.id === activity.contactId)?.name || 'Contacto'}</span>}
-                    {activity.nextStage && <span className="rounded-md bg-emerald-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-emerald-700">{activity.nextStage}</span>}
-                    {activity.analystName && <span className="rounded-md bg-blue-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-blue-700">{activity.analystName}</span>}
-                  </div>
-                  {activity.quickNote && <p className="mt-3 text-sm leading-6 text-slate-700">{activity.quickNote}</p>}
-                  {activity.nextStep && <p className="mt-2 text-sm font-bold leading-6 text-slate-600">Siguiente paso: {activity.nextStep}</p>}
-                  {activity.detail && <p className="mt-2 text-sm leading-6 text-slate-500">{activity.detail}</p>}
+                  {editingActivity?.id === activity.id ? (
+                    <form onSubmit={saveEditedActivity} className="space-y-3">
+                      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                        <label>
+                          <span className={labelClass}>Fase</span>
+                          <select className={inputClass} value={editingActivity.phase} onChange={e => setEditingActivity(prev => prev ? ({ ...prev, phase: e.target.value }) : prev)}>
+                            {PHASES.map(phase => <option key={phase} value={phase}>{phase}</option>)}
+                          </select>
+                        </label>
+                        <label>
+                          <span className={labelClass}>Tipo</span>
+                          <select className={inputClass} value={editingActivity.recordType} onChange={e => setEditingActivity(prev => prev ? ({ ...prev, recordType: e.target.value }) : prev)}>
+                            {RECORD_TYPES.map(recordType => <option key={recordType} value={recordType}>{recordType}</option>)}
+                          </select>
+                        </label>
+                        <label>
+                          <span className={labelClass}>Etapa</span>
+                          <select className={inputClass} value={editingActivity.nextStage} onChange={e => setEditingActivity(prev => prev ? ({ ...prev, nextStage: e.target.value }) : prev)}>
+                            <option value="">Sin cambio</option>
+                            {STAGES.map(stage => <option key={stage} value={stage}>{stage}</option>)}
+                          </select>
+                        </label>
+                      </div>
+                      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                        <label>
+                          <span className={labelClass}>Canal</span>
+                          <select className={inputClass} value={editingActivity.type} onChange={e => setEditingActivity(prev => prev ? ({ ...prev, type: e.target.value as CrmActivityType }) : prev)}>
+                            <option value="task">Tarea</option>
+                            <option value="call">Llamada</option>
+                            <option value="meeting">Reunión</option>
+                            <option value="email">Correo</option>
+                            <option value="review">Revisión</option>
+                            <option value="note">Nota</option>
+                          </select>
+                        </label>
+                        <label>
+                          <span className={labelClass}>Prioridad</span>
+                          <select className={inputClass} value={editingActivity.priority} onChange={e => setEditingActivity(prev => prev ? ({ ...prev, priority: e.target.value as CrmPriority }) : prev)}>
+                            <option value="normal">Normal</option>
+                            <option value="high">Alta</option>
+                            <option value="low">Baja</option>
+                          </select>
+                        </label>
+                        <label>
+                          <span className={labelClass}>Fecha</span>
+                          <input className={inputClass} type="datetime-local" value={toDateTimeInput(editingActivity.dueAt)} onChange={e => setEditingActivity(prev => prev ? ({ ...prev, dueAt: e.target.value }) : prev)} />
+                        </label>
+                      </div>
+                      <label>
+                        <span className={labelClass}>Asunto</span>
+                        <input className={inputClass} value={editingActivity.subject} onChange={e => setEditingActivity(prev => prev ? ({ ...prev, subject: e.target.value }) : prev)} />
+                      </label>
+                      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                        <label>
+                          <span className={labelClass}>Contacto</span>
+                          <select
+                            className={inputClass}
+                            value={editingActivity.contactId || ''}
+                            onChange={e => {
+                              const contactId = e.target.value;
+                              setEditingActivity(prev => prev ? ({ ...prev, contactId, contactName: contacts.find(contact => contact.id === contactId)?.name || prev.contactName }) : prev);
+                            }}
+                          >
+                            <option value="">Sin contacto ligado</option>
+                            {contacts.map(contact => <option key={contact.id} value={contact.id}>{contact.name}</option>)}
+                          </select>
+                        </label>
+                        <label>
+                          <span className={labelClass}>Contacto en tracker</span>
+                          <input className={inputClass} value={editingActivity.contactName} onChange={e => setEditingActivity(prev => prev ? ({ ...prev, contactName: e.target.value }) : prev)} />
+                        </label>
+                      </div>
+                      <label>
+                        <span className={labelClass}>Analista</span>
+                        <input className={inputClass} value={editingActivity.analystName} onChange={e => setEditingActivity(prev => prev ? ({ ...prev, analystName: e.target.value }) : prev)} />
+                      </label>
+                      <label>
+                        <span className={labelClass}>Nota rápida</span>
+                        <textarea className={`${inputClass} min-h-20`} value={editingActivity.quickNote} onChange={e => setEditingActivity(prev => prev ? ({ ...prev, quickNote: e.target.value }) : prev)} />
+                      </label>
+                      <label>
+                        <span className={labelClass}>Siguiente paso</span>
+                        <textarea className={`${inputClass} min-h-20`} value={editingActivity.nextStep} onChange={e => setEditingActivity(prev => prev ? ({ ...prev, nextStep: e.target.value }) : prev)} />
+                      </label>
+                      <label>
+                        <span className={labelClass}>Detalle</span>
+                        <textarea className={`${inputClass} min-h-20`} value={editingActivity.detail} onChange={e => setEditingActivity(prev => prev ? ({ ...prev, detail: e.target.value }) : prev)} />
+                      </label>
+                      <div className="flex items-center justify-end gap-2">
+                        <button type="button" onClick={() => setEditingActivity(null)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-black text-slate-600 hover:bg-slate-50">
+                          <X className="mr-1 inline h-3.5 w-3.5" />
+                          Cancelar
+                        </button>
+                        <button disabled={saving || !(editingActivity.subject.trim() || editingActivity.quickNote.trim() || editingActivity.nextStep.trim())} className="rounded-lg bg-blue-700 px-3 py-2 text-xs font-black text-white hover:bg-blue-600 disabled:opacity-50">
+                          <Save className="mr-1 inline h-3.5 w-3.5" />
+                          Guardar
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <>
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-black text-slate-900">{activity.subject}</p>
+                          <p className="mt-1 text-xs font-bold text-slate-500">{activity.phase || 'Sin fase'} · {activity.recordType || typeLabel(activity.type)} · {fmtDate(activity.dueAt)}</p>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => setEditingActivity(activity)} className="rounded-md p-2 text-slate-500 hover:bg-blue-50 hover:text-blue-700" title="Editar actividad">
+                            <Pencil className="h-4 w-4" />
+                          </button>
+                          <button onClick={() => completeActivity(activity)} className="rounded-md p-2 text-emerald-600 hover:bg-emerald-50" title="Marcar como completada">
+                            <CheckCircle2 className="h-4 w-4" />
+                          </button>
+                          <button onClick={() => removeActivity(activity)} className="rounded-md p-2 text-slate-400 hover:bg-rose-50 hover:text-rose-600" title="Eliminar actividad">
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <span className={`rounded-md px-2 py-1 text-[10px] font-black uppercase tracking-wider ${priorityClass(activity.priority)}`}>{activity.priority}</span>
+                        {(activity.contactName || activity.contactId) && <span className="rounded-md bg-slate-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-600">{activity.contactName || contacts.find(c => c.id === activity.contactId)?.name || 'Contacto'}</span>}
+                        {activity.nextStage && <span className="rounded-md bg-emerald-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-emerald-700">{activity.nextStage}</span>}
+                        {activity.analystName && <span className="rounded-md bg-blue-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-blue-700">{activity.analystName}</span>}
+                      </div>
+                      {activity.quickNote && <p className="mt-3 text-sm leading-6 text-slate-700">{activity.quickNote}</p>}
+                      {activity.nextStep && <p className="mt-2 text-sm font-bold leading-6 text-slate-600">Siguiente paso: {activity.nextStep}</p>}
+                      {activity.detail && <p className="mt-2 text-sm leading-6 text-slate-500">{activity.detail}</p>}
+                    </>
+                  )}
                 </article>
               ))}
             </div>
