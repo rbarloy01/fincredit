@@ -6,7 +6,17 @@ export async function readJson(req: any) {
 
 export function sendJson(res: any, status: number, data: unknown) {
   res.status(status).setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
   res.end(JSON.stringify(data));
+}
+
+function safeParseJson(text: string, fallback: any = null) {
+  try {
+    return text ? JSON.parse(text) : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 export async function forwardJson(url: string, payload: unknown, headers: Record<string, string>) {
@@ -35,16 +45,41 @@ export async function requireManager(req: any, supabaseUrl: string, serviceKey: 
     headers: { apikey: serviceKey, Authorization: `Bearer ${token}` },
   });
   const userText = await userResponse.text();
-  const user = userText ? JSON.parse(userText) : null;
+  const user = safeParseJson(userText);
   if (userResponse.status >= 300 || !user?.id) return { ok: false, status: 401, error: 'Sesión inválida' };
 
   const profileResponse = await fetch(`${supabaseUrl}/rest/v1/profiles?select=role,org_id&id=eq.${encodeURIComponent(user.id)}&limit=1`, {
     headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
   });
   const profileText = await profileResponse.text();
-  const profile = profileText ? JSON.parse(profileText) : [];
+  const profile = safeParseJson(profileText, []);
   if (profileResponse.status >= 300) return { ok: false, status: 500, error: 'No se pudo verificar permisos' };
   if (profile?.[0]?.role !== 'manager') return { ok: false, status: 403, error: 'Solo managers pueden administrar usuarios' };
+
+  return { ok: true, status: 200, error: null, user, profile: profile[0] };
+}
+
+export async function requireActiveUser(req: any, supabaseUrl: string, serviceKey: string) {
+  const raw = req.headers?.authorization || req.headers?.Authorization || '';
+  const token = String(raw).replace(/^Bearer\s+/i, '').trim();
+  if (!token) return { ok: false, status: 401, error: 'No autenticado' };
+
+  const userResponse = await fetch(`${supabaseUrl}/auth/v1/user`, {
+    headers: { apikey: serviceKey, Authorization: `Bearer ${token}` },
+  });
+  const userText = await userResponse.text();
+  const user = safeParseJson(userText);
+  if (userResponse.status >= 300 || !user?.id) return { ok: false, status: 401, error: 'Sesión inválida' };
+
+  const profileResponse = await fetch(`${supabaseUrl}/rest/v1/profiles?select=role,org_id&id=eq.${encodeURIComponent(user.id)}&limit=1`, {
+    headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+  });
+  const profileText = await profileResponse.text();
+  const profile = safeParseJson(profileText, []);
+  if (profileResponse.status >= 300) return { ok: false, status: 500, error: 'No se pudo verificar permisos' };
+  if (!['manager', 'analyst'].includes(profile?.[0]?.role)) {
+    return { ok: false, status: 403, error: 'Usuario pendiente de aprobación' };
+  }
 
   return { ok: true, status: 200, error: null, user, profile: profile[0] };
 }

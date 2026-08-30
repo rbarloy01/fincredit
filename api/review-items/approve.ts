@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
-import { readJson, sendJson } from '../_helpers.js';
-import { requireIngestionManager, supabaseFetch, supabaseJson } from '../ingestion/_shared.js';
+import { readJson, sendJson } from '../../server/apiHelpers.js';
+import { requireIngestionManager, supabaseFetch, supabaseJson } from '../../server/ingestion/shared.js';
 
 export const maxDuration = 60;
 

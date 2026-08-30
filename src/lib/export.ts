@@ -1,9 +1,7 @@
 // FinMonitor Export Utility — v2
 // Excel: ExcelJS | PDF/PNG: html2canvas + jsPDF
 
-import ExcelJS from 'exceljs';
-import html2canvas from 'html2canvas';
-import jsPDF from 'jspdf';
+import type jsPDF from 'jspdf';
 import type {
   Client, Transaction, Covenant_DB, FinancialStatement_DB, LoanTape_DB, InstitutionalLiability_DB,
 } from '../db/index';
@@ -22,7 +20,13 @@ import {
 } from './financialMetrics';
 import { buildLoanTapeExportContexts, type LoanTapeExportContext } from './loanTapeAnalytics';
 import {
-  buildLiabilitiesSummary, buildLenderConcentration, buildMaturityLadder, LIABILITY_TYPE_LABELS,
+  buildCurrencyConcentration,
+  buildLiabilitiesInsights,
+  buildLiabilitiesSummary,
+  buildLenderConcentration,
+  buildMaturityLadder,
+  buildTypeConcentration,
+  LIABILITY_TYPE_LABELS,
 } from './institutionalLiabilitiesAnalytics';
 import {
   normalizeLoanTapeAnalystState,
@@ -123,6 +127,18 @@ function downloadDataUrl(dataUrl: string, filename: string, target?: ReservedDow
   window.setTimeout(() => {
     document.body.removeChild(a);
   }, 1000);
+}
+
+async function loadExcelJS() {
+  return (await import('exceljs')).default;
+}
+
+async function loadHtml2Canvas() {
+  return (await import('html2canvas')).default;
+}
+
+async function loadJsPdf() {
+  return (await import('jspdf')).default;
 }
 
 function fmtDate(iso: string): string {
@@ -228,6 +244,7 @@ function canvasOpts(el: HTMLElement) {
 }
 
 export async function exportToPng(el: HTMLElement, filename: string, target?: ReservedDownloadTarget): Promise<void> {
+  const html2canvas = await loadHtml2Canvas();
   const canvas = await html2canvas(el, canvasOpts(el));
   downloadDataUrl(canvas.toDataURL('image/png'), `${filename}.png`, target);
 }
@@ -299,6 +316,7 @@ async function captureNodeDataUrl(node: HTMLElement): Promise<string> {
     return (rb.width * rb.height) - (ra.width * ra.height);
   })[0];
   if (surface && surface.getBoundingClientRect().width > 40) return svgCardToDataUrl(node, surface);
+  const html2canvas = await loadHtml2Canvas();
   const canvas = await html2canvas(node, { ...canvasOpts(node), imageTimeout: 15000 });
   return canvas.toDataURL('image/png');
 }
@@ -315,6 +333,7 @@ export async function exportNodePng(el: HTMLElement, filename: string, target?: 
 
 async function renderPage(el: HTMLElement, pdf: jsPDF, addPage = false): Promise<void> {
   const PW = 210, PH = 297;
+  const html2canvas = await loadHtml2Canvas();
   const canvas = await html2canvas(el, canvasOpts(el));
   const pagePxHeight = Math.floor((canvas.width * PH) / PW);
   let sourceY = 0;
@@ -345,7 +364,8 @@ async function renderPage(el: HTMLElement, pdf: jsPDF, addPage = false): Promise
 
 export async function exportToPdf(pages: HTMLElement[], filename: string, target?: ReservedDownloadTarget): Promise<void> {
   if (!pages.length) return;
-  const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait', compress: true });
+  const JsPDF = await loadJsPdf();
+  const pdf = new JsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait', compress: true });
   for (let i = 0; i < pages.length; i++) await renderPage(pages[i], pdf, i > 0);
   downloadBlob(pdf.output('blob'), `${todayStamp()} - ${safeFilePart(filename)}.pdf`, target);
 }
@@ -398,6 +418,7 @@ function rowKind(row: SheetDef['rows'][number], ri: number, prev: RowKind): RowK
 }
 
 export async function exportToExcel(sheets: SheetDef[], filename: string, target?: ReservedDownloadTarget): Promise<void> {
+  const ExcelJS = await loadExcelJS();
   const wb = new ExcelJS.Workbook();
   wb.creator = 'FinMonitor';
   wb.created = new Date();
@@ -2466,8 +2487,119 @@ export function buildInstitutionalLiabilities(liabilities: InstitutionalLiabilit
   };
 }
 
+function buildInstitutionalLiabilitiesInsights(liabilities: InstitutionalLiability_DB[]): SheetDef {
+  const summary = buildLiabilitiesSummary(liabilities);
+  const insights = buildLiabilitiesInsights(liabilities);
+  return {
+    name: 'Insights',
+    rows: [
+      ['INSIGHTS DE PASIVOS INSTITUCIONALES'],
+      ['Señales automáticas para revisar concentración, liquidez, costo financiero y calidad de datos.'],
+      [],
+      ['Métrica', 'Valor'],
+      ['Facilities / filas', summary.count],
+      ['Acreedores únicos', summary.lenderCount],
+      ['Saldo total', fmtNum(summary.totalCurrentBalance, '#,##0;[Red](#,##0);-')],
+      ['Tasa ponderada', summary.weightedAverageRate === null ? 'N/A' : fmtNum(summary.weightedAverageRate, '0.0%')],
+      ['Saldo moneda distinta a MXN', fmtNum(summary.foreignCurrencyBalance, '#,##0;[Red](#,##0);-')],
+      ['Saldo vence <= 12 meses', fmtNum(summary.shortTermBalance, '#,##0;[Red](#,##0);-')],
+      ['Filas sin vencimiento', summary.missingMaturityCount],
+      ['Filas sin tasa/referencia', summary.missingRateCount],
+      [],
+      ['Severidad', 'Insight', 'Detalle', 'Recomendación'],
+      ...insights.map(item => [item.severity, item.title, item.detail, item.recommendation]),
+    ],
+    colWidths: [18, 28, 50, 60],
+    wrapColumns: [3, 4],
+  };
+}
+
+function buildInstitutionalLiabilitiesCollection(liabilities: InstitutionalLiability_DB[]): SheetDef {
+  return {
+    name: 'Coleccion',
+    rows: [
+      ['COLECCIÓN DE PASIVOS'],
+      ['Base normalizada exportable: una fila por acreedor/facility.'],
+      [],
+      ['Acreedor', 'Tipo', 'Moneda', 'Monto Original', 'Saldo Actual', 'Tasa', 'Referencia Tasa', 'Originación', 'Vencimiento', 'Amortización', 'Garantía', 'Notas', 'Source Document ID'],
+      ...liabilities.map(l => [
+        l.lenderName,
+        LIABILITY_TYPE_LABELS[l.liabilityType] || l.liabilityType,
+        l.currency,
+        l.originalAmount === null ? null : fmtNum(l.originalAmount, '#,##0;[Red](#,##0);-'),
+        l.currentBalance === null ? null : fmtNum(l.currentBalance, '#,##0;[Red](#,##0);-'),
+        l.interestRate === null ? null : fmtNum(l.interestRate, '0.0%'),
+        l.rateDescription || '',
+        l.originationDate || '',
+        l.maturityDate || '',
+        l.amortization || '',
+        l.guarantee || '',
+        l.notes || '',
+        l.sourceDocumentId || '',
+      ]),
+    ],
+    colWidths: [26, 22, 10, 16, 16, 10, 24, 14, 14, 18, 28, 42, 38],
+    wrapColumns: [7, 10, 11, 12],
+  };
+}
+
+function buildInstitutionalLiabilitiesConcentration(liabilities: InstitutionalLiability_DB[]): SheetDef {
+  const rowsFor = (title: string, rows: ReturnType<typeof buildLenderConcentration>) => [
+    [title],
+    ['Grupo', 'Saldo Actual', '% del Total', 'Facilities'],
+    ...rows.map(row => [row.key, fmtNum(row.currentBalance, '#,##0;[Red](#,##0);-'), fmtNum(row.pctOfTotal, '0.0%'), row.count]),
+    [],
+  ];
+
+  return {
+    name: 'Concentracion',
+    rows: [
+      ['CONCENTRACIÓN DE FONDEO'],
+      [],
+      ...rowsFor('Por acreedor', buildLenderConcentration(liabilities)),
+      ...rowsFor('Por tipo de pasivo', buildTypeConcentration(liabilities)),
+      ...rowsFor('Por moneda', buildCurrencyConcentration(liabilities)),
+    ],
+    colWidths: [34, 18, 14, 12],
+  };
+}
+
+function buildInstitutionalLiabilitiesMaturities(liabilities: InstitutionalLiability_DB[]): SheetDef {
+  const maturityRows = buildMaturityLadder(liabilities);
+  const sortedFacilities = liabilities
+    .slice()
+    .sort((a, b) => (a.maturityDate || '9999-12-31').localeCompare(b.maturityDate || '9999-12-31'));
+  return {
+    name: 'Vencimientos',
+    rows: [
+      ['CALENDARIO DE VENCIMIENTOS'],
+      [],
+      ['Año', 'Saldo Actual', 'Facilities'],
+      ...maturityRows.map(row => [row.year === 0 ? 'Sin fecha' : row.year, fmtNum(row.currentBalance, '#,##0;[Red](#,##0);-'), row.count]),
+      [],
+      ['DETALLE POR FECHA'],
+      ['Acreedor', 'Saldo Actual', 'Moneda', 'Vencimiento', 'Tasa', 'Tipo'],
+      ...sortedFacilities.map(l => [
+        l.lenderName,
+        l.currentBalance === null ? null : fmtNum(l.currentBalance, '#,##0;[Red](#,##0);-'),
+        l.currency,
+        l.maturityDate || 'Sin fecha',
+        l.interestRate === null ? l.rateDescription || '' : fmtNum(l.interestRate, '0.0%'),
+        LIABILITY_TYPE_LABELS[l.liabilityType] || l.liabilityType,
+      ]),
+    ],
+    colWidths: [26, 18, 12, 14, 14, 22],
+  };
+}
+
 export async function exportInstitutionalLiabilities(liabilities: InstitutionalLiability_DB[], clientName: string): Promise<void> {
-  await exportToExcel([buildInstitutionalLiabilities(liabilities)], `Pasivos_Institucionales_${clientName}`);
+  await exportToExcel([
+    buildInstitutionalLiabilities(liabilities),
+    buildInstitutionalLiabilitiesInsights(liabilities),
+    buildInstitutionalLiabilitiesCollection(liabilities),
+    buildInstitutionalLiabilitiesConcentration(liabilities),
+    buildInstitutionalLiabilitiesMaturities(liabilities),
+  ], `Pasivos_Institucionales_${clientName}`);
 }
 
 // INDICADORES — the full standard ratio set (independent of which ones happen
@@ -2577,6 +2709,7 @@ function evaluateCovValue(cov: Covenant_DB, s: FinancialStatement_DB): number | 
 
 // 6. OBLIGACIONES — templated (matches OBLIGACIONES DE HACER Y NO HACER.xlsx exactly)
 async function exportHacerNoHacerExcel(covenants: Covenant_DB[], clientName: string): Promise<void> {
+  const ExcelJS = await loadExcelJS();
   const hacer = covenants.filter(c => c.type === 'hacer');
   const noHacer = covenants.filter(c => c.type === 'noHacer');
 

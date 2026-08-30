@@ -1,4 +1,4 @@
-import { sendJson } from '../../_helpers.js';
+import { sendJson } from '../../../server/apiHelpers.js';
 
 async function restJson(url: string, serviceKey: string, method: string, body?: unknown) {
   const response = await fetch(url, {

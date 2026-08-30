@@ -1,4 +1,4 @@
-import { env, getGoogleAuth } from './_shared.js';
+import { env, getGoogleAuth } from './shared.js';
 
 export type ParsedDocumentAi = {
   processor: string;

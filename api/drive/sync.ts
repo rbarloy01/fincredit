@@ -1,4 +1,4 @@
-import { readJson, sendJson } from '../_helpers.js';
+import { readJson, sendJson } from '../../server/apiHelpers.js';
 import {
   classifyDocument,
   compactKey,
@@ -8,7 +8,7 @@ import {
   supabaseFetch,
   supabaseJson,
   getDriveClient,
-} from '../ingestion/_shared.js';
+} from '../../server/ingestion/shared.js';
 
 export const maxDuration = 60;
 

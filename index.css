@@ -511,6 +511,47 @@ body {
   color: #f7fbff !important;
 }
 
+.theme-night .text-slate-950 {
+  color: #f7fbff !important;
+}
+
+.theme-night .app-topbar h1,
+.theme-night .app-topbar h2,
+.theme-night .portfolio-page h1,
+.theme-night .portfolio-page h2,
+.theme-night .stat-card .text-2xl,
+.theme-night .stat-card .text-3xl,
+.theme-night .client-card h3 {
+  color: #f7fbff !important;
+  letter-spacing: 0 !important;
+}
+
+.theme-night .portfolio-page .tracking-tight,
+.theme-night .app-topbar .tracking-tight,
+.theme-night .app-sidebar .tracking-tight {
+  letter-spacing: 0 !important;
+}
+
+.theme-night .tracking-tight {
+  letter-spacing: 0 !important;
+}
+
+.theme-night .app-sidebar nav button {
+  min-height: 44px;
+  align-items: center;
+  line-height: 1.2;
+}
+
+.theme-night .app-sidebar nav button.bg-indigo-600 {
+  background: linear-gradient(135deg, #1947ff 0%, #0877ff 58%, #00a9c7 100%) !important;
+  color: #ffffff !important;
+  box-shadow: 0 12px 28px rgba(0, 102, 255, 0.24) !important;
+}
+
+.theme-night .app-sidebar nav button:not(.bg-indigo-600) {
+  color: #b6c3d5 !important;
+}
+
 .theme-night .text-slate-600,
 .theme-night .text-slate-500 {
   color: #b6c3d5 !important;

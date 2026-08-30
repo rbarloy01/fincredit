@@ -196,23 +196,8 @@ export default defineConfig(({ mode }) => {
         name: 'local-openai-proxy',
         configureServer(server) {
           server.middlewares.use('/api/openai/responses', async (req, res) => {
-            if (req.method !== 'POST') {
-              res.statusCode = 405;
-              res.end('Method not allowed');
-              return;
-            }
             try {
-              const incoming = JSON.parse(await readBody(req));
-              const apiKey = incoming.apiKey || env.OPENAI_API_KEY;
-              if (!apiKey) {
-                res.statusCode = 400;
-                res.end(JSON.stringify({ error: 'OPENAI_API_KEY missing' }));
-                return;
-              }
-              const result = await postJson('https://api.openai.com/v1/responses', apiKey, incoming.payload);
-              res.statusCode = result.status;
-              res.setHeader('Content-Type', 'application/json');
-              res.end(result.body);
+              await callVercelHandler(server, '/api/openai/responses.ts', req, res);
             } catch (error: any) {
               res.statusCode = 500;
               res.end(JSON.stringify({ error: error?.message || 'OpenAI proxy error' }));
@@ -220,27 +205,8 @@ export default defineConfig(({ mode }) => {
           });
 
           server.middlewares.use('/api/gemini', async (req, res) => {
-            if (req.method !== 'POST') { res.statusCode = 405; res.end('Method not allowed'); return; }
             try {
-              const incoming = JSON.parse(await readBody(req));
-              const apiKey = incoming.apiKey || env.GEMINI_API_KEY;
-              if (!apiKey) { res.statusCode = 400; res.end(JSON.stringify({ error: 'GEMINI_API_KEY missing' })); return; }
-              const model = incoming.model || 'gemini-flash-latest';
-              const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-              const target = new URL(url);
-              const bodyStr = JSON.stringify(incoming.payload);
-              const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
-                const request = https.request({
-                  hostname: target.hostname,
-                  path: target.pathname + target.search,
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyStr) },
-                }, response => {
-                  let body = ''; response.on('data', c => { body += c; }); response.on('end', () => resolve({ status: response.statusCode || 500, body }));
-                });
-                request.on('error', reject); request.write(bodyStr); request.end();
-              });
-              res.statusCode = result.status; res.setHeader('Content-Type', 'application/json'); res.end(result.body);
+              await callVercelHandler(server, '/api/gemini.ts', req, res);
             } catch (error: any) { res.statusCode = 500; res.end(JSON.stringify({ error: error?.message || 'Gemini proxy error' })); }
           });
 
@@ -260,41 +226,8 @@ export default defineConfig(({ mode }) => {
           });
 
           server.middlewares.use('/api/admin/health', async (req, res) => {
-            if (req.method !== 'GET') { res.statusCode = 405; res.end('Method not allowed'); return; }
             try {
-              const supabaseUrl = env.SUPABASE_URL || env.VITE_SUPABASE_URL;
-              const serviceKey = env.SUPABASE_SERVICE_KEY;
-              if (!supabaseUrl || !serviceKey) { res.statusCode = 500; res.end(JSON.stringify({ error: 'Supabase admin env missing' })); return; }
-              const access = await requireManager(req, supabaseUrl, serviceKey);
-              if (!access.ok) { res.statusCode = access.status; res.end(JSON.stringify({ error: access.error })); return; }
-
-              const [settingsRes, profileRes] = await Promise.all([
-                fetch(`${supabaseUrl}/auth/v1/settings`, { headers: { apikey: serviceKey } }),
-                fetch(`${supabaseUrl}/rest/v1/profiles?select=id,role,org_id&id=eq.${encodeURIComponent(access.user.id)}&limit=1`, {
-                  headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
-                }),
-              ]);
-              const settings = parseJson(await settingsRes.text(), {});
-              const profile = parseJson(await profileRes.text(), [])?.[0] || null;
-              res.statusCode = 200;
-              res.setHeader('Content-Type', 'application/json');
-              res.end(JSON.stringify({
-                googleProviderEnabled: settingsRes.ok && settings?.external?.google === true,
-                googleProviderCheckError: settingsRes.ok ? null : 'No se pudo consultar la configuración de Supabase Auth',
-                aiKeys: {
-                  gemini: Boolean(env.GEMINI_API_KEY),
-                  claude: Boolean(env.ANTHROPIC_API_KEY),
-                  openai: Boolean(env.OPENAI_API_KEY),
-                  bytez: Boolean(env.BYTEZ_API_KEY),
-                  nvidiaNim: Boolean(env.NVIDIA_NIM_API_KEY),
-                },
-                profile: {
-                  found: profileRes.ok && Boolean(profile?.id),
-                  role: profile?.role || null,
-                  orgId: profile?.org_id || null,
-                  checkError: profileRes.ok ? null : 'No se pudo consultar el perfil actual',
-                },
-              }));
+              await callVercelHandler(server, '/api/admin/health.ts', req, res);
             } catch (error: any) { res.statusCode = 500; res.end(JSON.stringify({ error: error?.message || 'Health check error' })); }
           });
 
@@ -353,23 +286,8 @@ export default defineConfig(({ mode }) => {
           });
 
           server.middlewares.use('/api/claude', async (req, res) => {
-            if (req.method !== 'POST') {
-              res.statusCode = 405;
-              res.end('Method not allowed');
-              return;
-            }
             try {
-              const incoming = JSON.parse(await readBody(req));
-              const apiKey = incoming.apiKey || env.ANTHROPIC_API_KEY;
-              if (!apiKey) {
-                res.statusCode = 400;
-                res.end(JSON.stringify({ error: 'ANTHROPIC_API_KEY missing — configure it in Settings' }));
-                return;
-              }
-              const result = await postJsonAnthropicStyle('https://api.anthropic.com/v1/messages', apiKey, incoming.payload);
-              res.statusCode = result.status;
-              res.setHeader('Content-Type', 'application/json');
-              res.end(result.body);
+              await callVercelHandler(server, '/api/claude.ts', req, res);
             } catch (error: any) {
               res.statusCode = 500;
               res.end(JSON.stringify({ error: error?.message || 'Claude proxy error' }));
@@ -377,29 +295,8 @@ export default defineConfig(({ mode }) => {
           });
 
           server.middlewares.use('/api/bytez', async (req, res) => {
-            if (req.method !== 'POST') {
-              res.statusCode = 405;
-              res.end('Method not allowed');
-              return;
-            }
             try {
-              const incoming = JSON.parse(await readBody(req));
-              const apiKey = incoming.apiKey || env.BYTEZ_API_KEY;
-              if (!apiKey) {
-                res.statusCode = 400;
-                res.end(JSON.stringify({ error: 'BYTEZ_API_KEY missing — configure it in Settings' }));
-                return;
-              }
-              const providerKey = incoming.providerKey || env.BYTEZ_PROVIDER_KEY;
-              const result = await postJson(
-                'https://api.bytez.com/models/v2/openai/v1/chat/completions',
-                apiKey,
-                incoming.payload,
-                { Authorization: apiKey, ...(providerKey ? { 'provider-key': providerKey } : {}) }
-              );
-              res.statusCode = result.status;
-              res.setHeader('Content-Type', 'application/json');
-              res.end(result.body);
+              await callVercelHandler(server, '/api/bytez.ts', req, res);
             } catch (error: any) {
               res.statusCode = 500;
               res.end(JSON.stringify({ error: error?.message || 'Bytez proxy error' }));
@@ -510,6 +407,16 @@ export default defineConfig(({ mode }) => {
             } catch (error: any) {
               res.statusCode = 500;
               res.end(JSON.stringify({ error: error?.message || 'Review item approval error' }));
+            }
+          });
+
+          server.middlewares.use('/api/pipeline/import', async (req, res) => {
+            try {
+              req.url = '/api/documents/process?pipelineImport=1';
+              await callVercelHandler(server, '/api/documents/process.ts', req, res);
+            } catch (error: any) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: error?.message || 'Pipeline import error' }));
             }
           });
         }

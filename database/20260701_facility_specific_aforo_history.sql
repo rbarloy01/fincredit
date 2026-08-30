@@ -3,7 +3,7 @@
 -- general fallback so history is not assigned to the wrong credit.
 
 WITH single_facility_clients AS (
-  SELECT client_id, MIN(id)::text AS transaction_id
+  SELECT client_id, MIN(id::text) AS transaction_id
   FROM transactions
   GROUP BY client_id
   HAVING COUNT(*) = 1

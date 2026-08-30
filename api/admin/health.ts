@@ -1,4 +1,20 @@
-import { requireManager, sendJson } from '../_helpers.js';
+import { requireManager, sendJson } from '../../server/apiHelpers.js';
+
+const REQUIRED_TABLES = [
+  'profiles',
+  'organizations',
+  'clients',
+  'institutional_liabilities',
+  'company_default_assessments',
+  'documents',
+  'document_extraction_runs',
+  'document_pages',
+  'document_tables',
+  'extraction_review_items',
+  'financial_line_item_sources',
+  'crm_contacts',
+  'crm_activities',
+];
 
 async function readResponseJson(response: Response, fallback: any) {
   const text = await response.text();
@@ -7,6 +23,17 @@ async function readResponseJson(response: Response, fallback: any) {
   } catch {
     return fallback;
   }
+}
+
+async function checkTable(supabaseUrl: string, serviceKey: string, table: string) {
+  const response = await fetch(`${supabaseUrl}/rest/v1/${table}?select=*&limit=1`, {
+    headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+  });
+  return {
+    table,
+    ok: response.ok,
+    status: response.status,
+  };
 }
 
 export default async function handler(req: any, res: any) {
@@ -28,6 +55,7 @@ export default async function handler(req: any, res: any) {
         headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
       }),
     ]);
+    const schema = await Promise.all(REQUIRED_TABLES.map(table => checkTable(supabaseUrl, serviceKey, table)));
 
     const settings = await readResponseJson(settingsResponse, {});
     const profiles = await readResponseJson(profileResponse, []);
@@ -40,6 +68,7 @@ export default async function handler(req: any, res: any) {
         gemini: Boolean(process.env.GEMINI_API_KEY),
         claude: Boolean(process.env.ANTHROPIC_API_KEY),
         openai: Boolean(process.env.OPENAI_API_KEY),
+        openrouter: Boolean(process.env.OPENROUTER_API_KEY),
         bytez: Boolean(process.env.BYTEZ_API_KEY),
         nvidiaNim: Boolean(process.env.NVIDIA_NIM_API_KEY),
       },
@@ -47,6 +76,11 @@ export default async function handler(req: any, res: any) {
         googleServiceAccount: Boolean(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS),
         driveRootFolder: Boolean(process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID),
         documentAiProcessor: Boolean(process.env.GOOGLE_DOCUMENT_AI_PROCESSOR_NAME),
+      },
+      schema: {
+        ok: schema.every(item => item.ok),
+        tables: schema,
+        missing: schema.filter(item => !item.ok).map(item => item.table),
       },
       profile: {
         found: profileResponse.ok && Boolean(profile?.id),

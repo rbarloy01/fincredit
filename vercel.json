@@ -8,6 +8,10 @@
       "destination": "/api/bytez?provider=nvidia_nim"
     },
     {
+      "source": "/api/pipeline/import",
+      "destination": "/api/documents/process?pipelineImport=1"
+    },
+    {
       "source": "/((?!api/|assets/).*)",
       "destination": "/index.html"
     }

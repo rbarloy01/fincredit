@@ -4,6 +4,8 @@ FinMonitor is a credit monitoring app for IFNB workflows. It manages clients, tr
 
 The active React entrypoint is `index.tsx`, which mounts `src/App.tsx`. The root-level `App.tsx` is legacy code kept in the repo for now and is not used by the current Vite build.
 
+This folder is the production Vercel source for `finmonitor-base`. The sibling folder `/Users/syscap/Documents/New project 2` contains the local Python FINmonitor pipeline/workbench and should be treated as a separate data-engine workspace until its jobs are integrated behind app APIs. See `docs/priority-hardening.md`.
+
 ## Local Setup
 
 ```bash
@@ -33,6 +35,7 @@ OPENAI_API_KEY=
 ```
 
 Managers can still enter a browser-local AI key in the app settings, but production deployments should prefer server-side keys.
+Browser-local AI keys are not persisted to long-lived storage; users should rely on Vercel environment variables for production use.
 
 ## Database
 
@@ -78,6 +81,7 @@ Manager-only endpoints:
 POST /api/drive/sync
 POST /api/documents/process
 POST /api/review-items/approve
+POST /api/pipeline/import
 ```
 
 Suggested pilot flow:
@@ -104,11 +108,14 @@ curl -X POST "$APP_URL/api/review-items/approve" \
 
 Excel/CSV files are parsed locally without AI. PDFs/images go through Google Document AI. Extracted financial line items and qualitative excerpts land in `extraction_review_items`; approval promotes them into `financial_statements`, `financial_line_item_sources`, or `qualitative_factors`.
 
+The local Python FINmonitor sidecar can be imported through `/api/pipeline/import`; see `docs/pipeline-import-contract.md`. Imported values also land in `extraction_review_items` and require approval before they affect statements, ratios, or covenants.
+
 ## Checks
 
 ```bash
 npm run lint
 npm run build
+npm run verify:supabase
 ```
 
 Current build note: Vite warns that the main bundle is large. The likely next optimization is code-splitting heavy export/report dependencies such as PDF, Excel, and spreadsheet tooling.

@@ -1650,7 +1650,15 @@ export const db = {
   async getDashboardStatementsForClients(clientIds: string[]): Promise<Record<string, FinancialStatement_DB[]>> {
     if (!clientIds.length) return {};
     const columns = 'id,client_id,source_document_id,source_company_name,document_type,period,period_date,upload_date,file_name,mapped_data';
-    const { data, error } = await supabase.from('financial_statements').select(columns).in('client_id', clientIds).order('period_date');
+    const primary = await supabase.from('financial_statements').select(columns).in('client_id', clientIds).order('period_date');
+    let data: any[] | null = primary.data as any[] | null;
+    let error = primary.error;
+    if (error && isMissingSchemaError(error, 'source_document_id')) {
+      const fallbackColumns = columns.replace('source_document_id,', '');
+      const retry = await supabase.from('financial_statements').select(fallbackColumns).in('client_id', clientIds).order('period_date');
+      data = retry.data as any[] | null;
+      error = retry.error;
+    }
     if (error) err('getDashboardStatementsForClients', error);
     return mergeStatementRows((data || []).map(toStatement)).reduce((acc, statement) => {
       (acc[statement.clientId] ||= []).push(statement);
@@ -1829,6 +1837,7 @@ export const db = {
   async updateInstitutionalLiability(id: string, updates: Partial<InstitutionalLiability_DB>): Promise<void> {
     const row: any = {};
     if (updates.lenderName !== undefined) row.lender_name = updates.lenderName;
+    if (updates.sourceDocumentId !== undefined) row.source_document_id = updates.sourceDocumentId || null;
     if (updates.liabilityType !== undefined) row.liability_type = updates.liabilityType;
     if (updates.originalAmount !== undefined) row.original_amount = updates.originalAmount;
     if (updates.currentBalance !== undefined) row.current_balance = updates.currentBalance;
@@ -1841,7 +1850,13 @@ export const db = {
     if (updates.guarantee !== undefined) row.guarantee = updates.guarantee || null;
     if (updates.notes !== undefined) row.notes = updates.notes || null;
     row.updated_at = new Date().toISOString();
-    const { error } = await supabase.from('institutional_liabilities').update(row).eq('id', id);
+    let { error } = await supabase.from('institutional_liabilities').update(row).eq('id', id);
+    if (error && isMissingSchemaError(error, 'source_document_id')) {
+      delete row.source_document_id;
+      if (Object.keys(row).length === 0) return;
+      const retry = await supabase.from('institutional_liabilities').update(row).eq('id', id);
+      error = retry.error;
+    }
     if (error) err('updateInstitutionalLiability', error);
   },
 

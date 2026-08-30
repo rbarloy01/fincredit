@@ -1,21 +1,123 @@
-// Multi-provider AI service: Gemini, Claude, OpenAI, Bytez, NVIDIA NIM
+// Multi-provider AI service: Gemini, Claude, OpenAI, OpenRouter, Bytez, NVIDIA NIM
 // Uses Vite proxy at /api/gemini, /api/claude, /api/openai, /api/bytez, /api/nvidia-nim
 
 import loanTapePrompt from '../prompts/loan-tape.md?raw';
 import financialsPrompt from '../prompts/financials.md?raw';
 import { parseFinancialNumber } from '../lib/numberParsing';
+import { supabase } from '../lib/supabase';
 
-export type AIProvider = 'gemini' | 'claude' | 'openai' | 'bytez' | 'nvidia_nim';
+export type AIProvider = 'gemini' | 'claude' | 'openai' | 'openrouter' | 'bytez' | 'nvidia_nim';
+export type AITask = 'financials' | 'contracts' | 'loan_tape' | 'liabilities' | 'opinion' | 'account_consolidation';
+
+export interface AIProviderConfig {
+  provider: AIProvider;
+  enabled: boolean;
+  apiKey: string;
+  model?: string;
+  fallbackModels?: string[];
+}
 
 export interface AISettings {
   provider: AIProvider;
   apiKey: string;
+  model?: string;
+  fallbackModels?: string[];
+  providers?: Partial<Record<AIProvider, AIProviderConfig>>;
+  taskProviders?: Partial<Record<AITask, AIProvider>>;
 }
 
 const SETTINGS_KEY = 'finmonitor_ai_settings';
 const GEMINI_MODEL = 'gemini-flash-latest';
+const OPENROUTER_MODEL = 'stealth/ox-alpha';
+const OPENROUTER_FALLBACK_MODELS = ['openrouter/free'];
 const BYTEZ_MODEL = 'Qwen/Qwen3-4B';
 const NVIDIA_NIM_MODEL = 'nvidia/llama-3.1-nemotron-70b-instruct';
+const AI_PROVIDERS: AIProvider[] = ['gemini', 'claude', 'openai', 'openrouter', 'bytez', 'nvidia_nim'];
+
+export const AI_TASK_LABELS: Record<AITask, string> = {
+  financials: 'Estados financieros',
+  contracts: 'Contratos y covenants',
+  loan_tape: 'Loan tape',
+  liabilities: 'Pasivos institucionales',
+  opinion: 'Opinión / comentarios',
+  account_consolidation: 'Consolidación de cuentas',
+};
+
+export function defaultModelForProvider(provider: AIProvider): string {
+  if (provider === 'openrouter') return OPENROUTER_MODEL;
+  if (provider === 'bytez') return BYTEZ_MODEL;
+  if (provider === 'nvidia_nim') return NVIDIA_NIM_MODEL;
+  if (provider === 'openai') return 'gpt-4o';
+  if (provider === 'claude') return 'claude-sonnet-4-6';
+  return GEMINI_MODEL;
+}
+
+export function defaultFallbackModelsForProvider(provider: AIProvider): string[] {
+  return provider === 'openrouter' ? [...OPENROUTER_FALLBACK_MODELS] : [];
+}
+
+export function defaultProviderConfig(provider: AIProvider): AIProviderConfig {
+  return {
+    provider,
+    enabled: provider === 'gemini',
+    apiKey: '',
+    model: defaultModelForProvider(provider),
+    fallbackModels: defaultFallbackModelsForProvider(provider),
+  };
+}
+
+function normalizeProviderConfig(provider: AIProvider, config?: Partial<AIProviderConfig>): AIProviderConfig {
+  return {
+    ...defaultProviderConfig(provider),
+    ...config,
+    provider,
+    enabled: config?.enabled ?? defaultProviderConfig(provider).enabled,
+    apiKey: config?.apiKey ?? '',
+    model: config?.model || defaultModelForProvider(provider),
+    fallbackModels: config?.fallbackModels || defaultFallbackModelsForProvider(provider),
+  };
+}
+
+export function normalizeAISettings(settings: AISettings): AISettings {
+  const providers = Object.fromEntries(AI_PROVIDERS.map(provider => {
+    const legacyForCurrent = provider === settings.provider
+      ? { apiKey: settings.apiKey, model: settings.model, fallbackModels: settings.fallbackModels, enabled: true }
+      : {};
+    return [provider, normalizeProviderConfig(provider, { ...legacyForCurrent, ...(settings.providers?.[provider] || {}) })];
+  })) as Record<AIProvider, AIProviderConfig>;
+  const active = providers[settings.provider] || providers.gemini;
+  return {
+    ...settings,
+    provider: active.provider,
+    apiKey: active.apiKey,
+    model: active.model,
+    fallbackModels: active.fallbackModels,
+    providers,
+    taskProviders: settings.taskProviders || {},
+  };
+}
+
+export function providerSettings(settings: AISettings, provider = settings.provider): AIProviderConfig {
+  return normalizeAISettings(settings).providers?.[provider] || defaultProviderConfig(provider);
+}
+
+export function settingsForTask(settings: AISettings, task: AITask): AISettings {
+  const normalized = normalizeAISettings(settings);
+  const requested = normalized.taskProviders?.[task];
+  const provider = requested && normalized.providers?.[requested]?.enabled
+    ? requested
+    : normalized.providers?.[normalized.provider]?.enabled
+      ? normalized.provider
+      : AI_PROVIDERS.find(item => normalized.providers?.[item]?.enabled) || normalized.provider;
+  const config = normalized.providers?.[provider] || providerSettings(normalized, provider);
+  return {
+    ...normalized,
+    provider,
+    apiKey: config.apiKey,
+    model: config.model,
+    fallbackModels: config.fallbackModels,
+  };
+}
 
 export interface AIMedia {
   base64: string;
@@ -31,16 +133,32 @@ export interface AIDocumentContent {
 export function loadAISettings(): AISettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) return JSON.parse(raw) as AISettings;
+    if (raw) {
+      const parsed = JSON.parse(raw) as AISettings;
+      return normalizeAISettings({
+        ...parsed,
+        model: parsed.model || defaultModelForProvider(parsed.provider),
+        fallbackModels: parsed.fallbackModels || defaultFallbackModelsForProvider(parsed.provider),
+      });
+    }
   } catch {}
   // Legacy key
   const legacyKey = localStorage.getItem('finmonitor_claude_key');
-  if (legacyKey) return { provider: 'claude', apiKey: legacyKey };
-  return { provider: 'gemini', apiKey: '' };
+  if (legacyKey) localStorage.removeItem('finmonitor_claude_key');
+  return normalizeAISettings({ provider: 'gemini', apiKey: '', model: defaultModelForProvider('gemini'), fallbackModels: [] });
 }
 
 export function saveAISettings(s: AISettings) {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+  const normalized = normalizeAISettings(s);
+  const providers = Object.fromEntries(AI_PROVIDERS.map(provider => {
+    const config = normalized.providers?.[provider] || defaultProviderConfig(provider);
+    return [provider, { ...config, apiKey: '' }];
+  })) as Record<AIProvider, AIProviderConfig>;
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+    ...normalized,
+    apiKey: '',
+    providers,
+  }));
 }
 
 // ─── Raw types ────────────────────────────────────────────────────────────────
@@ -120,6 +238,21 @@ export interface AccountConsolidationSuggestion {
     operator?: 'gt'|'lt'|'gte'|'lte'|'none';
     threshold?: string;
   }>;
+}
+
+export interface ExtractedInstitutionalLiability {
+  lenderName: string;
+  liabilityType: 'linea_credito' | 'prestamo_simple' | 'bono' | 'otro';
+  originalAmount: number | null;
+  currentBalance: number | null;
+  currency: string;
+  interestRate: number | null;
+  rateDescription?: string;
+  originationDate?: string;
+  maturityDate?: string;
+  amortization?: string;
+  guarantee?: string;
+  notes?: string;
 }
 
 // ─── Core request dispatcher ──────────────────────────────────────────────────
@@ -250,7 +383,7 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
       // (400 INVALID_ARGUMENT). 128 es el mínimo aceptado → mantiene el pensamiento al mínimo sin romper.
       generationConfig: { temperature: 0.0, maxOutputTokens: 16384, responseMimeType: 'application/json', thinkingConfig: { thinkingBudget: 128 } },
     };
-    const res = await fetchAIWithRetry('/api/gemini', { apiKey, model: GEMINI_MODEL, payload });
+    const res = await fetchAIWithRetry('/api/gemini', { apiKey, model: settings.model || GEMINI_MODEL, payload });
     const data = await readAIResponseJson(res, 'Gemini');
     if (!res.ok) throw new Error(data.error?.message || data.error || 'Gemini error');
     return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
@@ -273,7 +406,7 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
       userContent = userPrompt;
     }
     const payload = {
-      model: 'claude-sonnet-4-6',
+      model: settings.model || 'claude-sonnet-4-6',
       max_tokens: 8192,
       system: systemPrompt,
       messages: [{ role: 'user', content: userContent }],
@@ -295,7 +428,7 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
       }
     }
     const payload = {
-      model: 'gpt-4o',
+      model: settings.model || 'gpt-4o',
       max_output_tokens: 8192,
       instructions: systemPrompt,
       input: [{ role: 'user', content: userContent }],
@@ -309,12 +442,40 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
       || '';
   }
 
+  if (provider === 'openrouter') {
+    if (mediaItems.length > 0) {
+      throw new Error('OpenRouter gratis está configurado para texto/OCR en este flujo. Para PDFs escaneados o imágenes usa Gemini/OpenAI/Claude, o extrae texto primero.');
+    }
+    const model = settings.model || OPENROUTER_MODEL;
+    const fallbackModels = (settings.fallbackModels || OPENROUTER_FALLBACK_MODELS).filter(item => item && item !== model);
+    const payload: Record<string, any> = {
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      temperature: 0,
+      max_tokens: 8192,
+      provider: {
+        sort: { by: 'price', partition: 'none' },
+      },
+    };
+    if (fallbackModels.length) {
+      payload.models = [model, ...fallbackModels];
+    } else {
+      payload.model = model;
+    }
+    const res = await fetchAIWithRetry('/api/bytez', { provider: 'openrouter', apiKey, payload });
+    const data = await readAIResponseJson(res, 'OpenRouter');
+    if (!res.ok) throw new Error(data.error?.message || data.error || 'OpenRouter error');
+    return data.choices?.[0]?.message?.content || '';
+  }
+
   if (provider === 'bytez' || provider === 'nvidia_nim') {
     if (mediaItems.length > 0) {
       throw new Error(`${provider === 'bytez' ? 'Bytez' : 'NVIDIA NIM'} está configurado para texto en este flujo. Usa Gemini/OpenAI/Claude para PDFs o imágenes, o pasa texto OCR.`);
     }
     const payload = {
-      model: provider === 'bytez' ? BYTEZ_MODEL : NVIDIA_NIM_MODEL,
+      model: settings.model || (provider === 'bytez' ? BYTEZ_MODEL : NVIDIA_NIM_MODEL),
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
@@ -345,6 +506,9 @@ async function readAIResponseJson(response: Response, provider: string) {
 }
 
 async function fetchAIWithRetry(url: string, body: unknown): Promise<Response> {
+  const { data: { session } } = await supabase.auth.getSession();
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (session?.access_token) headers.Authorization = `Bearer ${session.access_token}`;
   let lastResponse: Response | null = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const controller = new AbortController();
@@ -352,7 +516,7 @@ async function fetchAIWithRetry(url: string, body: unknown): Promise<Response> {
     try {
       const response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(body),
         signal: controller.signal,
       });
@@ -386,6 +550,62 @@ function extractJSON(text: string): any {
   } catch (error: any) {
     throw new Error(`Respuesta JSON inválida o incompleta del modelo. Reintenta la extracción; si el PDF tiene muchas páginas, divide el archivo por estado financiero. Detalle: ${error?.message || error}`);
   }
+}
+
+function parseNullableNumber(value: unknown): number | null {
+  const parsed = parseFinancialNumber(value, Number.NaN);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeLiabilityType(value: unknown): ExtractedInstitutionalLiability['liabilityType'] {
+  const raw = String(value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (/bono|bursatil|cebur|certificado/.test(raw)) return 'bono';
+  if (/simple|term loan|prestamo/.test(raw)) return 'prestamo_simple';
+  if (/linea|revolvente|revolver|credito en cuenta corriente/.test(raw)) return 'linea_credito';
+  return 'otro';
+}
+
+function normalizeDateString(value: unknown): string | undefined {
+  const raw = String(value || '').trim();
+  if (!raw) return undefined;
+  const parsed = new Date(raw);
+  if (Number.isFinite(parsed.getTime())) return parsed.toISOString().slice(0, 10);
+  const match = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
+  if (!match) return undefined;
+  const year = match[3].length === 2 ? `20${match[3]}` : match[3];
+  const iso = `${year}-${match[2].padStart(2, '0')}-${match[1].padStart(2, '0')}`;
+  const fallbackDate = new Date(iso);
+  return Number.isFinite(fallbackDate.getTime()) ? iso : undefined;
+}
+
+function normalizeInterestRate(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = parseNullableNumber(value);
+  if (parsed === null) return null;
+  if (String(value).includes('%')) return parsed / 100;
+  return parsed > 1 && parsed <= 100 ? parsed / 100 : parsed;
+}
+
+function normalizeLiabilitiesExtraction(parsed: any): ExtractedInstitutionalLiability[] {
+  const rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.liabilities) ? parsed.liabilities : [];
+  return rows.map((row: any) => {
+    const lenderName = String(row.lenderName || row.lender || row.acreedor || row.institucion || '').trim();
+    if (!lenderName) return null;
+    return {
+      lenderName,
+      liabilityType: normalizeLiabilityType(row.liabilityType || row.type || row.tipo),
+      originalAmount: parseNullableNumber(row.originalAmount ?? row.montoOriginal ?? row.montoOtorgado ?? row.lineaCredito),
+      currentBalance: parseNullableNumber(row.currentBalance ?? row.saldoActual ?? row.saldoInsoluto ?? row.saldo),
+      currency: String(row.currency || row.moneda || 'MXN').trim().toUpperCase() || 'MXN',
+      interestRate: normalizeInterestRate(row.interestRate ?? row.tasa ?? row.tasaInteres),
+      rateDescription: String(row.rateDescription || row.referenciaTasa || row.formulaTasa || '').trim() || undefined,
+      originationDate: normalizeDateString(row.originationDate || row.fechaOriginacion || row.fechaFirma),
+      maturityDate: normalizeDateString(row.maturityDate || row.fechaVencimiento || row.vencimiento),
+      amortization: String(row.amortization || row.amortizacion || row.esquemaPago || '').trim() || undefined,
+      guarantee: String(row.guarantee || row.garantia || row.garantias || '').trim() || undefined,
+      notes: String(row.notes || row.notas || row.observaciones || '').trim() || undefined,
+    } satisfies ExtractedInstitutionalLiability;
+  }).filter((row: ExtractedInstitutionalLiability | null): row is ExtractedInstitutionalLiability => Boolean(row));
 }
 
 async function extractContractJSONWithRepair(settings: AISettings, text: string): Promise<any> {
@@ -424,6 +644,7 @@ export async function extractFinancials(
   content: string | AIMedia | AIMedia[] | AIDocumentContent,
   expectedClientName?: string
 ): Promise<ExtractionResult> {
+  settings = settingsForTask(settings, 'financials');
   const system = financialsPrompt;
 
   const isTextContent = typeof content === 'string';
@@ -492,6 +713,7 @@ export async function extractCovenants(
   contractText: string,
   media?: AIMedia | AIMedia[]
 ): Promise<ContractExtractionResult> {
+  settings = settingsForTask(settings, 'contracts');
   const system = `Eres un abogado y analista de crédito experto en contratos de financiamiento IFNB mexicanos.
 Extraes covenants financieros y condiciones de hacer/no hacer de contratos de crédito.
 Devuelves únicamente JSON válido.`;
@@ -541,6 +763,7 @@ export async function extractClientFromContract(
   contractText: string,
   media?: AIMedia | AIMedia[]
 ): Promise<ContractClientExtractionResult> {
+  settings = settingsForTask(settings, 'contracts');
   const system = `Eres un abogado y analista de crédito experto en contratos de financiamiento mexicanos.
 Extraes el perfil del acreditado, condiciones principales, obligaciones y covenants.
 No inventes información. Cuando un dato no aparezca, usa cadena vacía o cero.
@@ -620,6 +843,7 @@ export async function analyzeLoanTape(
   clientName: string,
   covenants?: Array<{ name: string; threshold: string }>
 ): Promise<StructuredLoanTapeAnalysis> {
+  settings = settingsForTask(settings, 'loan_tape');
   const system = loanTapePrompt;
 
   const prompt = `Ejecuta el análisis completo para la cartera de crédito de "${clientName}".
@@ -634,6 +858,61 @@ Sigue los 8 pasos del sistema y devuelve únicamente JSON minificado con la estr
   return extractJSON(text);
 }
 
+// ─── Institutional liabilities extraction ────────────────────────────────────
+
+export async function extractInstitutionalLiabilities(
+  settings: AISettings,
+  content: string | AIDocumentContent,
+  clientName?: string,
+  fileName?: string,
+): Promise<ExtractedInstitutionalLiability[]> {
+  settings = settingsForTask(settings, 'liabilities');
+  const isTextContent = typeof content === 'string';
+  const documentText = isTextContent ? content : String(content.text || '');
+  const documentMedia = isTextContent ? undefined : content.media;
+  const system = `Eres analista de crédito especializado en fondeo institucional de IFNB/SOFOM/SOFIPO.
+Extraes una tabla de pasivos institucionales: bancos, fideicomisos, líneas de crédito, préstamos simples, bonos y otros fondeadores.
+No inventes datos. Si un campo no aparece, usa null o cadena vacía.
+Devuelve únicamente JSON válido.`;
+
+  const prompt = `Cliente esperado en la app: ${clientName || 'no indicado'}.
+Archivo: ${fileName || 'no indicado'}.
+
+Extrae cada pasivo/facility institucional como una fila. Busca tablas o secciones con acreedor, acreditante, banco, fondeador, préstamo, línea, saldo, monto autorizado, saldo insoluto, tasa, vencimiento, garantía y amortización.
+
+Devuelve exactamente:
+{
+  "liabilities": [
+    {
+      "lenderName": "Banco / institución / fondeador",
+      "liabilityType": "linea_credito|prestamo_simple|bono|otro",
+      "originalAmount": 0,
+      "currentBalance": 0,
+      "currency": "MXN|USD|EUR",
+      "interestRate": 0.12,
+      "rateDescription": "TIIE + 350 pb",
+      "originationDate": "YYYY-MM-DD",
+      "maturityDate": "YYYY-MM-DD",
+      "amortization": "mensual|trimestral|bullet|otro",
+      "guarantee": "garantía principal",
+      "notes": "observación breve o fuente"
+    }
+  ]
+}
+
+Reglas:
+- originalAmount y currentBalance deben ser números sin separadores ni símbolos.
+- interestRate debe ser decimal anual: 12% => 0.12.
+- Si solo aparece una tasa descriptiva sin número, deja interestRate null y úsala en rateDescription.
+- Si hay totales agregados, no los dupliques como facilities.
+- Si el documento trae varios acreedores o varios créditos, devuelve una fila por cada uno.
+- Si no hay pasivos institucionales claros, devuelve {"liabilities":[]}.
+${documentText ? `\nTexto del documento:\n${documentText.slice(0, 50000)}` : '\nUsa el documento/imagen adjunta.'}`;
+
+  const text = await callAI(settings, system, prompt, documentMedia);
+  return normalizeLiabilitiesExtraction(extractJSON(text));
+}
+
 // ─── Monitoring opinion ────────────────────────────────────────────────────────
 
 export async function generateOpinion(
@@ -643,6 +922,7 @@ export async function generateOpinion(
   covenantData: Array<{ name: string; threshold: string; value?: string; status: string }>,
   paymentSummary: string
 ): Promise<string> {
+  settings = settingsForTask(settings, 'opinion');
   const system = `Eres un analista de crédito senior de una institución financiera mexicana.
 Redactas comentarios de monitoreo profesionales, concisos y objetivos.`;
 
@@ -666,6 +946,7 @@ export async function suggestAccountConsolidation(
   accounts: Array<{ name: string; statementType?: string; clientName?: string }>,
   existingCovenants: Array<{ name: string; formula?: string; description?: string }> = []
 ): Promise<AccountConsolidationSuggestion> {
+  settings = settingsForTask(settings, 'account_consolidation');
   const system = `Eres analista contable NIF y crédito IFNB.
 Tu tarea es mapear nombres de cuentas extraídas a campos consolidados y proponer plantillas de covenants.
 No inventes cifras. No devuelvas cuentas que no estén en el input. Devuelve JSON válido.`;

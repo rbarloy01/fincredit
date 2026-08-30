@@ -15,6 +15,10 @@ export interface LiabilitiesSummary {
   averageUtilization: number | null;
   nextMaturity: { lenderName: string; maturityDate: string; currentBalance: number | null } | null;
   lenderCount: number;
+  missingMaturityCount: number;
+  missingRateCount: number;
+  foreignCurrencyBalance: number;
+  shortTermBalance: number;
 }
 
 function sumBy<T>(items: T[], get: (item: T) => number | null): number {
@@ -49,6 +53,16 @@ export function buildLiabilitiesSummary(liabilities: InstitutionalLiability_DB[]
     : null;
 
   const lenderCount = new Set(liabilities.map(l => l.lenderName.trim().toLowerCase())).size;
+  const missingMaturityCount = liabilities.filter(l => !l.maturityDate).length;
+  const missingRateCount = liabilities.filter(l => l.interestRate === null && !l.rateDescription).length;
+  const foreignCurrencyBalance = sumBy(liabilities.filter(l => (l.currency || 'MXN') !== 'MXN'), l => l.currentBalance);
+  const oneYearOut = new Date();
+  oneYearOut.setFullYear(oneYearOut.getFullYear() + 1);
+  const shortTermBalance = sumBy(liabilities.filter(l => {
+    if (!l.maturityDate) return false;
+    const d = new Date(l.maturityDate);
+    return Number.isFinite(d.getTime()) && d <= oneYearOut;
+  }), l => l.currentBalance);
 
   return {
     count: liabilities.length,
@@ -58,7 +72,18 @@ export function buildLiabilitiesSummary(liabilities: InstitutionalLiability_DB[]
     averageUtilization,
     nextMaturity,
     lenderCount,
+    missingMaturityCount,
+    missingRateCount,
+    foreignCurrencyBalance,
+    shortTermBalance,
   };
+}
+
+export interface LiabilityInsight {
+  severity: 'info' | 'warning' | 'critical';
+  title: string;
+  detail: string;
+  recommendation: string;
 }
 
 export interface ConcentrationRow {
@@ -93,6 +118,73 @@ export function buildTypeConcentration(liabilities: InstitutionalLiability_DB[])
 
 export function buildCurrencyConcentration(liabilities: InstitutionalLiability_DB[]): ConcentrationRow[] {
   return concentrationBy(liabilities, l => l.currency || 'MXN');
+}
+
+export function buildLiabilitiesInsights(liabilities: InstitutionalLiability_DB[]): LiabilityInsight[] {
+  const summary = buildLiabilitiesSummary(liabilities);
+  if (!liabilities.length) return [];
+
+  const insights: LiabilityInsight[] = [];
+  const lenders = buildLenderConcentration(liabilities);
+  const topLender = lenders[0];
+  const fxPct = summary.totalCurrentBalance > 0 ? summary.foreignCurrencyBalance / summary.totalCurrentBalance : 0;
+  const shortTermPct = summary.totalCurrentBalance > 0 ? summary.shortTermBalance / summary.totalCurrentBalance : 0;
+
+  if (topLender && topLender.pctOfTotal >= 0.5) {
+    insights.push({
+      severity: topLender.pctOfTotal >= 0.7 ? 'critical' : 'warning',
+      title: 'Concentración de fondeo',
+      detail: `${topLender.key} concentra ${(topLender.pctOfTotal * 100).toFixed(1)}% del saldo institucional.`,
+      recommendation: 'Validar dependencia del acreedor principal, covenants cruzados y plan de refinanciamiento alterno.',
+    });
+  }
+
+  if (shortTermPct >= 0.25) {
+    insights.push({
+      severity: shortTermPct >= 0.5 ? 'critical' : 'warning',
+      title: 'Vencimientos próximos',
+      detail: `${formatMoney(summary.shortTermBalance)} vence dentro de los próximos 12 meses (${(shortTermPct * 100).toFixed(1)}% del saldo).`,
+      recommendation: 'Pedir calendario de amortización y evidencia de renovación/refinanciamiento para los créditos relevantes.',
+    });
+  }
+
+  if (fxPct >= 0.1) {
+    insights.push({
+      severity: fxPct >= 0.3 ? 'critical' : 'warning',
+      title: 'Exposición cambiaria',
+      detail: `${formatMoney(summary.foreignCurrencyBalance)} está denominado en moneda distinta a MXN (${(fxPct * 100).toFixed(1)}% del saldo).`,
+      recommendation: 'Revisar cobertura natural, derivados o ingresos en la misma moneda antes de asumir capacidad de pago estable.',
+    });
+  }
+
+  if (summary.weightedAverageRate !== null && summary.weightedAverageRate >= 0.18) {
+    insights.push({
+      severity: 'warning',
+      title: 'Costo financiero elevado',
+      detail: `La tasa ponderada estimada es ${formatPercent(summary.weightedAverageRate)}.`,
+      recommendation: 'Comparar contra margen financiero/costo de fondeo histórico y detectar líneas que presionen rentabilidad.',
+    });
+  }
+
+  if (summary.missingMaturityCount || summary.missingRateCount) {
+    insights.push({
+      severity: 'info',
+      title: 'Datos por completar',
+      detail: `${summary.missingMaturityCount} filas sin vencimiento y ${summary.missingRateCount} sin tasa o referencia.`,
+      recommendation: 'Completar vencimiento, tasa y garantía para mejorar el calendario de liquidez y el análisis de sensibilidad.',
+    });
+  }
+
+  if (!insights.length) {
+    insights.push({
+      severity: 'info',
+      title: 'Estructura sin alertas automáticas',
+      detail: 'No se detectaron concentraciones, vencimientos o exposiciones relevantes con los umbrales actuales.',
+      recommendation: 'Validar manualmente covenants, garantías y restricciones contractuales de cada facility.',
+    });
+  }
+
+  return insights;
 }
 
 export interface MaturityBucket {
@@ -189,6 +281,13 @@ function parseCellNumber(value: unknown): number | null {
   return String(value).includes('%') ? n / 100 : n;
 }
 
+function parseCellRate(value: unknown): number | null {
+  const n = parseCellNumber(value);
+  if (n === null) return null;
+  if (String(value).includes('%')) return n;
+  return n > 1 && n <= 100 ? n / 100 : n;
+}
+
 export interface ParsedLiabilityRow {
   lenderName: string;
   liabilityType: 'linea_credito' | 'prestamo_simple' | 'bono' | 'otro';
@@ -231,7 +330,7 @@ export function parseLiabilitiesRows(rows: Record<string, unknown>[]): { parsed:
         originalAmount: columnFor.originalAmount ? parseCellNumber(row[columnFor.originalAmount]) : null,
         currentBalance: columnFor.currentBalance ? parseCellNumber(row[columnFor.currentBalance]) : null,
         currency: columnFor.currency ? String(row[columnFor.currency] ?? 'MXN').trim().toUpperCase() || 'MXN' : 'MXN',
-        interestRate: columnFor.interestRate ? parseCellNumber(row[columnFor.interestRate]) : null,
+        interestRate: columnFor.interestRate ? parseCellRate(row[columnFor.interestRate]) : null,
         rateDescription: columnFor.rateDescription ? (String(row[columnFor.rateDescription] ?? '').trim() || undefined) : undefined,
         originationDate: columnFor.originationDate ? parseCellDate(row[columnFor.originationDate]) : undefined,
         maturityDate: columnFor.maturityDate ? parseCellDate(row[columnFor.maturityDate]) : undefined,

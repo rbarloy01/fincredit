@@ -1,8 +1,9 @@
 import * as XLSX from 'xlsx';
 import { createHash } from 'crypto';
-import { readJson, sendJson } from '../_helpers.js';
-import { processWithDocumentAi } from '../ingestion/_documentAi.js';
-import { extractFinancialCandidates } from '../ingestion/_finance.js';
+import { readJson, sendJson } from '../../server/apiHelpers.js';
+import { processWithDocumentAi } from '../../server/ingestion/documentAi.js';
+import { extractFinancialCandidates } from '../../server/ingestion/finance.js';
+import { handlePipelineImport } from '../../server/ingestion/pipelineImport.js';
 import {
   createExtractionRun,
   downloadDriveFile,
@@ -12,9 +13,16 @@ import {
   requireIngestionManager,
   supabaseFetch,
   supabaseJson,
-} from '../ingestion/_shared.js';
+} from '../../server/ingestion/shared.js';
 
 export const maxDuration = 60;
+
+function isPipelineImportRequest(req: any) {
+  const rawUrl = String(req.url || '');
+  return rawUrl.includes('/api/pipeline/import')
+    || rawUrl.includes('pipelineImport=1')
+    || req.query?.pipelineImport === '1';
+}
 
 async function loadDocuments(admin: any, orgId: string, documentId?: string, limit = 1) {
   if (documentId) {
@@ -319,6 +327,7 @@ async function processOne(admin: any, doc: any) {
 }
 
 export default async function handler(req: any, res: any) {
+  if (isPipelineImportRequest(req)) return handlePipelineImport(req, res);
   if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' });
 
   try {

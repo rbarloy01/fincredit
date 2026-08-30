@@ -1,5 +1,5 @@
 import { google } from 'googleapis';
-import { requireManager } from '../_helpers.js';
+import { requireManager } from '../apiHelpers.js';
 
 export type SupabaseAdmin = {
   url: string;

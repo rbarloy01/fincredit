@@ -1,5 +1,5 @@
-import React, { useRef, useState, useEffect } from 'react';
-import { db, Client, FinancialStatement_DB, Covenant_DB, LoanTape_DB, CustomField, Transaction } from '../../db/index';
+import React, { useRef, useState, useEffect, useMemo } from 'react';
+import { db, Client, FinancialStatement_DB, Covenant_DB, LoanTape_DB, CustomField, Transaction, InstitutionalLiability_DB } from '../../db/index';
 import { StructuredLoanTapeAnalysis } from '../../services/ai';
 import { Download, ChevronDown, ChevronRight, MessageSquare, FileSpreadsheet, Upload, Trash2, ImageDown, ArrowUp, ArrowDown, Save, LayoutGrid } from 'lucide-react';
 import {
@@ -7,14 +7,24 @@ import {
   getMetric,
   prioritizedLatestCovenantPerformance,
 } from '../../lib/financialMetrics';
-import { canUseLegacyFacilityFallback, facilityDisplayName, matchesFacilityFilter } from '../../lib/facilityHistory';
+import { canUseLegacyFacilityFallback, facilityDisplayName } from '../../lib/facilityHistory';
 import { parseFinancialNumber } from '../../lib/numberParsing';
+import {
+  buildLiabilitiesInsights,
+  buildLiabilitiesSummary,
+  buildLenderConcentration,
+  buildMaturityLadder,
+  formatMoney as formatLiabilityMoney,
+  formatPercent as formatLiabilityPercent,
+  LIABILITY_TYPE_LABELS,
+} from '../../lib/institutionalLiabilitiesAnalytics';
 
 interface Props {
   client: Client;
   statements: FinancialStatement_DB[];
   covenants: Covenant_DB[];
   loanTapes: LoanTape_DB[];
+  institutionalLiabilities?: InstitutionalLiability_DB[];
   transactions?: Transaction[];
   customFields?: CustomField[];
   onCustomFieldsChange?: (fields: CustomField[]) => void;
@@ -120,13 +130,12 @@ const AforoCircle = ({ status }: { status: 'good' | 'warning' | 'bad' }) => {
 const fmtMoney = (value: unknown, currency = 'MXN') => {
   const n = parseFinancialNumber(value, Number.NaN);
   if (!Number.isFinite(n)) return typeof value === 'string' && value.trim() ? value : '—';
-  return new Intl.NumberFormat('es-MX', {
-    style: 'currency',
-    currency: currency || 'MXN',
-    currencySign: 'accounting',
+  const formatted = new Intl.NumberFormat('es-MX', {
     minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
-  }).format(n);
+    maximumFractionDigits: Math.abs(n) < 1000 && !Number.isInteger(n) ? 2 : 0,
+  }).format(Math.abs(n));
+  const prefix = currency || 'MXN';
+  return n < 0 ? `(${prefix} ${formatted})` : `${prefix} ${formatted}`;
 };
 
 const normalizeText = (value: string) =>
@@ -231,7 +240,7 @@ const TAPE_PLACEHOLDER = `Describe el estado de la cartera. Considera incluir:
 • Situaciones especiales: créditos en reestructura, litigio o monitoreo especial
 • Perspectiva: expectativa para el siguiente período de reporte`;
 
-type ReportBlockId = 'payment' | 'aforo' | 'financialCovenants' | 'loanTape' | 'documentation' | 'opinion';
+type ReportBlockId = 'payment' | 'aforo' | 'financialCovenants' | 'institutionalLiabilities' | 'loanTape' | 'documentation' | 'opinion';
 
 interface ReportBlockConfig {
   id: ReportBlockId;
@@ -249,9 +258,10 @@ const DEFAULT_BLOCKS: ReportBlockConfig[] = [
   { id: 'payment', label: 'Cobranza', visible: true, order: 10 },
   { id: 'aforo', label: 'Aforo', visible: true, order: 20 },
   { id: 'financialCovenants', label: 'Covenants Financieros', visible: true, order: 30 },
-  { id: 'loanTape', label: 'Loan Tape', visible: true, order: 40 },
-  { id: 'documentation', label: 'Documentación', visible: true, order: 50 },
-  { id: 'opinion', label: 'Opinión del Analista', visible: true, order: 60 },
+  { id: 'institutionalLiabilities', label: 'Pasivos Institucionales', visible: true, order: 40 },
+  { id: 'loanTape', label: 'Loan Tape', visible: true, order: 50 },
+  { id: 'documentation', label: 'Documentación', visible: true, order: 60 },
+  { id: 'opinion', label: 'Opinión del Analista', visible: true, order: 70 },
 ];
 
 const layoutKey = (clientId: string) => `finmonitor_report_layout_${clientId}`;
@@ -309,7 +319,7 @@ const normalizeReportTemplates = (saved: unknown): ReportTemplate[] => {
     }));
 };
 
-const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loanTapes, transactions = [], customFields = [], onCustomFieldsChange, onClientUpdate, onClose }) => {
+const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loanTapes, institutionalLiabilities = [], transactions = [], customFields = [], onCustomFieldsChange, onClientUpdate, onClose }) => {
   const page1Ref = useRef<HTMLDivElement>(null);
   const condRef = useRef<HTMLDivElement>(null);
   const [isExporting, setIsExporting] = useState(false);
@@ -340,63 +350,108 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
     db.getClientSetting<CovenantMeasurementConfigMap>(client.id, covenantMeasurementKey(client.id), {}).then(setCovenantMeasurementConfig);
   }, [client.id]);
 
-  const sortedStatements = [...statements].sort((a, b) => a.periodDate.localeCompare(b.periodDate));
+  const sortedStatements = useMemo(
+    () => [...statements].sort((a, b) => a.periodDate.localeCompare(b.periodDate)),
+    [statements]
+  );
   const latest = sortedStatements.length > 0 ? sortedStatements[sortedStatements.length - 1] : null;
-  const latestTape = loanTapes.length > 0 ? loanTapes[0] : null;
+  const latestTape = useMemo(() => loanTapes[0] || null, [loanTapes]);
   const tapeAnalysis: StructuredLoanTapeAnalysis | null = latestTape?.extractedData?._analysis || null;
+  const liabilitiesSummary = useMemo(() => buildLiabilitiesSummary(institutionalLiabilities), [institutionalLiabilities]);
+  const liabilityInsights = useMemo(() => buildLiabilitiesInsights(institutionalLiabilities), [institutionalLiabilities]);
+  const liabilityConcentration = useMemo(() => buildLenderConcentration(institutionalLiabilities).slice(0, 5), [institutionalLiabilities]);
+  const liabilityMaturityLadder = useMemo(() => buildMaturityLadder(institutionalLiabilities), [institutionalLiabilities]);
 
   const transactionName = (transactionId?: string) => transactions.find(tx => tx.id === transactionId)?.name || '';
   const scopedFacilityName = (record: { transactionId?: string }) => facilityDisplayName(transactionName(record.transactionId), record);
-  const selectedReportTransaction = transactions.find(tx => tx.id === selectedReportTransactionId);
+  const activeReportTransactionId = selectedReportTransactionId || transactions[0]?.id || '';
+  const selectedReportTransaction = transactions.find(tx => tx.id === activeReportTransactionId);
   const selectedContractLabel = selectedReportTransaction?.name || client.contractName || '—';
-  const canUseSelectedLegacyFallback = canUseLegacyFacilityFallback(selectedReportTransactionId, transactions.length);
+  const selectedCreditTypeLabel = selectedReportTransaction?.creditType || (client.creditType || []).join(', ') || 'N/A';
+  const selectedCreditLineAmount = selectedReportTransaction?.originalAmount || client.totalCreditValue || 0;
+  const selectedCurrency = selectedReportTransaction?.currency || client.currency || 'MXN';
+  const canUseSelectedLegacyFallback = canUseLegacyFacilityFallback(activeReportTransactionId, transactions.length);
   const latestPeriodKey = firstValidMonth(client.lastPeriod, latest?.periodDate, latest?.period, client.reportDate);
   const monitoringPeriod = latestPeriodKey || monthKey(new Date().toISOString());
-  const aforoPeriodKeys = monitoringWindow(monitoringPeriod);
+  const aforoPeriodKeys = useMemo(() => monitoringWindow(monitoringPeriod), [monitoringPeriod]);
   const periodLabel = (period: string) => fmtDate(period);
-  const covenantsForReport = covenants.filter(c => matchesFacilityFilter(c, selectedReportTransactionId, transactions.length));
-  const paymentHistory = aforoPeriodKeys.map((month, index) => {
+  const covenantsForReport = useMemo(() => {
+    const scopedTypes = new Set(
+      activeReportTransactionId
+        ? covenants
+            .filter(scoped => scoped.transactionId === activeReportTransactionId)
+            .map(scoped => scoped.type)
+        : []
+    );
+    return covenants.filter(c => {
+      if (!activeReportTransactionId) return !c.transactionId;
+      if (c.transactionId === activeReportTransactionId) return true;
+      if (c.transactionId) return false;
+      return !scopedTypes.has(c.type) && canUseSelectedLegacyFallback;
+    });
+  }, [activeReportTransactionId, canUseSelectedLegacyFallback, covenants]);
+  const paymentHistory = useMemo(() => aforoPeriodKeys.map((month, index) => {
     const byMonth = (client.paymentHistory || []).filter(item => monthKey(item.month) === month);
-    const existing = selectedReportTransactionId
-      ? byMonth.find(item => item.transactionId === selectedReportTransactionId) || (canUseSelectedLegacyFallback ? byMonth.find(item => !item.transactionId) : undefined)
+    const existing = activeReportTransactionId
+      ? byMonth.find(item => item.transactionId === activeReportTransactionId) || (canUseSelectedLegacyFallback ? byMonth.find(item => !item.transactionId) : undefined)
       : byMonth[0] || client.paymentHistory?.[index];
     return existing
       ? { ...existing, month }
-      : { month, principalStatus: 'none' as const, interestStatus: 'none' as const, transactionId: selectedReportTransactionId || undefined };
-  });
-  const aforoHistory = aforoPeriodKeys.map(month => {
+      : { month, principalStatus: 'none' as const, interestStatus: 'none' as const, transactionId: activeReportTransactionId || undefined };
+  }), [activeReportTransactionId, aforoPeriodKeys, canUseSelectedLegacyFallback, client.paymentHistory]);
+  const aforoHistory = useMemo(() => aforoPeriodKeys.map(month => {
     const byMonth = (client.aforoHistory || []).filter(item => monthKey(item.month) === month);
-    const selected = selectedReportTransactionId
-      ? byMonth.find(item => item.transactionId === selectedReportTransactionId) || (canUseSelectedLegacyFallback ? byMonth.find(item => !item.transactionId) : undefined)
+    const selected = activeReportTransactionId
+      ? byMonth.find(item => item.transactionId === activeReportTransactionId) || (canUseSelectedLegacyFallback ? byMonth.find(item => !item.transactionId) : undefined)
       : byMonth.find(item => !item.transactionId) || byMonth[0];
     return selected
       ? { ...selected, month }
-      : { month, value: '', status: 'warning' as const, transactionId: selectedReportTransactionId || undefined };
-  });
+      : { month, value: '', status: 'warning' as const, transactionId: activeReportTransactionId || undefined };
+  }), [activeReportTransactionId, aforoPeriodKeys, canUseSelectedLegacyFallback, client.aforoHistory]);
   const reportPeriods = paymentHistory.map(p => p.month || '').filter(Boolean);
   const reportPeriod = monitoringPeriod || latest?.period || reportPeriods.at(-1) || '—';
-  const financialCovenantBase = covenantsForReport.filter(c => c.type === 'financial');
-  const covenantTrend = prioritizedLatestCovenantPerformance(financialCovenantBase, sortedStatements, contractCovenantKeys);
-  const covenantTrendById = new Map(covenantTrend.map((row, index) => [row.covenantId, { ...row, index }]));
-  const financialCovenants = [...financialCovenantBase]
-    .sort((a, b) => (covenantTrendById.get(a.id)?.index ?? 999) - (covenantTrendById.get(b.id)?.index ?? 999));
+  const financialCovenantBase = useMemo(() => covenantsForReport.filter(c => c.type === 'financial'), [covenantsForReport]);
+  const covenantTrendById = useMemo(() => {
+    const trend = prioritizedLatestCovenantPerformance(financialCovenantBase, sortedStatements, contractCovenantKeys);
+    return new Map(trend.map((row, index) => [row.covenantId, { ...row, index }]));
+  }, [contractCovenantKeys, financialCovenantBase, sortedStatements]);
+  const financialCovenants = useMemo(
+    () => [...financialCovenantBase]
+      .sort((a, b) => (covenantTrendById.get(a.id)?.index ?? 999) - (covenantTrendById.get(b.id)?.index ?? 999)),
+    [covenantTrendById, financialCovenantBase]
+  );
   const measurementFor = (covenantId: string): CovenantMeasurementConfig => covenantMeasurementConfig[covenantId] || { frequency: 'mensual', startPeriod: '' };
   const latestStatementMonth = firstValidMonth(latest?.periodDate, latest?.period, client.lastPeriod, client.reportDate) || monitoringPeriod;
   const covenantPeriodsForFrequency = (frequency: CovenantMeasurementFrequency) => {
     const step = reportFrequencyStepMonths[frequency];
     return Array.from({ length: 6 }, (_, index) => addMonths(latestStatementMonth, -(step * index)));
   };
-  const covenantFrequencyGroups = (['mensual', 'trimestral', 'semestral', 'anual'] as CovenantMeasurementFrequency[])
+  const covenantFrequencyGroups = useMemo(() => (['mensual', 'trimestral', 'semestral', 'anual'] as CovenantMeasurementFrequency[])
     .map(frequency => ({
       frequency,
       covenants: financialCovenants.filter(cov => measurementFor(cov.id).frequency === frequency),
       periods: covenantPeriodsForFrequency(frequency),
     }))
-    .filter(group => group.covenants.length > 0);
-  const statementForMonth = (period: string) => sortedStatements.find(statement => firstValidMonth(statement.periodDate, statement.period) === monthKey(period));
-  const hacerCovenants = covenantsForReport.filter(c => c.type === 'hacer');
-  const noHacerCovenants = covenantsForReport.filter(c => c.type === 'noHacer');
-  const condCovenants = [...hacerCovenants, ...noHacerCovenants];
+    .filter(group => group.covenants.length > 0), [covenantMeasurementConfig, financialCovenants, latestStatementMonth]);
+  const statementByMonth = useMemo(() => new Map(
+    sortedStatements.map(statement => [firstValidMonth(statement.periodDate, statement.period), statement])
+  ), [sortedStatements]);
+  const statementForMonth = (period: string) => statementByMonth.get(monthKey(period));
+  const covenantEvaluationByPeriod = useMemo(() => {
+    const evaluations = new Map<string, { value: number | null; status: CondStatus }>();
+    covenantFrequencyGroups.forEach(group => {
+      group.covenants.forEach(cov => {
+        group.periods.forEach(period => {
+          const statement = statementByMonth.get(monthKey(period));
+          if (statement) evaluations.set(`${cov.id}:${period}`, evaluateCovenant(cov, [statement]));
+        });
+      });
+    });
+    return evaluations;
+  }, [covenantFrequencyGroups, statementByMonth]);
+  const hacerCovenants = useMemo(() => covenantsForReport.filter(c => c.type === 'hacer'), [covenantsForReport]);
+  const noHacerCovenants = useMemo(() => covenantsForReport.filter(c => c.type === 'noHacer'), [covenantsForReport]);
+  const condCovenants = useMemo(() => [...hacerCovenants, ...noHacerCovenants], [hacerCovenants, noHacerCovenants]);
 
   const updateCommercialName = async (value: string) => {
     const next = [
@@ -435,7 +490,13 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
       setBlocks(recoveredBlocks);
       setSavedTemplates(normalizeReportTemplates(templates));
       setShowContractFooter(showFooter !== false);
-      setSelectedReportTransactionId(savedTransactionId && transactions.some(tx => tx.id === savedTransactionId) ? savedTransactionId : '');
+      const nextTransactionId = savedTransactionId && transactions.some(tx => tx.id === savedTransactionId)
+        ? savedTransactionId
+        : transactions[0]?.id || '';
+      setSelectedReportTransactionId(nextTransactionId);
+      if (nextTransactionId !== savedTransactionId) {
+        void db.setClientSetting(client.id, selectedReportTransactionKey(client.id), nextTransactionId);
+      }
       setReportSettingsLoaded(true);
       if (!migratedLayout) {
         void db.setClientSetting(client.id, layoutMigrationKey(client.id), true);
@@ -578,7 +639,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
 
   const updatePaymentPeriod = (month: string, updates: Partial<Client['paymentHistory'][number]>) => {
     const next = [...(client.paymentHistory || [])];
-    const targetTransactionId = selectedReportTransactionId || updates.transactionId || '';
+    const targetTransactionId = activeReportTransactionId || updates.transactionId || '';
     const idx = next.findIndex(item =>
       monthKey(item.month) === monthKey(month) &&
       ((targetTransactionId && item.transactionId === targetTransactionId) || (!targetTransactionId && !item.transactionId))
@@ -598,7 +659,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
 
   const updateAforoPeriod = (month: string, updates: Partial<Client['aforoHistory'][number]>) => {
     const next = [...(client.aforoHistory || [])];
-    const targetTransactionId = selectedReportTransactionId || updates.transactionId || '';
+    const targetTransactionId = activeReportTransactionId || updates.transactionId || '';
     const idx = next.findIndex(item =>
       monthKey(item.month) === monthKey(month) &&
       ((targetTransactionId && item.transactionId === targetTransactionId) || (!targetTransactionId && !item.transactionId))
@@ -624,8 +685,8 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
   const addReportPeriod = () => {
     const month = addMonths(monitoringPeriod, 1);
     onClientUpdate({
-      paymentHistory: [...(client.paymentHistory || []), { month, principalStatus: 'none', interestStatus: 'none', transactionId: selectedReportTransactionId || undefined }],
-      aforoHistory: [...(client.aforoHistory || []), { month, value: '', status: 'warning', transactionId: selectedReportTransactionId || undefined }],
+      paymentHistory: [...(client.paymentHistory || []), { month, principalStatus: 'none', interestStatus: 'none', transactionId: activeReportTransactionId || undefined }],
+      aforoHistory: [...(client.aforoHistory || []), { month, value: '', status: 'warning', transactionId: activeReportTransactionId || undefined }],
       lastPeriod: month,
     });
   };
@@ -737,8 +798,8 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
       ['Periodo de monitoreo', periodLabel(reportPeriod)],
       ['Analista', client.analystName || ''],
       ['Fecha reporte', client.reportDate || ''],
-      ['Linea credito', fmtMoney(client.totalCreditValue, client.currency || 'MXN')],
-      ['Moneda', client.currency],
+      ['Linea credito', fmtMoney(selectedCreditLineAmount, selectedCurrency)],
+      ['Moneda', selectedCurrency],
     ];
     XLSX.utils.book_append_sheet(wb, sheetFromRows(resumen), 'Resumen');
 
@@ -955,7 +1016,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
             ...group.periods.map(period => {
               const statement = statementForMonth(period);
               if (!statement) return 'NA';
-              const result = evaluateCovenant(cov, [statement]);
+              const result = covenantEvaluationByPeriod.get(`${cov.id}:${period}`) || evaluateCovenant(cov, [statement]);
               return fmtCovenantValue(cov, result.value);
             }),
           ]);
@@ -1152,6 +1213,53 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
       XLSX.utils.book_append_sheet(wb, sheetFromRows(calcRows), 'Covenants Calculados');
     }
 
+    if (institutionalLiabilities.length > 0) {
+      const pasivosResumen = [
+        ['Pasivos Institucionales'],
+        ['Saldo total', liabilitiesSummary.totalCurrentBalance],
+        ['Monto original total', liabilitiesSummary.totalOriginalAmount],
+        ['Tasa ponderada', liabilitiesSummary.weightedAverageRate ?? 'N/A'],
+        ['Acreedores', liabilitiesSummary.lenderCount],
+        ['Vence <= 12 meses', liabilitiesSummary.shortTermBalance],
+        ['Moneda distinta a MXN', liabilitiesSummary.foreignCurrencyBalance],
+        ['Filas sin vencimiento', liabilitiesSummary.missingMaturityCount],
+        ['Filas sin tasa/referencia', liabilitiesSummary.missingRateCount],
+        [],
+        ['Severidad', 'Insight', 'Detalle', 'Recomendación'],
+        ...liabilityInsights.map(item => [item.severity, item.title, item.detail, item.recommendation]),
+      ];
+      XLSX.utils.book_append_sheet(wb, sheetFromRows(pasivosResumen), 'Pasivos Resumen');
+
+      const pasivosColeccion = [
+        ['Acreedor', 'Tipo', 'Moneda', 'Monto Original', 'Saldo Actual', 'Tasa', 'Referencia Tasa', 'Originacion', 'Vencimiento', 'Amortizacion', 'Garantia', 'Notas', 'Source Document'],
+        ...institutionalLiabilities.map(item => [
+          item.lenderName,
+          LIABILITY_TYPE_LABELS[item.liabilityType] || item.liabilityType,
+          item.currency,
+          item.originalAmount ?? '',
+          item.currentBalance ?? '',
+          item.interestRate ?? '',
+          item.rateDescription || '',
+          item.originationDate || '',
+          item.maturityDate || '',
+          item.amortization || '',
+          item.guarantee || '',
+          item.notes || '',
+          item.sourceDocumentId || '',
+        ]),
+      ];
+      XLSX.utils.book_append_sheet(wb, sheetFromRows(pasivosColeccion), 'Pasivos Coleccion');
+
+      const pasivosConcentracion = [
+        ['Acreedor', 'Saldo Actual', '% Total', 'Facilities'],
+        ...liabilityConcentration.map(item => [item.key, item.currentBalance, item.pctOfTotal, item.count]),
+        [],
+        ['Año', 'Saldo Actual', 'Facilities'],
+        ...liabilityMaturityLadder.map(item => [item.year === 0 ? 'Sin fecha' : item.year, item.currentBalance, item.count]),
+      ];
+      XLSX.utils.book_append_sheet(wb, sheetFromRows(pasivosConcentracion), 'Pasivos Analisis');
+    }
+
     XLSX.writeFile(wb, `Reporte_Monitoreo_${safeClientName}.xlsx`);
     } catch (err) {
       console.error('Excel export error:', err);
@@ -1239,7 +1347,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
         <div className="flex gap-3 bg-white p-2 rounded-2xl shadow-sm border border-slate-200 items-center">
           <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-2">Facility del reporte:</span>
           <select
-            value={selectedReportTransactionId}
+            value={activeReportTransactionId}
             onChange={e => updateSelectedReportTransaction(e.target.value)}
             disabled={transactions.length === 0}
             className="min-w-64 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-black text-slate-700 outline-none focus:ring-2 focus:ring-indigo-400 disabled:text-slate-400"
@@ -1247,10 +1355,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
             {transactions.length === 0 ? (
               <option value="">Sin facilities registradas</option>
             ) : (
-              <>
-                <option value="">Todas / general</option>
-                {transactions.map(tx => <option key={tx.id} value={tx.id}>{tx.name}</option>)}
-              </>
+              transactions.map(tx => <option key={tx.id} value={tx.id}>{tx.name}</option>)
             )}
           </select>
           <label className="flex items-center gap-2 px-2">
@@ -1274,6 +1379,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
           {[
             { label: 'Aforo', id: 'aforo' as ReportBlockId },
             { label: 'Covenants', id: 'financialCovenants' as ReportBlockId },
+            { label: 'Pasivos', id: 'institutionalLiabilities' as ReportBlockId },
             { label: 'Doc.', id: 'documentation' as ReportBlockId },
             { label: 'Loan Tape', id: 'loanTape' as ReportBlockId },
           ].map(({ label, id }) => (
@@ -1330,8 +1436,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
           {transactions.length > 0 && (
             <label>
               <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Contrato del reporte</span>
-              <select value={selectedReportTransactionId} onChange={e => updateSelectedReportTransaction(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-400">
-                <option value="">Todos / general</option>
+              <select value={activeReportTransactionId} onChange={e => updateSelectedReportTransaction(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-400">
                 {transactions.map(tx => <option key={tx.id} value={tx.id}>{tx.name}</option>)}
               </select>
             </label>
@@ -1616,7 +1721,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
                 { label: 'Acreditado', value: commercialName },
                 ...(showContractFooter ? [{ label: 'Contrato', value: selectedContractLabel }] : []),
                 { label: 'Score AXCESS', value: client.score || 'N/A' },
-                { label: 'Tipo de Crédito', value: (client.creditType || []).join(', ') || 'N/A' },
+                { label: 'Tipo de Crédito', value: selectedCreditTypeLabel },
               ].map(({ label, value }) => (
                 <div key={label} style={{ ...vc, minHeight: 34 }}>
                   <div style={{ ...vcc, width: 112, minWidth: 112, backgroundColor: '#0018E6', color: 'white', padding: '6px 12px', fontSize: 9, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em', alignSelf: 'stretch' }}>
@@ -1639,7 +1744,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
             {[
               { label: 'Atrasos (12 meses)', value: `${client.defaultFrequency12m || 0}` },
               { label: 'Días incumplimiento', value: `${client.maxDefaultDays || 0}` },
-              { label: `Monto máximo (${client.currency || 'MXN'})`, value: fmtMoney(client.maxDefaultAmount || 0, client.currency || 'MXN') },
+              { label: `Monto máximo (${selectedCurrency})`, value: fmtMoney(client.maxDefaultAmount || 0, selectedCurrency) },
             ].map(({ label, value }) => (
               <div key={label} style={{ ...vccCol, border: '1px solid #e2e8f0', borderRadius: 12, padding: 8, textAlign: 'center' }}>
                 <span style={{ fontSize: 7, fontWeight: 900, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.1em', display: 'block', marginBottom: 2 }}>{label}</span>
@@ -1651,12 +1756,12 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
           {/* Balances */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 24 }}>
             <div style={{ ...vc, justifyContent: 'space-between', border: '1px solid #0018E6', borderRadius: 12, padding: '6px 12px', backgroundColor: '#f8fafc', minHeight: 36 }}>
-              <span style={{ fontSize: 9, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#0066E6' }}>Saldo Inicial ({client.currency || 'MXN'})</span>
-              <span style={{ fontSize: 12, fontWeight: 900, fontFamily: 'monospace', color: '#0066E6' }}>{fmtMoney(client.totalCreditValue, client.currency || 'MXN')}</span>
+              <span style={{ fontSize: 9, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#0066E6' }}>Saldo Inicial ({selectedCurrency})</span>
+              <span style={{ fontSize: 12, fontWeight: 900, fontFamily: 'monospace', color: '#0066E6' }}>{fmtMoney(selectedCreditLineAmount, selectedCurrency)}</span>
             </div>
             <div style={{ ...vc, justifyContent: 'space-between', border: '1px solid #0018E6', borderRadius: 12, padding: '6px 12px', backgroundColor: '#0018E6', color: 'white', minHeight: 36 }}>
-              <span style={{ fontSize: 9, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Saldo Actual ({client.currency || 'MXN'})</span>
-              <span style={{ fontSize: 12, fontWeight: 900, fontFamily: 'monospace' }}>{fmtMoney(client.currentDue || 0, client.currency || 'MXN')}</span>
+              <span style={{ fontSize: 9, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Saldo Actual ({selectedCurrency})</span>
+              <span style={{ fontSize: 12, fontWeight: 900, fontFamily: 'monospace' }}>{fmtMoney(client.currentDue || 0, selectedCurrency)}</span>
             </div>
           </div>
 
@@ -1677,7 +1782,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
                   {paymentHistory.map(h => (
                     <TD key={h.month} style={{ ...cellCStyle }}>
                       <StatusCircle status={h.principalStatus} />
-                      {h.principalAmount && <div style={{ marginTop: 4, fontSize: 7, fontFamily: 'monospace', fontWeight: 900, color: '#64748b' }}>{fmtMoney(h.principalAmount, client.currency || 'MXN')}</div>}
+                      {h.principalAmount && <div style={{ marginTop: 4, fontSize: 7, fontFamily: 'monospace', fontWeight: 900, color: '#64748b' }}>{fmtMoney(h.principalAmount, selectedCurrency)}</div>}
                     </TD>
                   ))}
                 </tr>
@@ -1686,7 +1791,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
                   {paymentHistory.map(h => (
                     <TD key={h.month} style={{ ...cellCStyle }}>
                       <StatusCircle status={h.interestStatus} />
-                      {h.interestAmount && <div style={{ marginTop: 4, fontSize: 7, fontFamily: 'monospace', fontWeight: 900, color: '#64748b' }}>{fmtMoney(h.interestAmount, client.currency || 'MXN')}</div>}
+                      {h.interestAmount && <div style={{ marginTop: 4, fontSize: 7, fontFamily: 'monospace', fontWeight: 900, color: '#64748b' }}>{fmtMoney(h.interestAmount, selectedCurrency)}</div>}
                     </TD>
                   ))}
                 </tr>
@@ -1750,7 +1855,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
                               </TD>
                             );
                           }
-                          const { value, status } = evaluateCovenant(cov, [statement]);
+                          const { value, status } = covenantEvaluationByPeriod.get(`${cov.id}:${period}`) || evaluateCovenant(cov, [statement]);
                           const bg = status === 'INCUMPLE' ? '#fee2e2' : status === 'ALERTA' ? '#fef3c7' : '#dcfce7';
                           return (
                             <TD key={period} style={{ ...cellCStyle, backgroundColor: bg, fontFamily: 'monospace', fontWeight: 900 }}>
@@ -1764,6 +1869,79 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
                 </table>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Institutional liabilities */}
+        {institutionalLiabilities.length > 0 && blockVisible('institutionalLiabilities') && (
+          <div style={{ ...sectionCard, ...blockStyle('institutionalLiabilities') }}>
+            <div style={sectionKicker}>Fondeo</div>
+            <div style={sectionTitle}>Pasivos Institucionales</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 10 }}>
+              {[
+                { label: 'Saldo Total', value: formatLiabilityMoney(liabilitiesSummary.totalCurrentBalance) },
+                { label: 'Tasa Pond.', value: formatLiabilityPercent(liabilitiesSummary.weightedAverageRate) },
+                { label: 'Acreedores', value: String(liabilitiesSummary.lenderCount) },
+                { label: '<= 12 meses', value: formatLiabilityMoney(liabilitiesSummary.shortTermBalance) },
+              ].map(item => (
+                <div key={item.label} style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: 8, backgroundColor: '#f8fafc' }}>
+                  <div style={{ fontSize: 7, fontWeight: 900, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{item.label}</div>
+                  <div style={{ fontSize: 12, fontWeight: 900, color: '#0f172a', marginTop: 2 }}>{item.value}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr>
+                    <TH>Acreedor</TH>
+                    <TH style={{ textAlign: 'right' }}>Saldo</TH>
+                    <TH style={{ textAlign: 'center' }}>%</TH>
+                  </tr>
+                </thead>
+                <tbody>
+                  {liabilityConcentration.map((row, index) => (
+                    <tr key={row.key} style={{ backgroundColor: index % 2 === 0 ? '#fff' : '#f8fafc' }}>
+                      <TD>{row.key}</TD>
+                      <TD style={{ textAlign: 'right', fontFamily: 'monospace', fontWeight: 700 }}>{formatLiabilityMoney(row.currentBalance)}</TD>
+                      <TD style={{ textAlign: 'center', fontFamily: 'monospace', fontWeight: 700 }}>{formatLiabilityPercent(row.pctOfTotal)}</TD>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr>
+                    <TH>Año</TH>
+                    <TH style={{ textAlign: 'right' }}>Saldo</TH>
+                    <TH style={{ textAlign: 'center' }}>Facilities</TH>
+                  </tr>
+                </thead>
+                <tbody>
+                  {liabilityMaturityLadder.slice(0, 6).map((row, index) => (
+                    <tr key={row.year} style={{ backgroundColor: index % 2 === 0 ? '#fff' : '#f8fafc' }}>
+                      <TD>{row.year === 0 ? 'Sin fecha' : row.year}</TD>
+                      <TD style={{ textAlign: 'right', fontFamily: 'monospace', fontWeight: 700 }}>{formatLiabilityMoney(row.currentBalance)}</TD>
+                      <TD style={{ textAlign: 'center', fontFamily: 'monospace', fontWeight: 700 }}>{row.count}</TD>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {reportMode === 'interno' && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                {liabilityInsights.slice(0, 4).map((item, index) => {
+                  const color = item.severity === 'critical' ? '#991b1b' : item.severity === 'warning' ? '#92400e' : '#334155';
+                  const bg = item.severity === 'critical' ? '#fee2e2' : item.severity === 'warning' ? '#fef3c7' : '#f8fafc';
+                  return (
+                    <div key={`${item.title}-${index}`} style={{ border: `1px solid ${color}30`, borderRadius: 8, padding: 8, backgroundColor: bg }}>
+                      <div style={{ fontSize: 8, fontWeight: 900, color, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{item.title}</div>
+                      <div style={{ fontSize: 8, color: '#334155', lineHeight: 1.4, marginTop: 4 }}>{item.detail}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 

@@ -1,7 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { db, User, Role } from '../../db/index';
 import { Session, auth } from '../../services/auth';
-import { AIProvider, AISettings, loadAISettings, saveAISettings, testConnection } from '../../services/ai';
+import {
+  AIProvider,
+  AISettings,
+  AI_TASK_LABELS,
+  defaultFallbackModelsForProvider,
+  defaultModelForProvider,
+  loadAISettings,
+  normalizeAISettings,
+  providerSettings,
+  saveAISettings,
+  testConnection,
+  type AITask,
+  type AIProviderConfig,
+} from '../../services/ai';
 import { Users, Save, Plus, Trash2, Eye, EyeOff, Check, X, Info, Zap, ShieldCheck, RefreshCw, AlertTriangle, Lock } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { getDiag, clearDiag } from '../../lib/telemetry';
@@ -51,9 +64,11 @@ const PROVIDERS: { id: AIProvider; label: string; placeholder: string; color: st
   { id: 'gemini', label: 'Google Gemini', placeholder: 'AIzaSy...', color: 'bg-blue-100 text-blue-800 border-blue-200' },
   { id: 'claude', label: 'Anthropic Claude', placeholder: 'sk-ant-api03-...', color: 'bg-violet-100 text-violet-800 border-violet-200' },
   { id: 'openai', label: 'OpenAI GPT-4o', placeholder: 'sk-proj-...', color: 'bg-emerald-100 text-emerald-800 border-emerald-200' },
+  { id: 'openrouter', label: 'OpenRouter', placeholder: 'sk-or-...', color: 'bg-cyan-100 text-cyan-800 border-cyan-200' },
   { id: 'bytez', label: 'Bytez', placeholder: 'bytez...', color: 'bg-amber-100 text-amber-800 border-amber-200' },
   { id: 'nvidia_nim', label: 'NVIDIA NIM', placeholder: 'nvapi-...', color: 'bg-lime-100 text-lime-800 border-lime-200' },
 ];
+const TASKS: AITask[] = ['financials', 'contracts', 'loan_tape', 'liabilities', 'opinion', 'account_consolidation'];
 
 type HealthStatus = 'pass' | 'fail';
 
@@ -66,7 +81,7 @@ interface HealthDiagnostic {
 }
 
 const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
-  const [aiSettings, setAiSettings] = useState<AISettings>(loadAISettings);
+  const [aiSettings, setAiSettings] = useState<AISettings>(() => normalizeAISettings(loadAISettings()));
   const [showKey, setShowKey] = useState(false);
   const [keySaved, setKeySaved] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -149,6 +164,7 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
         ['Gemini', health.aiKeys?.gemini, 'GEMINI_API_KEY'],
         ['Claude', health.aiKeys?.claude, 'ANTHROPIC_API_KEY'],
         ['OpenAI', health.aiKeys?.openai, 'OPENAI_API_KEY'],
+        ['OpenRouter', health.aiKeys?.openrouter, 'OPENROUTER_API_KEY'],
         ['Bytez', health.aiKeys?.bytez, 'BYTEZ_API_KEY'],
         ['NVIDIA NIM', health.aiKeys?.nvidiaNim, 'NVIDIA_NIM_API_KEY'],
       ] as const;
@@ -183,6 +199,17 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
             : 'Verifica SUPABASE_URL, SUPABASE_SERVICE_KEY y que las tablas organizations/profiles estén migradas.',
         },
         {
+          id: 'schema',
+          label: 'Migraciones Supabase',
+          status: health.schema?.ok ? 'pass' : 'fail',
+          detail: health.schema?.ok
+            ? `Tablas requeridas disponibles (${health.schema.tables?.length || 0}).`
+            : `Faltan o fallan: ${(health.schema?.missing || []).join(', ') || 'schema no verificado'}.`,
+          nextStep: health.schema?.ok
+            ? 'Sin acción requerida.'
+            : 'Aplica las migraciones pendientes en Supabase SQL Editor y vuelve a verificar.',
+        },
+        {
           id: 'ai-keys',
           label: 'Llaves de IA en servidor',
           status: configuredAi.length > 0 ? 'pass' : 'fail',
@@ -191,7 +218,7 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
             : 'No hay llaves de IA configuradas del lado del servidor.',
           nextStep: configuredAi.length > 0
             ? 'El proveedor seleccionado debe corresponder a una llave disponible, o usar una llave local.'
-            : 'Agrega GEMINI_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, BYTEZ_API_KEY o NVIDIA_NIM_API_KEY en las variables del despliegue.',
+            : 'Agrega OPENROUTER_API_KEY, GEMINI_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, BYTEZ_API_KEY o NVIDIA_NIM_API_KEY en las variables del despliegue.',
         },
         {
           id: 'profile-org',
@@ -217,9 +244,59 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
     if (session.role === 'manager') void runHealthCheck();
   }, [session.role, session.userId]);
 
+  const selectProvider = (provider: AIProvider) => {
+    setAiSettings(settings => {
+      const normalized = normalizeAISettings(settings);
+      const config = providerSettings(normalized, provider);
+      return {
+        ...normalized,
+        provider,
+        apiKey: config.apiKey,
+        model: config.model,
+        fallbackModels: config.fallbackModels,
+      };
+    });
+  };
+
+  const updateProviderConfig = (patch: Partial<AIProviderConfig>) => {
+    setAiSettings(settings => {
+      const normalized = normalizeAISettings(settings);
+      const current = providerSettings(normalized, normalized.provider);
+      const next = {
+        ...current,
+        ...patch,
+        provider: normalized.provider,
+        model: patch.model ?? current.model ?? defaultModelForProvider(normalized.provider),
+        fallbackModels: patch.fallbackModels ?? current.fallbackModels ?? defaultFallbackModelsForProvider(normalized.provider),
+      };
+      return {
+        ...normalized,
+        apiKey: next.apiKey,
+        model: next.model,
+        fallbackModels: next.fallbackModels,
+        providers: {
+          ...normalized.providers,
+          [normalized.provider]: next,
+        },
+      };
+    });
+  };
+
+  const updateTaskProvider = (task: AITask, provider: AIProvider) => {
+    setAiSettings(settings => normalizeAISettings({
+      ...settings,
+      taskProviders: {
+        ...settings.taskProviders,
+        [task]: provider,
+      },
+    }));
+  };
+
   const handleSave = () => {
-    saveAISettings(aiSettings);
-    onSettingsChange(aiSettings);
+    const normalized = normalizeAISettings(aiSettings);
+    saveAISettings(normalized);
+    onSettingsChange(normalized);
+    setAiSettings(normalized);
     setKeySaved(true);
     setTimeout(() => setKeySaved(false), 2000);
   };
@@ -227,7 +304,15 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
   const handleTest = async () => {
     setTesting(true); setTestResult(null); setTestMsg('');
     try {
-      const result = await testConnection(aiSettings);
+      const normalized = normalizeAISettings(aiSettings);
+      const current = providerSettings(normalized, normalized.provider);
+      const result = await testConnection({
+        ...normalized,
+        provider: current.provider,
+        apiKey: current.apiKey,
+        model: current.model,
+        fallbackModels: current.fallbackModels,
+      });
       setTestResult(result.includes('OK') || result.length > 0 ? 'success' : 'error');
       setTestMsg(result.includes('OK') ? 'Conexión exitosa' : result.slice(0, 60));
     } catch (e: any) {
@@ -272,6 +357,10 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
   const inp = 'bg-slate-50 border border-slate-200 text-slate-900 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 transition-all w-full';
   const lbl = 'block text-slate-700 text-xs font-bold uppercase tracking-wider mb-2';
   const currentProvider = PROVIDERS.find(p => p.id === aiSettings.provider)!;
+  const currentProviderConfig = providerSettings(aiSettings, aiSettings.provider);
+  const enabledProviders = PROVIDERS.filter(p => providerSettings(aiSettings, p.id).enabled);
+  const providerChoices = enabledProviders.length ? enabledProviders : PROVIDERS;
+  const openRouterFallbackText = (currentProviderConfig.fallbackModels || defaultFallbackModelsForProvider(aiSettings.provider)).join(', ');
 
   return (
     <div className="flex-1 bg-slate-50 min-h-screen p-8">
@@ -406,14 +495,17 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
                 <button
                   key={p.id}
                   type="button"
-                  onClick={() => setAiSettings(s => ({ ...s, provider: p.id, apiKey: '' }))}
+                  onClick={() => selectProvider(p.id)}
                   className={`px-4 py-3 rounded-xl text-sm font-bold border-2 transition-all text-left ${
                     aiSettings.provider === p.id
                       ? 'border-indigo-500 bg-indigo-50 text-indigo-800'
                       : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
                   }`}
                 >
-                  {p.label}
+                  <span className="block">{p.label}</span>
+                  <span className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-[10px] font-black ${providerSettings(aiSettings, p.id).enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-400'}`}>
+                    {providerSettings(aiSettings, p.id).enabled ? 'Activo' : 'Off'}
+                  </span>
                 </button>
               ))}
             </div>
@@ -421,13 +513,25 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
 
           {/* API Key */}
           <div className="space-y-4">
+            <label className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <span>
+                <span className="block text-sm font-black text-slate-900">Usar {currentProvider.label}</span>
+                <span className="block text-xs font-semibold text-slate-500 mt-0.5">Disponible para selectores de extracción/análisis.</span>
+              </span>
+              <input
+                type="checkbox"
+                checked={currentProviderConfig.enabled}
+                onChange={e => updateProviderConfig({ enabled: e.target.checked })}
+                className="h-5 w-5 accent-indigo-600"
+              />
+            </label>
             <div>
               <label className={lbl}>{currentProvider.label} — API Key</label>
               <div className="relative">
                 <input
                   type={showKey ? 'text' : 'password'}
-                  value={aiSettings.apiKey}
-                  onChange={e => setAiSettings(s => ({ ...s, apiKey: e.target.value }))}
+                  value={currentProviderConfig.apiKey}
+                  onChange={e => updateProviderConfig({ apiKey: e.target.value })}
                   placeholder={currentProvider.placeholder}
                   className={`${inp} pr-12`}
                 />
@@ -438,6 +542,56 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
               <p className="text-xs text-slate-400 mt-2 flex items-center gap-1">
                 <Info className="w-3 h-3" />
                 Opcional: si se deja vacía, el servidor usará la llave configurada en variables de entorno
+              </p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className={lbl}>Modelo</label>
+                <input
+                  value={currentProviderConfig.model || defaultModelForProvider(aiSettings.provider)}
+                  onChange={e => updateProviderConfig({ model: e.target.value })}
+                  placeholder={defaultModelForProvider(aiSettings.provider)}
+                  className={inp}
+                />
+              </div>
+              {aiSettings.provider === 'openrouter' && (
+                <div>
+                  <label className={lbl}>Fallback gratis</label>
+                  <input
+                    value={openRouterFallbackText}
+                    onChange={e => updateProviderConfig({ fallbackModels: e.target.value.split(',').map(item => item.trim()).filter(Boolean) })}
+                    placeholder="openrouter/free"
+                    className={inp}
+                  />
+                </div>
+              )}
+            </div>
+            {aiSettings.provider === 'openrouter' && (
+              <div className="rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-xs text-cyan-900 leading-5">
+                <p className="font-black">Ruta recomendada sin costo: stealth/ox-alpha → openrouter/free.</p>
+                <p className="font-semibold mt-1">Los modelos gratis pueden tener límites o cola. Para producción, configura OPENROUTER_API_KEY en Vercel y deja la llave local vacía.</p>
+              </div>
+            )}
+            <div className="rounded-xl border border-slate-200 bg-white p-4">
+              <h3 className="text-xs font-black text-slate-700 uppercase tracking-wider mb-3">Proveedor por flujo</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {TASKS.map(task => (
+                  <div key={task}>
+                    <label className="block text-[11px] font-black text-slate-500 uppercase mb-1">{AI_TASK_LABELS[task]}</label>
+                    <select
+                      value={aiSettings.taskProviders?.[task] || aiSettings.provider}
+                      onChange={e => updateTaskProvider(task, e.target.value as AIProvider)}
+                      className={inp}
+                    >
+                      {providerChoices.map(p => (
+                        <option key={p.id} value={p.id}>{p.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-slate-400 mt-3">
+                Para PDFs escaneados usa Gemini, OpenAI o Claude. OpenRouter/Bytez/NVIDIA quedan mejor para texto, Excel/CSV u OCR ya extraído.
               </p>
             </div>
             <div className="flex items-center gap-3 flex-wrap">

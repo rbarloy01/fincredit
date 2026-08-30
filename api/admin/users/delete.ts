@@ -1,4 +1,4 @@
-import { readJson, requireManager, sendJson } from '../../_helpers.js';
+import { readJson, requireManager, sendJson } from '../../../server/apiHelpers.js';
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' });

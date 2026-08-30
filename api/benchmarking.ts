@@ -1,4 +1,4 @@
-import { sendJson } from './_helpers.js';
+import { sendJson } from '../server/apiHelpers.js';
 
 type SupabaseProfile = {
   id: string;

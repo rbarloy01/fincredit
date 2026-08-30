@@ -457,6 +457,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
             <InstitutionalLiabilitiesPanel
               clientId={clientId}
               clientName={client.name}
+              aiSettings={aiSettings}
               onLiabilitiesChange={setInstitutionalLiabilities}
             />
           )}
@@ -492,6 +493,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
               statements={statements}
               covenants={covenants}
               loanTapes={loanTapes}
+              institutionalLiabilities={institutionalLiabilities}
               transactions={transactions}
               customFields={customFields}
               onCustomFieldsChange={setCustomFields}
