@@ -31,3 +31,12 @@ background workers, or an explicit import/sync contract.
 - Pending users must not access app data or AI proxy routes.
 - Document ingestion and review approval are manager-only workflows.
 
+## RLS Verification
+
+- `npm run verify:supabase` verifies required production tables and anonymous
+  RLS smoke behavior.
+- `npm run verify:rls` creates temporary manager, analyst, and pending users,
+  probes production Supabase with real JWTs, and cleans up the temporary data.
+- If `verify:rls` reports pending-user access, apply
+  `database/20260830_strict_authenticated_rls_repair.sql` in Supabase SQL
+  Editor or through a privileged Postgres connection, then rerun the verifier.

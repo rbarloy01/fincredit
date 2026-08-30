@@ -553,7 +553,7 @@ SET public = false,
 DO $$
 DECLARE
   target_table TEXT;
-  policy_name TEXT;
+  existing_policy TEXT;
 BEGIN
   FOREACH target_table IN ARRAY ARRAY[
     'profiles',
@@ -590,31 +590,14 @@ BEGIN
   LOOP
     IF to_regclass('public.' || target_table) IS NOT NULL THEN
       EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', target_table);
-      FOREACH policy_name IN ARRAY ARRAY[
-        'auth_all',
-        'approved_all',
-        'profile_read_self_or_manager',
-        'profile_update_manager',
-        'org_scoped_all',
-        'org_scoped_read',
-        'org_scoped_update',
-        'client_org_scoped_all',
-        'client_child_org_scoped_all',
-        'transaction_child_org_scoped_all',
-        'covenant_child_org_scoped_all',
-        'document_org_scoped_all',
-        'document_run_org_scoped_all',
-        'document_page_org_scoped_all',
-        'document_table_org_scoped_all',
-        'mapping_rule_org_scoped_all',
-        'review_item_org_scoped_all',
-        'line_item_source_org_scoped_all',
-        'company_profile_client_scoped_all',
-        'qualitative_factor_client_scoped_all',
-        'ai_usage_org_scoped_all'
-      ]
+
+      FOR existing_policy IN
+        SELECT policyname
+        FROM pg_policies
+        WHERE schemaname = 'public'
+          AND tablename = target_table
       LOOP
-        EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', policy_name, target_table);
+        EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', existing_policy, target_table);
       END LOOP;
     END IF;
   END LOOP;

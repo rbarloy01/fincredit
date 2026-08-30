@@ -55,9 +55,11 @@ database/20260630_private_financial_document_storage.sql
 database/20260701_facility_specific_aforo_history.sql
 database/20260706_crm_relationship_layer.sql
 database/20260706_crm_sheet_fields.sql
+database/20260830_strict_authenticated_rls_repair.sql
 ```
 
 `20260611_org_scoped_rls.sql` replaces broad approved-user RLS with organization-scoped policies. Approved users can only access data belonging to their own organization.
+`20260830_strict_authenticated_rls_repair.sql` removes lingering permissive authenticated policies left by older bootstrap migrations, then recreates the strict approved-user org-scoped policies.
 
 `20260701_facility_specific_aforo_history.sql` tags legacy `aforo_history` rows with a `transactionId` only when the client has exactly one facility. Multi-facility clients keep untagged rows as a legacy fallback so facility filters do not hide historical aforo before it can be reviewed.
 
@@ -116,9 +118,10 @@ The local Python FINmonitor sidecar can be imported through `/api/pipeline/impor
 npm run lint
 npm run build
 npm run verify:supabase
+npm run verify:rls
 ```
 
-Current build note: Vite warns that the main bundle is large. The likely next optimization is code-splitting heavy export/report dependencies such as PDF, Excel, and spreadsheet tooling.
+`npm run verify:rls` creates temporary manager, analyst, and pending users in production Supabase, verifies real JWT RLS behavior, and cleans up the temporary records.
 
 ## Roles
 
