@@ -263,32 +263,63 @@ function extractWithProfile(rows: any[][], headerIdx: number, profile: SheetProf
   return { std, notes };
 }
 
+function findSummaryHeader(row: any[], nextRows: any[][] = []): { kind: 'product' | 'state'; labelIdx: number; balanceIdx: number; pctIdx: number | null } | null {
+  for (let labelIdx = 0; labelIdx < row.length; labelIdx += 1) {
+    const label = normalize(row[labelIdx]);
+    const kind: 'product' | 'state' | null =
+      /^(producto|tipo de credito|tipo credito|tipo de cartera|segmento|modalidad)$/.test(label) ? 'product' :
+      /^(estado|entidad|geografia|geografico|plaza|region)$/.test(label) ? 'state' :
+      null;
+    if (!kind) continue;
+
+    let balanceIdx = -1;
+    let pctIdx: number | null = null;
+    for (let index = labelIdx + 1; index < Math.min(row.length, labelIdx + 6); index += 1) {
+      const header = normalize(row[index]);
+      if (balanceIdx === -1 && /^(saldo|saldo total|cartera|balance|monto)$/.test(header)) balanceIdx = index;
+      if (/%|porcentaje|participacion|share/.test(header)) pctIdx = index;
+    }
+    if (balanceIdx === -1 && /^(producto|estado)$/.test(label)) {
+      const numericCandidates = [];
+      for (let index = labelIdx + 1; index < Math.min(row.length, labelIdx + 6); index += 1) {
+        const hits = nextRows
+          .filter(next => normalize(next?.[labelIdx]) !== 'total')
+          .filter(next => parseNumber(next?.[index]) !== null)
+          .length;
+        if (hits >= 2) numericCandidates.push(index);
+      }
+      if (numericCandidates.length === 1) balanceIdx = numericCandidates[0];
+    }
+    if (balanceIdx !== -1) return { kind, labelIdx, balanceIdx, pctIdx };
+  }
+  return null;
+}
+
 function extractSummaryBreakdown(rows: any[][], fileName: string, fileDate: string | null): { std: StandardLoan[]; notes: MappingNote[]; summary?: LoanTapeImportSummary } {
   const byProduct: LoanTapeSummaryBucket[] = [];
   const byState: LoanTapeSummaryBucket[] = [];
   const notes: MappingNote[] = [];
   const cutoff = fileDate || fileDateISO(fileName);
-  const parseBlock = (headerIdx: number, kind: 'product' | 'state') => {
+  const scaleText = normalize(rows.slice(0, 20).flat().join(' '));
+  const balanceScale = /cifras en miles|miles de pesos|miles pesos|000 pesos/.test(scaleText) ? 1000 : 1;
+  const parseBlock = (headerIdx: number, header: { kind: 'product' | 'state'; labelIdx: number; balanceIdx: number; pctIdx: number | null }) => {
     for (let r = headerIdx + 1; r < rows.length; r++) {
       const row = rows[r] || [];
-      const name = String(row[0] ?? '').trim();
+      const name = String(row[header.labelIdx] ?? '').trim();
       if (!name) break;
       if (normalize(name) === 'total') break;
-      const balance = parseNumber(row[1]);
+      const balance = parseNumber(row[header.balanceIdx]);
       if (balance === null) continue;
-      const item = { name, balance, pct: parsePct(row[2]) };
-      if (kind === 'product') byProduct.push(item);
+      const scaledBalance = balanceScale > 1 && Math.abs(balance) < 10000000 ? balance * balanceScale : balance;
+      const item = { name, balance: scaledBalance, pct: header.pctIdx === null ? null : parsePct(row[header.pctIdx]) };
+      if (header.kind === 'product') byProduct.push(item);
       else byState.push(item);
     }
   };
 
   for (let i = 0; i < Math.min(rows.length, 80); i++) {
-    const first = normalize(rows[i]?.[0]);
-    const second = normalize(rows[i]?.[1]);
-    const third = normalize(rows[i]?.[2]);
-    if ((first === 'producto' || first === 'estado') && second === 'saldo' && !third) {
-      parseBlock(i, first === 'producto' ? 'product' : 'state');
-    }
+    const header = findSummaryHeader(rows[i] || [], rows.slice(i + 1, i + 8));
+    if (header) parseBlock(i, header);
   }
 
   if (!byProduct.length && !byState.length) return { std: [], notes: [] };
@@ -347,6 +378,7 @@ function extractGeneric(rows: any[][], fileName: string): { std: StandardLoan[];
 
 export function importLoanTapeSheets(sheets: SheetInput[], fileName: string, opts: { previousTotal?: number | null } = {}): ImportResult {
   const fileDate = fileDateISO(fileName);
+  const prefersSummaryWorkflow = /cofine/.test(normalize(fileName)) && /desglose|antiguedad/.test(normalize(fileName));
   const allStd: StandardLoan[] = [];
   const allNotes: MappingNote[] = [];
   const reports: SheetReport[] = [];
@@ -354,7 +386,7 @@ export function importLoanTapeSheets(sheets: SheetInput[], fileName: string, opt
 
   for (const sheet of sheets) {
     const rows = sheet.rows || [];
-    const dataRows = rows.filter(r => nonEmptyCells(r) >= 3).length;
+    const dataRows = rows.filter(r => nonEmptyCells(r) >= 2).length;
     if (dataRows === 0) { reports.push({ name: sheet.name, profile: null, dataRows: 0, mappedRows: 0, status: 'skipped-empty' }); continue; }
 
     // try known profiles
@@ -376,6 +408,11 @@ export function importLoanTapeSheets(sheets: SheetInput[], fileName: string, opt
       allStd.push(...summaryResult.std); allNotes.push(...summaryResult.notes);
       summary = summaryResult.summary;
       reports.push({ name: sheet.name, profile: 'COFINE_PRODUCT_SUMMARY', dataRows, mappedRows: summaryResult.std.length, status: 'fallback' });
+      continue;
+    }
+
+    if (prefersSummaryWorkflow && /(bucket|venc|antiguedad|cartera)/.test(normalize(sheet.name))) {
+      reports.push({ name: sheet.name, profile: 'COFINE_SUMMARY_CONTEXT', dataRows, mappedRows: 0, status: 'fallback' });
       continue;
     }
 

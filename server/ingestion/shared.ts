@@ -227,6 +227,30 @@ export async function downloadDriveFile(file: { id: string; name: string; mimeTy
   return { buffer: Buffer.from(result.data as ArrayBuffer), mimeType: mime, fileName: file.name };
 }
 
+export async function downloadStorageFile(
+  admin: SupabaseAdmin,
+  file: { bucket: string; path: string; name: string; mimeType?: string },
+): Promise<DriveDownload> {
+  const encodedBucket = encodeURIComponent(file.bucket);
+  const encodedPath = file.path.split('/').map(encodeURIComponent).join('/');
+  const response = await fetch(`${admin.url}/storage/v1/object/${encodedBucket}/${encodedPath}`, {
+    headers: {
+      apikey: admin.serviceKey,
+      Authorization: `Bearer ${admin.serviceKey}`,
+    },
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`Storage download ${response.status}: ${detail || file.path}`);
+  }
+  const arrayBuffer = await response.arrayBuffer();
+  return {
+    buffer: Buffer.from(arrayBuffer),
+    mimeType: file.mimeType || response.headers.get('content-type') || 'application/octet-stream',
+    fileName: file.name,
+  };
+}
+
 export function isExcelLike(fileName: string, mimeType: string) {
   return /\.(xlsx|xls|csv)$/i.test(fileName)
     || mimeType.includes('spreadsheet')

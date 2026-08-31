@@ -1,7 +1,7 @@
 import React, { Suspense, useState, useEffect, useRef } from 'react';
 import { db, LoanTape_DB } from '../../db/index';
 import { Session } from '../../services/auth';
-import { AISettings, analyzeLoanTape, StructuredLoanTapeAnalysis } from '../../services/ai';
+import { AISettings, analyzeLoanTape, extractLoanTapeSheetsFromDocument, StructuredLoanTapeAnalysis } from '../../services/ai';
 import {
   Upload, Trash2, Sparkles, TrendingUp, TrendingDown, Minus,
   BarChart3, FileSpreadsheet, ChevronDown, ChevronRight,
@@ -20,6 +20,7 @@ import { lazyWithChunkRetry } from '../../lib/lazyWithChunkRetry';
 import { loadExportModule } from '../../lib/exportLoader';
 import LoanTapeCockpit from './LoanTapeCockpit';
 import { importLoanTapeSheets } from '../../lib/loanTapeImport';
+import { extractPdfText, isUsefulExtractedText } from '../../lib/documentParsing';
 
 const WorkspaceBlock = lazyWithChunkRetry(() => import('./LoanTapeWorkspaceBlock'), 'loan-tape-workspace-block');
 
@@ -32,10 +33,27 @@ interface Props {
 }
 
 const TABULAR_LOAN_TAPE_EXTENSIONS = ['.xlsx', '.xls', '.csv'];
+const VISUAL_LOAN_TAPE_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg', '.webp'];
 
 function isTabularLoanTapeFile(file: File): boolean {
   const name = file.name.toLowerCase();
   return TABULAR_LOAN_TAPE_EXTENSIONS.some(ext => name.endsWith(ext));
+}
+
+function isVisualLoanTapeFile(file: File): boolean {
+  const name = file.name.toLowerCase();
+  return file.type === 'application/pdf'
+    || file.type.startsWith('image/')
+    || VISUAL_LOAN_TAPE_EXTENSIONS.some(ext => name.endsWith(ext));
+}
+
+function toBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve((reader.result as string).split(',')[1] || '');
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 }
 
 function StatusBadge({ status }: { status?: string }) {
@@ -253,8 +271,12 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
 
   const saveLoanTapeFile = async (file: File) => {
     const isTabular = isTabularLoanTapeFile(file);
+    const isVisual = isVisualLoanTapeFile(file);
+    const prev: any = tapes[0]?.extractedData;
+    const prevStd: any[] = Array.isArray(prev?._standardized) ? prev._standardized : [];
+    const previousTotal = prevStd.length ? prevStd.reduce((a, s) => a + (Number(s.outstanding_balance) || 0), 0) : null;
 
-    if (!isTabular) {
+    if (!isTabular && !isVisual) {
       const sourceDocument = await db.uploadClientDocument(clientId, file, 'loan_tape', {
         clientName,
         uploadSurface: 'loan_tape_panel',
@@ -275,7 +297,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
           _unsupportedImport: true,
           _import: {
             severity: 'warning',
-            messages: [`${file.name}: archivo guardado, sin filas analíticas automáticas. Sube Excel/CSV para estandarizar cartera.`],
+            messages: [`${file.name}: archivo guardado, sin filas analíticas automáticas. Sube Excel/CSV o imagen/PDF legible para estandarizar cartera.`],
             sheets: [],
             totalBalance: 0,
             unmappedSheetsWithData: [],
@@ -290,6 +312,90 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
       });
     }
 
+    if (!isTabular && isVisual) {
+      try {
+        const mimeType = file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream');
+        const text = mimeType === 'application/pdf' ? await extractPdfText(file) : '';
+        const base64 = await toBase64(file);
+        const sheets = await extractLoanTapeSheetsFromDocument(aiSettings, {
+          text: isUsefulExtractedText(text) ? text : '',
+          media: { base64, mimeType, fileName: file.name },
+        }, clientName || clientId, file.name);
+        const result = importLoanTapeSheets(sheets, file.name, { previousTotal });
+        const rec = {
+          ...result.reconciliation,
+          messages: [`${file.name}: imagen/PDF leído con IA visual y estandarizado.`, ...result.reconciliation.messages],
+        };
+
+        if (rec.severity === 'blocker') {
+          const proceed = window.confirm(`${rec.messages.join('\n')}\n\n¿Cargar de todos modos?`);
+          if (!proceed) return null;
+        }
+
+        const lt0 = (result.standardized.find(s => s.loan_type)?.loan_type || '').toLowerCase();
+        const tapeType: 'credito' | 'factoraje' | 'otro' = /factoraje|factor|cedente/.test(lt0) ? 'factoraje' : (result.standardized.length ? 'credito' : 'otro');
+        const sourceDocument = await db.uploadClientDocument(clientId, file, 'loan_tape', {
+          clientName,
+          uploadSurface: 'loan_tape_panel',
+          rows: result.standardized.length,
+          tapeType,
+          originalMimeType: mimeType,
+          parseMode: 'visual_ai',
+        });
+
+        return db.createLoanTape({
+          clientId,
+          sourceDocumentId: sourceDocument.id,
+          name: file.name.replace(/\.[^.]+$/, ''),
+          fileName: file.name,
+          tapeType,
+          extractedData: {
+            _standardized: result.standardized,
+            _mappingReport: result.mappingReport,
+            _import: rec,
+            _summary: result.summary,
+            _sourceFile: { name: file.name, mimeType, sizeBytes: file.size, parseMode: 'visual_ai' },
+          },
+        });
+      } catch (error: any) {
+        const sourceDocument = await db.uploadClientDocument(clientId, file, 'loan_tape', {
+          clientName,
+          uploadSurface: 'loan_tape_panel',
+          originalMimeType: file.type || 'application/octet-stream',
+          parseMode: 'raw_file',
+          visualExtractionError: error?.message || String(error),
+        });
+
+        return db.createLoanTape({
+          clientId,
+          sourceDocumentId: sourceDocument.id,
+          name: file.name.replace(/\.[^.]+$/, ''),
+          fileName: file.name,
+          tapeType: 'otro',
+          extractedData: {
+            rows: [],
+            _standardized: [],
+            _mappingReport: [],
+            _unsupportedImport: true,
+            _import: {
+              severity: 'warning',
+              messages: [`${file.name}: no pude extraer tabla desde imagen/PDF. ${error?.message || String(error)}`],
+              sheets: [],
+              totalBalance: 0,
+              unmappedSheetsWithData: [],
+              validationCount: 0,
+            },
+            _sourceFile: {
+              name: file.name,
+              mimeType: file.type || 'application/octet-stream',
+              sizeBytes: file.size,
+              parseMode: 'raw_file',
+            },
+          },
+        });
+      }
+    }
+
     const buffer = await file.arrayBuffer();
     const XLSX = await import('xlsx');
     const workbook = XLSX.read(new Uint8Array(buffer), { type: 'array' });
@@ -299,11 +405,6 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
       name,
       rows: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, blankrows: false, defval: null }) as any[][],
     }));
-
-    // previous cut total (most recent existing tape) for the MoM sanity check
-    const prev: any = tapes[0]?.extractedData;
-    const prevStd: any[] = Array.isArray(prev?._standardized) ? prev._standardized : [];
-    const previousTotal = prevStd.length ? prevStd.reduce((a, s) => a + (Number(s.outstanding_balance) || 0), 0) : null;
 
     const result = importLoanTapeSheets(sheets, file.name, { previousTotal });
     const rec = result.reconciliation;
@@ -603,7 +704,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                   <div className="rounded-xl border border-slate-200 bg-white p-4">
                     <p className="text-sm font-black text-slate-900">Archivo guardado</p>
                     <p className="mt-1 text-sm leading-6 text-slate-500">
-                      Este tipo de archivo queda asociado al cliente como documento de loan tape. Para análisis automático de cartera, sube también una versión Excel o CSV.
+                      Este archivo queda asociado al cliente como documento de loan tape, pero no dejó una tabla analítica legible. Usa Excel/CSV o una imagen/PDF nítida con proveedor visual activo.
                     </p>
                   </div>
                 </div>

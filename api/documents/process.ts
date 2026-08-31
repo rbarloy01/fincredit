@@ -7,6 +7,7 @@ import { handlePipelineImport } from '../../server/ingestion/pipelineImport.js';
 import {
   createExtractionRun,
   downloadDriveFile,
+  downloadStorageFile,
   finishExtractionRun,
   isDocAiCandidate,
   isExcelLike,
@@ -227,16 +228,26 @@ async function insertQualitativeItems(admin: any, doc: any, text: string) {
 }
 
 async function processOne(admin: any, doc: any) {
-  if (!doc.drive_file_id) throw new Error(`Document ${doc.id} has no drive_file_id`);
+  if (!doc.drive_file_id && !(doc.storage_bucket && doc.storage_path)) {
+    throw new Error(`Document ${doc.id} has no drive_file_id or storage file`);
+  }
 
   await patchDocument(admin, doc.id, { extraction_status: 'processing' });
   await resetDerivedRows(admin, doc.id);
 
-  const file = await downloadDriveFile({
-    id: doc.drive_file_id,
-    name: doc.file_name,
-    mimeType: doc.mime_type,
-  });
+  const file = doc.drive_file_id
+    ? await downloadDriveFile({
+        id: doc.drive_file_id,
+        name: doc.file_name,
+        mimeType: doc.mime_type,
+      })
+    : await downloadStorageFile(admin, {
+        bucket: doc.storage_bucket,
+        path: doc.storage_path,
+        name: doc.file_name,
+        mimeType: doc.mime_type,
+      });
+  const sourceKind = doc.drive_file_id ? 'drive' : 'storage';
   const contentHash = createHash('sha256').update(file.buffer).digest('hex');
   const run = await createExtractionRun(admin, doc.id, isExcelLike(file.fileName, file.mimeType) ? 'local-xlsx' : 'document-ai');
 
@@ -250,7 +261,7 @@ async function processOne(admin: any, doc: any) {
         extraction_status: 'done',
         raw_metadata: {
           ...(doc.raw_metadata || {}),
-          extraction: { parser: 'xlsx', fileName: file.fileName, contentHash, tables: tables.length, reviewItems },
+          extraction: { parser: 'xlsx', sourceKind, fileName: file.fileName, contentHash, tables: tables.length, reviewItems },
         },
         ...(!doc.checksum ? { checksum: contentHash } : {}),
       });
@@ -266,7 +277,7 @@ async function processOne(admin: any, doc: any) {
         extraction_status: 'done',
         raw_metadata: {
           ...(doc.raw_metadata || {}),
-          extraction: { parser: 'text', fileName: file.fileName, contentHash, reviewItems },
+          extraction: { parser: 'text', sourceKind, fileName: file.fileName, contentHash, reviewItems },
         },
         ...(!doc.checksum ? { checksum: contentHash } : {}),
       });
@@ -299,6 +310,7 @@ async function processOne(admin: any, doc: any) {
         ...(doc.raw_metadata || {}),
         extraction: {
           parser: 'document-ai',
+          sourceKind,
           processor: parsed.processor,
           fileName: file.fileName,
           contentHash,

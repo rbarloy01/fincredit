@@ -223,6 +223,11 @@ export interface StructuredLoanTapeAnalysis {
   congruencyChecks: Array<{ item: string; contractRequirement?: string; actualValue: string; status: string; }>;
 }
 
+export interface ExtractedLoanTapeSheet {
+  name: string;
+  rows: any[][];
+}
+
 export interface AccountConsolidationSuggestion {
   mappings: Array<{
     accountName: string;
@@ -608,6 +613,41 @@ function normalizeLiabilitiesExtraction(parsed: any): ExtractedInstitutionalLiab
   }).filter((row: ExtractedInstitutionalLiability | null): row is ExtractedInstitutionalLiability => Boolean(row));
 }
 
+function normalizeLoanTapeSheetExtraction(parsed: any): ExtractedLoanTapeSheet[] {
+  const rawSheets = Array.isArray(parsed?.sheets)
+    ? parsed.sheets
+    : Array.isArray(parsed?.tables)
+      ? parsed.tables
+      : Array.isArray(parsed?.rows)
+        ? [{ name: parsed?.sheetName || parsed?.name || 'Imagen', rows: parsed.rows }]
+        : Array.isArray(parsed)
+          ? [{ name: 'Imagen', rows: parsed }]
+          : [];
+
+  const sheets = rawSheets.map((sheet: any, index: number) => {
+    const rawRows = Array.isArray(sheet?.rows) ? sheet.rows : Array.isArray(sheet) ? sheet : [];
+    let rows: any[][] = [];
+    if (rawRows.every((row: any) => Array.isArray(row))) {
+      rows = rawRows as any[][];
+    } else if (rawRows.every((row: any) => row && typeof row === 'object' && !Array.isArray(row))) {
+      const headers = Array.from(new Set(rawRows.flatMap((row: any) => Object.keys(row)))) as string[];
+      rows = [headers, ...rawRows.map((row: any) => headers.map(header => row[header] ?? null))];
+    }
+    rows = rows
+      .map(row => row.map(cell => {
+        if (cell === undefined || cell === '') return null;
+        if (cell === null || typeof cell === 'string' || typeof cell === 'number' || typeof cell === 'boolean') return cell;
+        return String(cell);
+      }))
+      .filter(row => row.some(cell => cell !== null && String(cell).trim() !== ''))
+      .slice(0, 2500);
+    return { name: String(sheet?.name || sheet?.sheetName || `Imagen ${index + 1}`), rows };
+  }).filter((sheet: ExtractedLoanTapeSheet) => sheet.rows.length >= 2);
+
+  if (!sheets.length) throw new Error('La imagen/PDF no devolvió una tabla de loan tape legible.');
+  return sheets;
+}
+
 async function extractContractJSONWithRepair(settings: AISettings, text: string): Promise<any> {
   try {
     return extractJSON(text);
@@ -856,6 +896,42 @@ Sigue los 8 pasos del sistema y devuelve únicamente JSON minificado con la estr
 
   const text = await callAI(settings, system, prompt);
   return extractJSON(text);
+}
+
+export async function extractLoanTapeSheetsFromDocument(
+  settings: AISettings,
+  content: AIMedia | AIMedia[] | AIDocumentContent,
+  clientName?: string,
+  fileName?: string,
+): Promise<ExtractedLoanTapeSheet[]> {
+  settings = settingsForTask(settings, 'loan_tape');
+  const isDocument = !Array.isArray(content) && 'text' in content;
+  const documentText = isDocument ? String(content.text || '') : '';
+  const documentMedia = isDocument ? content.media : content as AIMedia | AIMedia[];
+  const system = `Eres un extractor OCR/tabular para loan tapes de crédito.
+Reconstruyes tablas desde imágenes, PDFs escaneados o texto pegado y devuelves únicamente JSON válido.
+No hagas análisis de riesgo aquí. No inventes columnas ni valores.`;
+
+  const prompt = `Cliente esperado: ${clientName || 'no indicado'}.
+Archivo: ${fileName || 'no indicado'}.
+
+Extrae la tabla de cartera/loan tape visible. Conserva encabezados originales y filas de datos.
+Si el archivo es un desglose resumido por producto, estado, segmento o modalidad, extrae esa tabla resumen completa.
+Si hay varias tablas, devuelve una hoja por tabla.
+
+Devuelve exactamente:
+{"sheets":[{"name":"nombre de hoja o tabla","rows":[["encabezado 1","encabezado 2"],["valor 1","valor 2"]]}]}
+
+Reglas:
+- La primera fila de cada "rows" debe ser la fila de encabezados.
+- Mantén importes como texto o número sin traducir su escala.
+- Mantén porcentajes con su símbolo si aparece.
+- No agregues totales si no están visibles.
+- Si una celda no se puede leer, usa null.
+${documentText ? `\nTexto OCR/base disponible:\n${documentText.slice(0, 50000)}` : '\nUsa el documento/imagen adjunta.'}`;
+
+  const text = await callAI(settings, system, prompt, documentMedia);
+  return normalizeLoanTapeSheetExtraction(extractJSON(text));
 }
 
 // ─── Institutional liabilities extraction ────────────────────────────────────

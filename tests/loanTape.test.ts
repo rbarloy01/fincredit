@@ -237,3 +237,61 @@ test('COFINE summarized breakdown imports product and state workflow without fak
   assert.equal(analysis.metrics.find(item => item.name === 'DPD ponderado por saldo')?.latestValue, 'N/D');
   assert.equal(analysis.concentrations.by_state?.[0]?.name, 'Nuevo León');
 });
+
+test('COFINE summarized breakdown tolerates shifted summary headers', () => {
+  const shifted: SheetInput = {
+    name: 'Julio 2023',
+    rows: [
+      ['Reporte', '', '', '', ''],
+      ['', 'Producto', 'Saldo', '%', 'Notas'],
+      ['', 'C Cuenta Corriente', '$120,000,000', '60%', ''],
+      ['', 'C Simple', '$80,000,000', '40%', ''],
+      ['', 'Total', '$200,000,000', '100%', ''],
+      ['', '', '', '', ''],
+      ['', 'Estado', 'Saldo', '%', ''],
+      ['', 'Nuevo León', '$140,000,000', '70%', ''],
+      ['', 'Tamaulipas', '$60,000,000', '30%', ''],
+      ['', 'Total', '$200,000,000', '100%', ''],
+    ],
+  };
+
+  const res = importLoanTapeSheets([shifted], '230731 - Desglose de Cartera - COFINE.xlsx');
+  assert.equal(res.reconciliation.severity, 'ok');
+  assert.equal(res.summary?.granularity, 'product_summary');
+  assert.equal(res.standardized.length, 2);
+  assert.equal(res.reconciliation.totalBalance, 200000000);
+  assert.equal(res.standardized[0].file_date, '2023-07-31');
+  assert.equal(res.summary?.by_state?.[0]?.name, 'Nuevo León');
+});
+
+test('COFINE summarized product-only breakdown infers balance column and thousands scale', () => {
+  const productOnly: SheetInput = {
+    name: 'Desglose por producto Jul2023',
+    rows: [
+      ['COFINE, SAPI DE CV, SOFOM, ENR', '', '', ''],
+      ['Antigüedad de la cartera de crédito', '', '', ''],
+      ['Fecha: 31 de Julio del 2023', '', '', ''],
+      ['(Cifras en miles de pesos)', '', '', ''],
+      ['', '', '', ''],
+      ['Producto', '', '', ''],
+      ['C Cuenta Corriente ', 288730.01371550007, '', ''],
+      ['C Simple', 349767.25421, '', ''],
+      ['C Puente', 74887.72032, '', ''],
+      ['Total', 831971.3797754999, '', ''],
+    ],
+  };
+  const bucket: SheetInput = {
+    name: 'Bucket Jul2023',
+    rows: [
+      ['Producto', 0, '1 a 30', '31 a 60', 'Total'],
+      ['C Simple', 298814.62274, 36696.39083, 0, 335511.01357],
+      ['Total', 298814.62274, 36696.39083, 0, 335511.01357],
+    ],
+  };
+
+  const res = importLoanTapeSheets([bucket, productOnly], '230731 - Desglose de Cartera - COFINE.xlsx');
+  assert.equal(res.reconciliation.severity, 'ok');
+  assert.equal(res.standardized.length, 3);
+  assert.equal(Math.round(res.reconciliation.totalBalance), 713384988);
+  assert.equal(res.standardized[0].source_granularity, 'product_summary');
+});
