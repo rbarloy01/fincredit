@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { importLoanTapeSheets, type SheetInput } from '../src/lib/loanTapeImport';
+import { analyzeLoanTapesLocally, buildLoanTapeDataProfile } from '../src/lib/loanTapeAnalytics';
 
 // SIAC-style sheet: two title rows, header on row index 2, one vigente + one vencida loan.
 const siac: SheetInput = {
@@ -76,4 +77,32 @@ test('generic semantic mapper understands ordered tables with non-standard heade
   assert.equal(res.standardized[0].days_overdue, 0);
   assert.equal(res.standardized[0].state, 'Nuevo Leon');
   assert.equal(res.standardized[1].loan_type, 'Factoraje');
+});
+
+test('analysis stays available with optional fields missing and formats rates as percentages', () => {
+  const partial: SheetInput = {
+    name: 'COFINE partial',
+    rows: [
+      ['Contrato', 'Acreditado', 'Saldo insoluto', 'Mora', 'Tasa'],
+      ['CF-1', 'CLIENTE UNO', 1200000, 0, '24%'],
+      ['CF-2', 'CLIENTE DOS', 300000, 120, '30%'],
+    ],
+  };
+  const res = importLoanTapeSheets([partial], '20260831 COFINE');
+  const profile = buildLoanTapeDataProfile(res.standardized, res.mappingReport);
+  assert.equal(profile.canAnalyze, true);
+  assert.ok(profile.readinessScore >= 65);
+  assert.ok(profile.availableAnalyses.some(item => item.key === 'dpd_quality'));
+  assert.ok(profile.blockedAnalyses.some(item => item.key === 'product_mix'));
+
+  const analysis = analyzeLoanTapesLocally([{
+    id: 'lt1',
+    clientId: 'c1',
+    name: 'COFINE',
+    fileName: '20260831 COFINE.xlsx',
+    tapeType: 'credito',
+    uploadDate: '2026-08-31',
+    extractedData: { _standardized: res.standardized, _mappingReport: res.mappingReport },
+  } as any], 'lt1');
+  assert.equal(analysis.metrics.find(item => item.name === 'Tasa ponderada por saldo')?.latestValue, '25.2%');
 });

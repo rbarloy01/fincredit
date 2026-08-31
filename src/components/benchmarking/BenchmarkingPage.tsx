@@ -672,6 +672,19 @@ function formatBenchmarkMetric(value: number | null, key: string) {
   return formatMetric(value, key);
 }
 
+const benchmarkTooltipStyle = { borderRadius: 12, borderColor: '#e2e8f0', boxShadow: '0 12px 30px rgba(15, 23, 42, 0.10)' };
+
+function formatBenchmarkAxisValue(value: number, unit: '%' | 'x' | 'mixed') {
+  if (unit === '%') return `${Number(value).toLocaleString('es-MX', { maximumFractionDigits: 1 })}%`;
+  if (unit === 'x') return `${Number(value).toLocaleString('es-MX', { maximumFractionDigits: 1 })}x`;
+  return Number(value).toLocaleString('es-MX', { maximumFractionDigits: 1 });
+}
+
+function formatBenchmarkTrendAxis(value: number, key: string) {
+  if (percentRatioKeys.has(key)) return formatPercent(value);
+  return `${Number(value).toLocaleString('es-MX', { maximumFractionDigits: 1 })}x`;
+}
+
 function formatPercent(value: number) {
   return value.toLocaleString('es-MX', {
     style: 'percent',
@@ -1119,6 +1132,8 @@ const BenchmarkingPage: React.FC = () => {
       hasData: value !== null,
     };
   }).filter(item => item.hasData), [keyRatioChartKeys, ratioAnalysis.medians]);
+  const keyRatioUnits = Array.from(new Set(keyRatioChartData.map(item => item.unit))) as Array<'%' | 'x'>;
+  const keyRatioAxisUnit: '%' | 'x' | 'mixed' = keyRatioUnits.length === 1 ? keyRatioUnits[0] : 'mixed';
 
   const dataCoverageChartData = useMemo(() => ratioKeys.map(key => ({
     ratio: ratioLabels[key],
@@ -1141,6 +1156,8 @@ const BenchmarkingPage: React.FC = () => {
       ...Object.fromEntries(trendChartKeys.map(key => [key, percentile(metrics.map(metric => metric[key]), 0.5)])),
     };
   }).filter(item => trendChartKeys.some(key => item[key as keyof typeof item] !== null)).slice(-12), [filtered, getStatementMetrics, periodOptions, periodTypeFilter, selectedFinancialYear, trendChartKeys]);
+  const trendHasPercent = trendChartKeys.some(key => percentRatioKeys.has(key));
+  const trendHasRatio = trendChartKeys.some(key => !percentRatioKeys.has(key));
 
   const riskScatterData = useMemo(() => ratioAnalysis.topSegments.map(segment => ({
     name: segment.name,
@@ -1745,10 +1762,11 @@ const BenchmarkingPage: React.FC = () => {
                   >
                     {segmentChartData.map(item => <Cell key={item.name} fill={item.fill} />)}
                   </Pie>
-                  <Tooltip
-                    formatter={(_value: any, _name: any, item: any) => [`${item.payload.clients} clientes`, 'Participantes']}
-                    labelFormatter={label => String(label)}
-                  />
+	                  <Tooltip
+	                    formatter={(_value: any, _name: any, item: any) => [`${item.payload.clients} clientes`, 'Participantes']}
+	                    labelFormatter={label => String(label)}
+	                    contentStyle={benchmarkTooltipStyle}
+	                  />
                 </PieChart>
               </ResponsiveContainer>
             ) : (
@@ -1799,14 +1817,15 @@ const BenchmarkingPage: React.FC = () => {
           <div className="h-80">
             {keyRatioChartData.length ? (
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={keyRatioChartData} margin={{ top: 10, right: 12, left: 0, bottom: 28 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis dataKey="ratio" tick={{ fontSize: 11, fill: '#64748b' }} interval={0} angle={-12} textAnchor="end" height={48} />
-                  <YAxis tick={{ fontSize: 11, fill: '#64748b' }} />
-                  <Tooltip
-                    formatter={(_value: any, _name: any, item: any) => [item.payload.formatted, 'Mediana']}
-                    labelFormatter={label => String(label)}
-                  />
+	                <BarChart data={keyRatioChartData} margin={{ top: 10, right: 12, left: 8, bottom: 28 }}>
+	                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+	                  <XAxis dataKey="ratio" tick={{ fontSize: 11, fill: '#64748b' }} interval={0} angle={-12} textAnchor="end" height={48} />
+	                  <YAxis tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={value => formatBenchmarkAxisValue(Number(value), keyRatioAxisUnit)} width={58} />
+	                  <Tooltip
+	                    formatter={(_value: any, _name: any, item: any) => [item.payload.formatted, 'Mediana']}
+	                    labelFormatter={label => String(label)}
+	                    contentStyle={benchmarkTooltipStyle}
+	                  />
                   <Bar dataKey="value" radius={[8, 8, 0, 0]} fill="#4f46e5" />
                 </BarChart>
               </ResponsiveContainer>
@@ -1847,23 +1866,39 @@ const BenchmarkingPage: React.FC = () => {
           <div className="h-80">
             {periodTrendChartData.length ? (
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={periodTrendChartData} margin={{ top: 10, right: 20, left: 0, bottom: 32 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis dataKey="period" tick={{ fontSize: 11, fill: '#64748b' }} interval={0} angle={-18} textAnchor="end" height={48} />
-                  <YAxis tick={{ fontSize: 11, fill: '#64748b' }} />
-                  <Tooltip
-                    formatter={(value: any, name: any, item: any) => {
-                      const key = String(item?.dataKey || '');
-                      return [
-                        typeof value === 'number' ? formatBenchmarkMetric(value, key) : value,
-                        name,
-                      ];
-                    }}
-                  />
-                  {trendChartKeys.map((key, index) => (
-                    <Line
-                      key={`trend-line-${key}`}
-                      type="monotone"
+	                <LineChart data={periodTrendChartData} margin={{ top: 10, right: trendHasPercent ? 24 : 12, left: 8, bottom: 32 }}>
+	                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+	                  <XAxis dataKey="period" tick={{ fontSize: 11, fill: '#64748b' }} interval={0} angle={-18} textAnchor="end" height={48} />
+	                  <YAxis
+	                    yAxisId="ratio"
+	                    hide={!trendHasRatio}
+	                    tick={{ fontSize: 11, fill: '#64748b' }}
+	                    tickFormatter={value => formatBenchmarkTrendAxis(Number(value), 'debt_ebitda')}
+	                    width={58}
+	                  />
+	                  <YAxis
+	                    yAxisId="pct"
+	                    orientation="right"
+	                    hide={!trendHasPercent}
+	                    tick={{ fontSize: 11, fill: '#64748b' }}
+	                    tickFormatter={value => formatBenchmarkTrendAxis(Number(value), 'roa')}
+	                    width={64}
+	                  />
+	                  <Tooltip
+	                    formatter={(value: any, name: any, item: any) => {
+	                      const key = String(item?.dataKey || '');
+	                      return [
+	                        typeof value === 'number' ? formatBenchmarkMetric(value, key) : value,
+	                        name,
+	                      ];
+	                    }}
+	                    contentStyle={benchmarkTooltipStyle}
+	                  />
+	                  {trendChartKeys.map((key, index) => (
+	                    <Line
+	                      key={`trend-line-${key}`}
+	                      yAxisId={percentRatioKeys.has(key) ? 'pct' : 'ratio'}
+	                      type="monotone"
                       dataKey={key}
                       name={ratioLabels[key]}
                       stroke={CHART_COLORS[index % CHART_COLORS.length]}
@@ -1890,18 +1925,19 @@ const BenchmarkingPage: React.FC = () => {
               <ResponsiveContainer width="100%" height="100%">
                 <ScatterChart margin={{ top: 10, right: 18, left: 0, bottom: 20 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                  <XAxis dataKey="debt" name="Deuda/EBITDA" tick={{ fontSize: 11, fill: '#64748b' }} label={{ value: 'Deuda/EBITDA', position: 'insideBottom', offset: -8, fill: '#64748b', fontSize: 11 }} />
-                  <YAxis dataKey="dscr" name="DSCR" tick={{ fontSize: 11, fill: '#64748b' }} label={{ value: 'DSCR', angle: -90, position: 'insideLeft', fill: '#64748b', fontSize: 11 }} />
+	                  <XAxis dataKey="debt" name="Deuda/EBITDA" tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={value => formatBenchmarkMetric(Number(value), 'debt_ebitda')} label={{ value: 'Deuda/EBITDA', position: 'insideBottom', offset: -8, fill: '#64748b', fontSize: 11 }} />
+	                  <YAxis dataKey="dscr" name="DSCR" tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={value => formatBenchmarkMetric(Number(value), 'dscr')} label={{ value: 'DSCR', angle: -90, position: 'insideLeft', fill: '#64748b', fontSize: 11 }} />
                   <ReferenceLine x={4} stroke="#f59e0b" strokeDasharray="4 4" />
                   <ReferenceLine y={1.2} stroke="#f59e0b" strokeDasharray="4 4" />
                   <Tooltip
                     cursor={{ strokeDasharray: '3 3' }}
-                    formatter={(value: any, name: any) => [
-                      typeof value === 'number' ? value.toLocaleString('es-MX', { maximumFractionDigits: 2 }) : value,
-                      name,
-                    ]}
-                    labelFormatter={(_label, payload) => payload?.[0]?.payload?.name || ''}
-                  />
+	                    formatter={(value: any, name: any) => [
+	                      typeof value === 'number' ? formatBenchmarkMetric(value, name === 'Deuda/EBITDA' ? 'debt_ebitda' : 'dscr') : value,
+	                      name,
+	                    ]}
+	                    labelFormatter={(_label, payload) => payload?.[0]?.payload?.name || ''}
+	                    contentStyle={benchmarkTooltipStyle}
+	                  />
                   <Scatter name="Segmentos" data={riskScatterData} fill="#4f46e5" />
                 </ScatterChart>
               </ResponsiveContainer>
@@ -1927,13 +1963,14 @@ const BenchmarkingPage: React.FC = () => {
                 <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
                 <XAxis type="number" domain={[0, 100]} tickFormatter={value => `${value}%`} tick={{ fontSize: 11, fill: '#64748b' }} />
                 <YAxis type="category" dataKey="shortRatio" tick={{ fontSize: 11, fill: '#64748b' }} width={120} />
-                <Tooltip
-                  formatter={(value: any, _name: any, item: any) => [
-                    `${Number(value).toLocaleString('es-MX', { maximumFractionDigits: 1 })}% (${item.payload.observations} obs.)`,
-                    'Cobertura',
-                  ]}
-                  labelFormatter={label => String(label)}
-                />
+	                <Tooltip
+	                  formatter={(value: any, _name: any, item: any) => [
+	                    `${Number(value).toLocaleString('es-MX', { maximumFractionDigits: 1 })}% (${item.payload.observations} obs.)`,
+	                    'Cobertura',
+	                  ]}
+	                  labelFormatter={label => String(label)}
+	                  contentStyle={benchmarkTooltipStyle}
+	                />
                 <Bar dataKey="coverage" radius={[0, 8, 8, 0]} fill="#06b6d4" />
               </BarChart>
             </ResponsiveContainer>

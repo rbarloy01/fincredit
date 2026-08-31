@@ -16,8 +16,12 @@ import ChartCard from './ChartCard';
 const C = { green: '#059669', amber: '#f59e0b', red: '#ef4444', indigo: '#4f46e5', cyan: '#06b6d4', slate: '#94a3b8' };
 const CLIENT_COLORS = ['#4f46e5', '#06b6d4', '#059669', '#f59e0b', '#ef4444'];
 const money = (v: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 0 }).format(v || 0);
-const moneyM = (v: number) => `$${((v || 0) / 1e6).toFixed(1)}M`;
-const pctS = (v: number) => `${((v || 0) * 100).toFixed(1)}%`;
+const moneyM = (v: number) => `${new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 1 }).format((v || 0) / 1e6)} M`;
+const moneyMillions = (v: number) => `${new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 1 }).format(v || 0)} M`;
+const pctS = (v: number) => `${((v || 0) * 100).toLocaleString('es-MX', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
+const pctPoint = (v: number) => `${(Number(v) || 0).toLocaleString('es-MX', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
+const intS = (v: number) => new Intl.NumberFormat('es-MX', { maximumFractionDigits: 0 }).format(Math.abs(Number(v) || 0));
+const tooltipStyle = { borderRadius: 12, borderColor: '#e2e8f0', boxShadow: '0 12px 30px rgba(15, 23, 42, 0.10)' };
 
 interface Props { tapes: LoanTape_DB[]; clientName?: string; }
 
@@ -72,7 +76,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
 
   // chart datasets
   const evoData = sel.map(s => ({ label: s.label, saldo: s.saldo, venPct: +(s.venPct * 100).toFixed(2) }));
-  const qualData = sel.map(s => ({ label: s.label, Vigente: +(s.vigPct * 100).toFixed(1), Atrasada: +(s.atrPct * 100).toFixed(1), Vencida: +(s.venPct * 100).toFixed(1) }));
+  const qualData = sel.map(s => ({ label: s.label, Vigente: +s.vigPct.toFixed(4), Atrasada: +s.atrPct.toFixed(4), Vencida: +s.venPct.toFixed(4) }));
   const hhiData = sel.map(s => ({ label: s.label, HHI: +s.hhi.toFixed(3), Top1: +(s.top1 * 100).toFixed(1) }));
   const rollData = mig.map(m => ({ label: m.label, Deteriorados: m.deteriorated, Curados: -m.cured }));
   const concData = [
@@ -205,9 +209,9 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
             <ComposedChart data={evoData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
               <XAxis dataKey="label" tick={{ fontSize: 11 }} />
-              <YAxis yAxisId="l" tickFormatter={v => `$${(v / 1e6).toFixed(0)}M`} tick={{ fontSize: 11 }} />
-              <YAxis yAxisId="r" orientation="right" tickFormatter={v => `${v}%`} tick={{ fontSize: 11 }} />
-              <Tooltip formatter={(v: any, n: any) => n === 'saldo' ? money(v) : `${v}%`} />
+              <YAxis yAxisId="l" tickFormatter={v => moneyM(Number(v))} tick={{ fontSize: 11 }} width={78} />
+              <YAxis yAxisId="r" orientation="right" tickFormatter={v => pctPoint(Number(v))} tick={{ fontSize: 11 }} width={58} />
+              <Tooltip contentStyle={tooltipStyle} formatter={(v: any, n: any) => n === 'saldo' ? money(Number(v)) : pctPoint(Number(v))} />
               <Bar yAxisId="l" dataKey="saldo" fill={C.indigo} radius={[3, 3, 0, 0]} name="Saldo" />
               <Line yAxisId="r" dataKey="venPct" stroke={C.red} strokeWidth={2.4} dot={{ r: 3 }} name="Vencida %" />
             </ComposedChart>
@@ -223,8 +227,8 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
               <BarChart data={qualData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }} stackOffset="expand">
                 <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
                 <XAxis dataKey="label" tick={{ fontSize: 11 }} />
-                <YAxis tickFormatter={v => `${(v * 100).toFixed(0)}%`} tick={{ fontSize: 11 }} />
-                <Tooltip formatter={(v: any) => `${v}%`} />
+                <YAxis tickFormatter={v => pctS(Number(v))} tick={{ fontSize: 11 }} width={58} />
+                <Tooltip contentStyle={tooltipStyle} formatter={(v: any) => pctS(Number(v))} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
                 <Bar dataKey="Vigente" stackId="q" fill={C.green} />
                 <Bar dataKey="Atrasada" stackId="q" fill={C.amber} />
@@ -260,9 +264,9 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
             <ResponsiveContainer>
               <BarChart data={concData} layout="vertical" margin={{ top: 8, right: 40, left: 8, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
-                <XAxis type="number" tickFormatter={v => `${v}%`} tick={{ fontSize: 11 }} />
+                <XAxis type="number" tickFormatter={v => pctPoint(Number(v))} tick={{ fontSize: 11 }} />
                 <YAxis type="category" dataKey="n" tick={{ fontSize: 11 }} width={48} />
-                <Tooltip formatter={(v: any) => `${v}%`} />
+                <Tooltip contentStyle={tooltipStyle} formatter={(v: any) => pctPoint(Number(v))} />
                 <Bar dataKey="pct" radius={[0, 4, 4, 0]} name="% portafolio">
                   {concData.map((d, i) => <Cell key={i} fill={d.pct > 50 ? C.red : d.pct > 30 ? C.amber : C.indigo} />)}
                 </Bar>
@@ -278,9 +282,9 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
               <ComposedChart data={hhiData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
                 <XAxis dataKey="label" tick={{ fontSize: 11 }} />
-                <YAxis yAxisId="l" tick={{ fontSize: 11 }} />
-                <YAxis yAxisId="r" orientation="right" tickFormatter={v => `${v}%`} tick={{ fontSize: 11 }} />
-                <Tooltip />
+                <YAxis yAxisId="l" tick={{ fontSize: 11 }} tickFormatter={v => Number(v).toLocaleString('es-MX', { maximumFractionDigits: 3 })} width={54} />
+                <YAxis yAxisId="r" orientation="right" tickFormatter={v => pctPoint(Number(v))} tick={{ fontSize: 11 }} width={58} />
+                <Tooltip contentStyle={tooltipStyle} formatter={(v: any, n: any) => n === 'Top-1 %' ? pctPoint(Number(v)) : Number(v).toLocaleString('es-MX', { maximumFractionDigits: 3 })} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
                 <Line yAxisId="l" dataKey="HHI" stroke={C.indigo} strokeWidth={2.2} dot={{ r: 2 }} />
                 <Line yAxisId="r" dataKey="Top1" stroke={C.cyan} strokeWidth={2.2} dot={{ r: 2 }} name="Top-1 %" />
@@ -296,8 +300,8 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
               <BarChart data={rollData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }} stackOffset="sign">
                 <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
                 <XAxis dataKey="label" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} />
-                <Tooltip formatter={(v: any) => Math.abs(v)} />
+                <YAxis tick={{ fontSize: 11 }} tickFormatter={v => intS(Number(v))} width={44} />
+                <Tooltip contentStyle={tooltipStyle} formatter={(v: any) => intS(Number(v))} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
                 <Bar dataKey="Deteriorados" fill={C.red} stackId="s" radius={[3, 3, 0, 0]} />
                 <Bar dataKey="Curados" fill={C.green} stackId="s" radius={[0, 0, 3, 3]} />
@@ -313,8 +317,8 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
               <LineChart data={cliData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
                 <XAxis dataKey="label" tick={{ fontSize: 11 }} />
-                <YAxis tickFormatter={v => `$${v}M`} tick={{ fontSize: 11 }} />
-                <Tooltip formatter={(v: any) => `$${v}M`} />
+                <YAxis tickFormatter={v => moneyMillions(Number(v))} tick={{ fontSize: 11 }} width={72} />
+                <Tooltip contentStyle={tooltipStyle} formatter={(v: any) => moneyMillions(Number(v))} />
                 <Legend wrapperStyle={{ fontSize: 10 }} />
                 {data.topClients.map((c, i) => <Line key={c} dataKey={c} stroke={CLIENT_COLORS[i % CLIENT_COLORS.length]} strokeWidth={2} dot={false} connectNulls name={c.length > 16 ? c.slice(0, 16) + '…' : c} />)}
               </LineChart>
@@ -330,8 +334,8 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
             <BarChart data={vintData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
               <XAxis dataKey="cohort" tick={{ fontSize: 11 }} />
-              <YAxis tickFormatter={v => `$${v}M`} tick={{ fontSize: 11 }} />
-              <Tooltip formatter={(v: any) => `$${v}M`} />
+              <YAxis tickFormatter={v => moneyMillions(Number(v))} tick={{ fontSize: 11 }} width={72} />
+              <Tooltip contentStyle={tooltipStyle} formatter={(v: any) => moneyMillions(Number(v))} />
               <Legend wrapperStyle={{ fontSize: 11 }} />
               <Bar dataKey="Vigente" stackId="v" fill={C.green} />
               <Bar dataKey="Atrasada" stackId="v" fill={C.amber} />

@@ -41,16 +41,35 @@ const fmtMoney = (value: number) => new Intl.NumberFormat('es-MX', {
   currency: 'MXN',
   maximumFractionDigits: 0,
 }).format(value || 0);
+const fmtMoneyAxis = (value: number) => new Intl.NumberFormat('es-MX', {
+  style: 'currency',
+  currency: 'MXN',
+  notation: 'compact',
+  maximumFractionDigits: 1,
+}).format(value || 0);
+const fmtNumber = (value: number) => new Intl.NumberFormat('es-MX', { maximumFractionDigits: 2 }).format(value || 0);
+const tooltipStyle = { borderRadius: 12, borderColor: '#e2e8f0', boxShadow: '0 12px 30px rgba(15, 23, 42, 0.10)' };
 
 function formatBlockValue(value: any, format?: string) {
   if (format === 'money') return fmtMoney(Number(value) || 0);
-  if (format === 'pct') return `${((Number(value) || 0) * 100).toFixed(1)}%`;
-  if (format === 'number') return new Intl.NumberFormat('es-MX', { maximumFractionDigits: 2 }).format(Number(value) || 0);
+  if (format === 'pct') return `${((Number(value) || 0) * 100).toLocaleString('es-MX', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
+  if (format === 'number') return fmtNumber(Number(value) || 0);
   return String(value ?? '—');
+}
+
+function formatAxisValue(value: any, format?: string) {
+  const numeric = Number(value) || 0;
+  if (format === 'money') return fmtMoneyAxis(numeric);
+  if (format === 'pct') return formatBlockValue(numeric, 'pct');
+  return fmtNumber(numeric);
 }
 
 const LoanTapeWorkspaceBlockView: React.FC<Props> = ({ item, onDelete, onTypeChange }) => {
   const series = item.series || [];
+  const hasMoney = series.some(s => s.format === 'money');
+  const hasPct = series.some(s => s.format === 'pct');
+  const hasNumber = series.some(s => !s.format || s.format === 'number');
+  const axisFor = (format?: string) => format === 'money' ? 'money' : format === 'pct' ? 'pct' : 'number';
   const tableColumns: LoanTapeBlockColumn[] = item.columns
     || Object.keys(item.data[0] || {}).map(key => ({ key, label: key }));
   const chartTypes: Array<{ type: LoanTapeBlockType; icon: React.ReactNode }> = [
@@ -120,22 +139,26 @@ const LoanTapeWorkspaceBlockView: React.FC<Props> = ({ item, onDelete, onTypeCha
           <div className="h-80">
             <ResponsiveContainer width="100%" height="100%">
               {item.type === 'bar' ? (
-                <BarChart data={item.data} margin={{ top: 10, right: 10, left: 10, bottom: 35 }}>
+                <BarChart data={item.data} margin={{ top: 10, right: hasPct ? 18 : 10, left: 10, bottom: 35 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                   <XAxis dataKey={item.xKey || 'name'} angle={-20} textAnchor="end" height={65} tick={{ fontSize: 10 }} />
-                  <YAxis tick={{ fontSize: 10 }} tickFormatter={value => series[0]?.format === 'money' ? `${Math.round(value / 1000)}k` : String(value)} />
-                  <Tooltip formatter={(value: any, name: any) => [formatBlockValue(value, series.find(s => s.key === name)?.format), series.find(s => s.key === name)?.label || name]} />
+                  <YAxis yAxisId="money" hide={!hasMoney} tick={{ fontSize: 10 }} tickFormatter={value => formatAxisValue(value, 'money')} width={74} />
+                  <YAxis yAxisId="pct" orientation="right" hide={!hasPct} tick={{ fontSize: 10 }} tickFormatter={value => formatAxisValue(value, 'pct')} width={58} />
+                  <YAxis yAxisId="number" orientation={hasMoney || hasPct ? 'right' : 'left'} hide={!hasNumber} tick={{ fontSize: 10 }} tickFormatter={value => formatAxisValue(value, 'number')} width={58} />
+                  <Tooltip contentStyle={tooltipStyle} formatter={(value: any, name: any) => [formatBlockValue(value, series.find(s => s.key === name)?.format), series.find(s => s.key === name)?.label || name]} />
                   <Legend />
-                  {series.map(s => <Bar key={s.key} dataKey={s.key} name={s.label} fill={s.color} radius={[5, 5, 0, 0]} />)}
+                  {series.map(s => <Bar key={s.key} yAxisId={axisFor(s.format)} dataKey={s.key} name={s.label} fill={s.color} radius={[5, 5, 0, 0]} />)}
                 </BarChart>
               ) : (
-                <LineChart data={item.data} margin={{ top: 10, right: 10, left: 10, bottom: 15 }}>
+                <LineChart data={item.data} margin={{ top: 10, right: hasPct ? 18 : 10, left: 10, bottom: 15 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                   <XAxis dataKey={item.xKey || 'name'} tick={{ fontSize: 10 }} />
-                  <YAxis tick={{ fontSize: 10 }} />
-                  <Tooltip formatter={(value: any, name: any) => [formatBlockValue(value, series.find(s => s.key === name)?.format), series.find(s => s.key === name)?.label || name]} />
+                  <YAxis yAxisId="money" hide={!hasMoney} tick={{ fontSize: 10 }} tickFormatter={value => formatAxisValue(value, 'money')} width={74} />
+                  <YAxis yAxisId="pct" orientation="right" hide={!hasPct} tick={{ fontSize: 10 }} tickFormatter={value => formatAxisValue(value, 'pct')} width={58} />
+                  <YAxis yAxisId="number" orientation={hasMoney || hasPct ? 'right' : 'left'} hide={!hasNumber} tick={{ fontSize: 10 }} tickFormatter={value => formatAxisValue(value, 'number')} width={58} />
+                  <Tooltip contentStyle={tooltipStyle} formatter={(value: any, name: any) => [formatBlockValue(value, series.find(s => s.key === name)?.format), series.find(s => s.key === name)?.label || name]} />
                   <Legend />
-                  {series.map(s => <Line key={s.key} type="monotone" dataKey={s.key} name={s.label} stroke={s.color} strokeWidth={3} dot={{ r: 3 }} />)}
+                  {series.map(s => <Line key={s.key} yAxisId={axisFor(s.format)} type="monotone" dataKey={s.key} name={s.label} stroke={s.color} strokeWidth={3} dot={{ r: 3 }} />)}
                 </LineChart>
               )}
             </ResponsiveContainer>
@@ -148,7 +171,7 @@ const LoanTapeWorkspaceBlockView: React.FC<Props> = ({ item, onDelete, onTypeCha
                 <Pie data={item.data} dataKey={series[0]?.key || 'balance'} nameKey={item.xKey || 'name'} innerRadius={55} outerRadius={105} paddingAngle={2}>
                   {item.data.map((_, index) => <Cell key={index} fill={CHART_COLORS[index % CHART_COLORS.length]} />)}
                 </Pie>
-                <Tooltip formatter={(value: any) => formatBlockValue(value, series[0]?.format)} />
+                <Tooltip contentStyle={tooltipStyle} formatter={(value: any) => formatBlockValue(value, series[0]?.format)} />
                 <Legend />
               </PieChart>
             </ResponsiveContainer>

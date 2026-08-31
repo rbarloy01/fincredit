@@ -255,7 +255,7 @@ export function importLoanTapeSheets(sheets: SheetInput[], fileName: string, opt
     }
     if (profile.unmappedCriticalFields.length) {
       severity = severity === 'ok' ? 'warning' : severity;
-      messages.push(`⚠ Campos críticos sin mapear: ${profile.unmappedCriticalFields.join(', ')}.`);
+      messages.push(`Campos sin mapear que limitan módulos específicos: ${profile.unmappedCriticalFields.join(', ')}.`);
     }
     if (allStd.length && profile.validationCount > allStd.length * 0.5) {
       severity = severity === 'ok' ? 'warning' : severity;

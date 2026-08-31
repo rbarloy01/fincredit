@@ -35,8 +35,41 @@ export interface LoanTapeExportContext {
 }
 
 type Severity = 'high' | 'medium' | 'low';
+type CapabilityStatus = 'available' | 'partial' | 'blocked';
 
 const CRITICAL_FIELDS: Array<keyof StandardLoan> = ['loan_id', 'client', 'amount', 'outstanding_balance', 'interest_rate', 'loan_type', 'days_overdue', 'start_date', 'end_date'];
+const PROFILE_FIELDS: Array<keyof StandardLoan> = ['loan_id', 'client', 'amount', 'outstanding_balance', 'interest_rate', 'loan_status', 'loan_type', 'days_overdue', 'start_date', 'end_date', 'currency', 'industry', 'state', 'file_date'];
+const BASE_ANALYSIS_FIELD: keyof StandardLoan = 'outstanding_balance';
+const ROW_VALIDATION_FIELDS: Array<keyof StandardLoan> = ['outstanding_balance', 'loan_id', 'client', 'days_overdue'];
+
+const FIELD_IMPACT: Record<keyof StandardLoan, string> = {
+  loan_id: 'Limita comparativos entre cortes, duplicados y altas/bajas.',
+  client: 'Limita concentración por acreditado; saldos y mora siguen disponibles.',
+  amount: 'Limita utilización contra línea original; saldos y concentración siguen disponibles.',
+  outstanding_balance: 'Sin saldo no se puede medir cartera, concentración, DPD ponderado ni buckets.',
+  interest_rate: 'Limita tasa ponderada y lectura de precio de riesgo.',
+  loan_status: 'Se puede inferir estatus con DPD si existe; si no, queda como dato descriptivo.',
+  start_date: 'Limita vintage, plazo original y altas esperadas.',
+  end_date: 'Limita vencimientos, pagos esperados y créditos vencidos activos.',
+  loan_type: 'Limita segmentación por producto.',
+  days_overdue: 'Limita mora, cartera atrasada/vencida y DPD ponderado; concentración por saldo sigue disponible.',
+  currency: 'Se asume MXN si falta.',
+  industry: 'Limita concentración por industria.',
+  state: 'Limita concentración por estado.',
+  file_date: 'Limita comparativos temporales si tampoco viene fecha en el nombre del archivo.',
+};
+
+const ANALYSIS_REQUIREMENTS = [
+  { key: 'portfolio_balance', label: 'Saldo total y tamaño de cartera', required: ['outstanding_balance'] as Array<keyof StandardLoan>, partial: [] as Array<keyof StandardLoan> },
+  { key: 'dpd_quality', label: 'Mora, buckets DPD y cartera vencida', required: ['outstanding_balance', 'days_overdue'] as Array<keyof StandardLoan>, partial: [] as Array<keyof StandardLoan> },
+  { key: 'client_concentration', label: 'Concentración por cliente', required: ['outstanding_balance', 'client'] as Array<keyof StandardLoan>, partial: ['loan_id'] as Array<keyof StandardLoan> },
+  { key: 'loan_concentration', label: 'Top créditos y buckets por saldo', required: ['outstanding_balance'] as Array<keyof StandardLoan>, partial: ['loan_id'] as Array<keyof StandardLoan> },
+  { key: 'product_mix', label: 'Cartera por producto', required: ['outstanding_balance', 'loan_type'] as Array<keyof StandardLoan>, partial: [] as Array<keyof StandardLoan> },
+  { key: 'weighted_rate', label: 'Tasa ponderada por saldo', required: ['outstanding_balance', 'interest_rate'] as Array<keyof StandardLoan>, partial: [] as Array<keyof StandardLoan> },
+  { key: 'maturity_vintage', label: 'Vencimientos, plazo y vintage', required: ['start_date', 'end_date'] as Array<keyof StandardLoan>, partial: ['outstanding_balance'] as Array<keyof StandardLoan> },
+  { key: 'period_comparison', label: 'Comparativo vs corte anterior', required: ['loan_id', 'file_date'] as Array<keyof StandardLoan>, partial: ['outstanding_balance', 'days_overdue'] as Array<keyof StandardLoan> },
+  { key: 'geo_industry', label: 'Concentración por estado e industria', required: ['outstanding_balance'] as Array<keyof StandardLoan>, partial: ['state', 'industry'] as Array<keyof StandardLoan> },
+];
 
 const SYNONYMS: Record<keyof StandardLoan, string[]> = {
   loan_id: ['contrato', 'loan id', 'loan number', 'loan no', 'folio', 'numero credito', 'numero de credito', 'no credito', 'no contrato', 'id prestamo', 'id credito', 'operacion', 'cuenta', 'no cuenta', 'referencia'],
@@ -458,16 +491,22 @@ function validate(rows: StandardLoan[]) {
 
   rows.forEach((r, index) => {
     const loanId = r.loan_id || `fila ${index + 1}`;
-    CRITICAL_FIELDS.forEach(field => {
+    ROW_VALIDATION_FIELDS.forEach(field => {
       if (r[field] === null || r[field] === undefined || r[field] === '') {
-        issues.push({ loan_id: loanId, rule_id: 'missing', field, message: `Campo requerido sin mapear o vacío: ${field}`, severity: 'high' });
+        issues.push({
+          loan_id: loanId,
+          rule_id: 'missing',
+          field,
+          message: `Campo necesario para ciertos análisis sin mapear o vacío: ${field}`,
+          severity: field === BASE_ANALYSIS_FIELD ? 'high' : 'medium',
+        });
       }
     });
-    if ((r.amount || 0) <= 0) issues.push({ loan_id: loanId, rule_id: 'amount_positive', field: 'amount', message: 'amount debe ser mayor a cero', severity: 'high' });
-    if ((r.outstanding_balance || 0) < 0) issues.push({ loan_id: loanId, rule_id: 'balance_non_negative', field: 'outstanding_balance', message: 'outstanding_balance no puede ser negativo', severity: 'high' });
+    if (r.amount !== null && r.amount <= 0) issues.push({ loan_id: loanId, rule_id: 'amount_positive', field: 'amount', message: 'amount debe ser mayor a cero cuando viene informado', severity: 'medium' });
+    if (r.outstanding_balance !== null && r.outstanding_balance < 0) issues.push({ loan_id: loanId, rule_id: 'balance_non_negative', field: 'outstanding_balance', message: 'outstanding_balance no puede ser negativo', severity: 'high' });
     if (r.amount !== null && r.outstanding_balance !== null && r.outstanding_balance > r.amount) issues.push({ loan_id: loanId, rule_id: 'balance_lte_amount', field: 'outstanding_balance', message: 'outstanding_balance excede amount', severity: 'high' });
-    if ((r.interest_rate || 0) < 0) issues.push({ loan_id: loanId, rule_id: 'rate_non_negative', field: 'interest_rate', message: 'interest_rate no puede ser negativa', severity: 'high' });
-    if ((r.days_overdue || 0) < 0) issues.push({ loan_id: loanId, rule_id: 'dpd_non_negative', field: 'days_overdue', message: 'days_overdue no puede ser negativo', severity: 'high' });
+    if (r.interest_rate !== null && r.interest_rate < 0) issues.push({ loan_id: loanId, rule_id: 'rate_non_negative', field: 'interest_rate', message: 'interest_rate no puede ser negativa', severity: 'medium' });
+    if (r.days_overdue !== null && r.days_overdue < 0) issues.push({ loan_id: loanId, rule_id: 'dpd_non_negative', field: 'days_overdue', message: 'days_overdue no puede ser negativo', severity: 'high' });
     if (r.start_date && r.end_date && r.end_date <= r.start_date) issues.push({ loan_id: loanId, rule_id: 'date_order', field: 'end_date', message: 'end_date debe ser posterior a start_date', severity: 'high' });
     if (r.loan_id) {
       const key = `${r.file_date || 'no_date'}::${r.loan_id}`;
@@ -480,28 +519,60 @@ function validate(rows: StandardLoan[]) {
   return issues;
 }
 
+function fieldCoverage(rows: StandardLoan[], mappingReport: MappingNote[], field: keyof StandardLoan) {
+  const mapped = new Set(mappingReport.map(m => m.target_term)).has(field) || (field === 'currency' && rows.some(r => !!r.currency));
+  const presentRows = rows.filter(r => r[field] !== null && r[field] !== undefined && r[field] !== '').length;
+  const missingRows = rows.length - presentRows;
+  const missingPct = rows.length ? missingRows / rows.length : 1;
+  return { field, mapped, presentRows, missingRows, missingPct, usablePct: rows.length ? presentRows / rows.length : 0 };
+}
+
 function missingFieldProfile(rows: StandardLoan[], mappingReport: MappingNote[] = []) {
-  const mapped = new Set(mappingReport.map(m => m.target_term));
   return CRITICAL_FIELDS.map(field => {
-    const missingRows = rows.filter(r => r[field] === null || r[field] === undefined || r[field] === '').length;
+    const coverage = fieldCoverage(rows, mappingReport, field);
+    const missingPct = coverage.missingPct;
+    const missingRows = coverage.missingRows;
+    const isBase = field === BASE_ANALYSIS_FIELD;
+    const isCore = field === 'loan_id' || field === 'client' || field === 'days_overdue';
+    const severity: Severity = isBase
+      ? (!coverage.mapped || missingPct > 0.2 ? 'high' : missingRows > 0 ? 'medium' : 'low')
+      : isCore
+        ? (missingPct > 0.8 ? 'high' : !coverage.mapped || missingRows > 0 ? 'medium' : 'low')
+        : (!coverage.mapped || missingPct > 0.5 ? 'medium' : missingRows > 0 ? 'medium' : 'low');
     return {
       field,
-      mapped: mapped.has(field),
+      mapped: coverage.mapped,
       missingRows,
-      missingPct: rows.length ? missingRows / rows.length : 1,
-      severity: !mapped.has(field) || missingRows / Math.max(rows.length, 1) > 0.2 ? 'high' as Severity : missingRows > 0 ? 'medium' as Severity : 'low' as Severity,
-      impact: field === 'loan_id' ? 'No se pueden comparar meses ni detectar duplicados.'
-        : field === 'outstanding_balance' ? 'No se puede medir saldo, concentración, DPD ponderado ni aforo.'
-        : field === 'days_overdue' ? 'No se puede clasificar cartera vigente/atrasada/vencida.'
-        : field === 'amount' ? 'No se puede comparar línea original contra saldo actual.'
-        : field === 'interest_rate' ? 'No se puede perfilar tasa ni precio de riesgo.'
-        : field === 'loan_type' ? 'No se puede segmentar por producto.'
-        : field === 'client' ? 'No se puede medir concentración por acreditado.'
-        : 'Limita análisis de vintage, vencimiento y cambios esperados.',
+      missingPct,
+      severity,
+      impact: FIELD_IMPACT[field],
     };
   }).sort((a, b) => {
     const rank = { high: 0, medium: 1, low: 2 };
     return rank[a.severity] - rank[b.severity] || b.missingPct - a.missingPct;
+  });
+}
+
+function buildAnalysisCoverage(rows: StandardLoan[], mappingReport: MappingNote[] = []) {
+  const coverage = Object.fromEntries(PROFILE_FIELDS.map(field => [field, fieldCoverage(rows, mappingReport, field)])) as Record<keyof StandardLoan, ReturnType<typeof fieldCoverage>>;
+  const hasUsable = (field: keyof StandardLoan, minCoverage = 0.5) => coverage[field]?.usablePct >= minCoverage;
+
+  return ANALYSIS_REQUIREMENTS.map(item => {
+    const missingRequired = item.required.filter(field => !hasUsable(field, field === BASE_ANALYSIS_FIELD ? 0.8 : 0.5));
+    const missingPartial = item.partial.filter(field => !hasUsable(field, 0.5));
+    const status: CapabilityStatus = missingRequired.length
+      ? 'blocked'
+      : missingPartial.length
+        ? 'partial'
+        : 'available';
+    const missing = [...missingRequired, ...missingPartial];
+    return {
+      key: item.key,
+      label: item.label,
+      status,
+      missing,
+      reason: missing.length ? `Limitado por: ${missing.join(', ')}` : 'Listo con los campos actuales.',
+    };
   });
 }
 
@@ -513,14 +584,24 @@ export function buildLoanTapeDataProfile(rows: StandardLoan[], mappingReport: Ma
   const mappedFields = Array.from(new Set(mappingReport.map(m => m.target_term)));
   const highMissing = missingFields.filter(f => f.severity === 'high');
   const validation = validate(rows);
+  const highValidationCount = validation.filter(v => v.severity === 'high').length;
+  const mediumValidationCount = validation.filter(v => v.severity === 'medium').length;
   const duplicateCount = validation.filter(v => v.rule_id === 'duplicate_loan_id').length;
+  const analysisCoverage = buildAnalysisCoverage(rows, mappingReport);
+  const availableAnalyses = analysisCoverage.filter(item => item.status !== 'blocked');
+  const blockedAnalyses = analysisCoverage.filter(item => item.status === 'blocked');
+  const fullAnalyses = analysisCoverage.filter(item => item.status === 'available');
+  const partialAnalyses = analysisCoverage.filter(item => item.status === 'partial');
+  const capabilityScore = totalRows
+    ? 35 + (fullAnalyses.length / ANALYSIS_REQUIREMENTS.length) * 45 + (partialAnalyses.length / ANALYSIS_REQUIREMENTS.length) * 25
+    : 0;
+  const qualityPenalty = Math.min(18, highValidationCount / Math.max(totalRows, 1) * 100)
+    + Math.min(8, mediumValidationCount / Math.max(totalRows, 1) * 20)
+    + highMissing.filter(f => f.field === BASE_ANALYSIS_FIELD).length * 20;
   const readinessScore = Math.max(0, Math.min(100, Math.round(
-    100
-    - highMissing.length * 12
-    - missingFields.filter(f => f.severity === 'medium').length * 5
-    - Math.min(25, validation.length / Math.max(totalRows, 1) * 100)
+    capabilityScore - qualityPenalty
   )));
-  const canAnalyze = highMissing.length === 0 || (mappedFields.includes('outstanding_balance') && mappedFields.includes('days_overdue'));
+  const canAnalyze = totalRows > 0 && availableAnalyses.length > 0;
   const nextActions = [
     ...highMissing.slice(0, 5).map(f => `Mapear o completar ${f.field}: ${f.impact}`),
     ...(duplicateCount ? [`Resolver ${duplicateCount} loan_id duplicado(s) antes de comparar periodos.`] : []),
@@ -536,7 +617,11 @@ export function buildLoanTapeDataProfile(rows: StandardLoan[], mappingReport: Ma
     mappedFields,
     unmappedCriticalFields: missingFields.filter(f => !f.mapped).map(f => f.field),
     missingFields,
+    analysisCoverage,
+    availableAnalyses,
+    blockedAnalyses,
     validationCount: validation.length,
+    highValidationCount,
     duplicateCount,
     nextActions,
   };
@@ -621,7 +706,7 @@ export function answerLoanTapeQuestion(question: string, rows: StandardLoan[], a
     return `${lines.join('\n')}\n\nDetalle más relevante:\n${answerRows([...(a.dpd_deterioration || []), ...(a.new_loans || [])].slice(0, 10), ['loan_id', 'days_overdue_prev', 'days_overdue_latest', 'outstanding_balance', 'category'])}`;
   }
   if (/(producto|tipo|segmento)/.test(q)) {
-    const productRows = loanTypeProfile(latest).slice(0, 10).map(r => ({ ...r, balance: fmtMoney(r.balance), pct: fmtPct(r.pct), avg_interest_rate: r.avg_interest_rate?.toFixed(2) ?? 'N/D', avg_days_overdue: r.avg_days_overdue?.toFixed(1) ?? 'N/D' }));
+    const productRows = loanTypeProfile(latest).slice(0, 10).map(r => ({ ...r, balance: fmtMoney(r.balance), pct: fmtPct(r.pct), avg_interest_rate: r.avg_interest_rate === null ? 'N/D' : fmtPct(r.avg_interest_rate), avg_days_overdue: r.avg_days_overdue?.toFixed(1) ?? 'N/D' }));
     return `Perfil por producto:\n${answerRows(productRows, ['name', 'count', 'balance', 'pct', 'avg_interest_rate', 'avg_days_overdue'])}`;
   }
   return analysis?.executiveSummary || `Resumen: ${latest.length} registros activos, saldo ${fmtMoney(total)}. Preguntas útiles: "qué falta", "top concentración", "mora", "cambios vs mes anterior", "por producto".`;
@@ -800,7 +885,7 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
       { name: 'Concentracion max cliente', latestValue: fmtPct(maxClientPct), previousValue: previousRows.length ? fmtPct(previousMaxClientPct) : undefined, change: fmtChange(maxClientPct, previousMaxClientPct, 'pct'), trend: trend(maxClientPct, previousMaxClientPct, true), status: maxClientPct > 0.2 ? 'critical' : maxClientPct > 0.1 ? 'warning' : 'good', congruent: true },
       { name: 'Concentracion Top 10 creditos', latestValue: fmtPct(top10Pct), previousValue: previousRows.length ? fmtPct(previousTop10Pct) : undefined, change: fmtChange(top10Pct, previousTop10Pct, 'pct'), trend: trend(top10Pct, previousTop10Pct, true), status: top10Pct > 0.75 ? 'critical' : top10Pct > 0.5 ? 'warning' : 'good', congruent: true },
       { name: 'DPD ponderado por saldo', latestValue: weightedDpd === null ? 'N/D' : `${weightedDpd.toFixed(1)} dias`, previousValue: previousWeightedDpd === null ? undefined : `${previousWeightedDpd.toFixed(1)} dias`, change: weightedDpd !== null && previousWeightedDpd !== null ? fmtChange(weightedDpd, previousWeightedDpd, 'number') : undefined, trend: weightedDpd !== null && previousWeightedDpd !== null ? trend(weightedDpd, previousWeightedDpd, true) : 'stable', status: weightedDpd !== null && weightedDpd > 60 ? 'critical' : weightedDpd !== null && weightedDpd > 30 ? 'warning' : 'good', congruent: true },
-      { name: 'Tasa ponderada por saldo', latestValue: weightedRate === null ? 'N/D' : `${weightedRate.toFixed(2)}%`, previousValue: previousWeightedRate === null ? undefined : `${previousWeightedRate.toFixed(2)}%`, change: weightedRate !== null && previousWeightedRate !== null ? `${weightedRate - previousWeightedRate >= 0 ? '+' : ''}${(weightedRate - previousWeightedRate).toFixed(2)} pp` : undefined, trend: weightedRate !== null && previousWeightedRate !== null ? trend(weightedRate, previousWeightedRate) : 'stable', status: 'good', congruent: true },
+      { name: 'Tasa ponderada por saldo', latestValue: weightedRate === null ? 'N/D' : fmtPct(weightedRate), previousValue: previousWeightedRate === null ? undefined : fmtPct(previousWeightedRate), change: weightedRate !== null && previousWeightedRate !== null ? `${weightedRate - previousWeightedRate >= 0 ? '+' : ''}${((weightedRate - previousWeightedRate) * 100).toFixed(1)} pp` : undefined, trend: weightedRate !== null && previousWeightedRate !== null ? trend(weightedRate, previousWeightedRate) : 'stable', status: 'good', congruent: true },
     ],
     findings,
     congruencyChecks: [],

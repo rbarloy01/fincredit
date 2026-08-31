@@ -560,12 +560,12 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                   <p className="text-xs text-slate-500 mt-0.5">
                     {new Date(tape.uploadDate).toLocaleDateString('es-MX')} · {rawFileOnly ? 'archivo guardado sin filas analíticas' : `${rows.length} registros`}
                   </p>
-                  {imp && (
-                    <p className={`text-[11px] font-bold mt-0.5 truncate ${imp.severity === 'blocker' ? 'text-rose-600' : imp.severity === 'warning' ? 'text-amber-600' : 'text-emerald-600'}`}
-                       title={(imp.messages || []).join('\n')}>
-                      {imp.severity === 'blocker' ? '🔴' : imp.severity === 'warning' ? '🟠' : '🟢'} {(imp.messages || [])[0]}
-                    </p>
-                  )}
+	                  {imp && (
+	                    <p className={`text-[11px] font-bold mt-0.5 truncate ${imp.severity === 'blocker' && rows.length === 0 ? 'text-rose-600' : imp.severity === 'blocker' || imp.severity === 'warning' ? 'text-amber-600' : 'text-emerald-600'}`}
+	                       title={(imp.messages || []).join('\n')}>
+	                      {imp.severity === 'blocker' && rows.length > 0 ? 'Análisis parcial disponible · ' : ''}{(imp.messages || [])[0]}
+	                    </p>
+	                  )}
                 </div>
                 <div className="flex items-center gap-3">
                   {analysis && <StatusBadge status={analysis.overallStatus} />}
@@ -616,9 +616,18 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                         </div>
                         <p className="text-xs text-slate-300 mt-3 leading-relaxed">
                           {profile.canAnalyze
-                            ? 'El tape se puede analizar, pero revisa huecos antes de tomar decisiones de crédito.'
-                            : 'Faltan campos base; el análisis puede verse bonito pero no sería confiable todavía.'}
+                            ? `${profile.availableAnalyses.length} análisis disponible${profile.availableAnalyses.length !== 1 ? 's' : ''}; los faltantes solo bloquean módulos puntuales.`
+                            : 'Falta saldo u otra base mínima; todavía no hay análisis confiable.'}
                         </p>
+                        {profile.availableAnalyses.length > 0 && (
+                          <div className="mt-3 flex flex-wrap gap-1.5">
+                            {profile.availableAnalyses.slice(0, 4).map(item => (
+                              <span key={item.key} className={`rounded-full px-2 py-1 text-[10px] font-black uppercase tracking-wide ${item.status === 'available' ? 'bg-emerald-400/20 text-emerald-100' : 'bg-amber-400/20 text-amber-100'}`}>
+                                {item.label}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
                       <div className="p-5 border-b xl:border-b-0 xl:border-r border-white/10">
                         <p className="text-xs font-black uppercase tracking-widest text-slate-300 mb-3">Qué falta realmente</p>
@@ -781,7 +790,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                         { key: 'count', label: 'Créditos' },
                         { key: 'balance', label: 'Saldo', format: fmtMoney },
                         { key: 'pct', label: '%', format: fmtPct },
-                        { key: 'avg_interest_rate', label: 'Tasa Prom.', format: fmtNum },
+                        { key: 'avg_interest_rate', label: 'Tasa Prom.', format: fmtPct },
                         { key: 'avg_days_overdue', label: 'DPD Prom.', format: fmtNum },
                       ]}
                     />
@@ -1067,16 +1076,27 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                       </div>
                       <StatusBadge status={profile.readinessScore >= 80 ? 'good' : profile.readinessScore >= 55 ? 'warning' : 'critical'} />
                     </div>
-                    <SmallDataTable
-                      title="Campos críticos faltantes"
-                      rows={profile.missingFields.filter(f => f.severity !== 'low')}
+	                    <SmallDataTable
+	                      title="Campos que limitan análisis específicos"
+	                      rows={profile.missingFields.filter(f => f.severity !== 'low')}
                       columns={[
                         { key: 'field', label: 'Campo' },
                         { key: 'mapped', label: 'Mapeado', format: v => v ? 'Sí' : 'No' },
                         { key: 'missingPct', label: '% Vacío', format: v => fmtPct(v || 0) },
                         { key: 'impact', label: 'Impacto' },
                       ]}
-                    />
+	                    />
+	                    {profile.availableAnalyses.length > 0 && (
+	                      <SmallDataTable
+	                        title="Análisis disponibles con este archivo"
+	                        rows={profile.analysisCoverage}
+	                        columns={[
+	                          { key: 'label', label: 'Análisis' },
+	                          { key: 'status', label: 'Estado', format: v => v === 'available' ? 'Disponible' : v === 'partial' ? 'Parcial' : 'Bloqueado' },
+	                          { key: 'reason', label: 'Lectura' },
+	                        ]}
+	                      />
+	                    )}
                     {profile.nextActions.length > 0 && (
                       <div className="mt-4">
                         <p className="text-xs font-black text-slate-700 uppercase tracking-widest mb-2">Siguiente mejor acción</p>
