@@ -333,7 +333,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
       tapeType,
       // Store _standardized as the single source of truth; `rows` (raw preview) falls
       // back to it at read time — no duplicated payload.
-      extractedData: { _standardized: result.standardized, _mappingReport: result.mappingReport, _import: rec },
+      extractedData: { _standardized: result.standardized, _mappingReport: result.mappingReport, _import: rec, _summary: result.summary },
     });
   };
 

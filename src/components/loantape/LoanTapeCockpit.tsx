@@ -193,11 +193,11 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
         <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
           {[
             { k: 'Saldo', v: moneyM(focusPoint.saldo), d: kpiDelta(focusPoint.saldo, prevPoint?.saldo ?? null, false, n => moneyM(n)) },
-            { k: 'Vencida >90d', v: pctS(focusPoint.venPct), d: kpiDelta(focusPoint.venPct, prevPoint?.venPct ?? null, true, n => `${(n * 100).toFixed(1)}pp`) },
-            { k: 'Atrasada 1-90d', v: pctS(focusPoint.atrPct), d: kpiDelta(focusPoint.atrPct, prevPoint?.atrPct ?? null, true, n => `${(n * 100).toFixed(1)}pp`) },
-            { k: 'Créditos', v: `${focusPoint.creditos}`, d: kpiDelta(focusPoint.creditos, prevPoint?.creditos ?? null) },
-            { k: 'Concentración Top-1', v: pctS(focusPoint.top1), d: kpiDelta(focusPoint.top1, prevPoint?.top1 ?? null, true, n => `${(n * 100).toFixed(1)}pp`) },
-            { k: 'HHI', v: focusPoint.hhi.toFixed(3), d: kpiDelta(focusPoint.hhi, prevPoint?.hhi ?? null, true, n => n.toFixed(3)) },
+            { k: 'Vencida >90d', v: focusPoint.isSummary ? 'N/D' : pctS(focusPoint.venPct), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.venPct, prevPoint?.venPct ?? null, true, n => `${(n * 100).toFixed(1)}pp`) },
+            { k: 'Atrasada 1-90d', v: focusPoint.isSummary ? 'N/D' : pctS(focusPoint.atrPct), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.atrPct, prevPoint?.atrPct ?? null, true, n => `${(n * 100).toFixed(1)}pp`) },
+            { k: 'Créditos', v: focusPoint.isSummary ? 'N/D' : `${focusPoint.creditos}`, d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.creditos, prevPoint?.creditos ?? null) },
+            { k: 'Concentración Top-1', v: focusPoint.isSummary ? 'N/D' : pctS(focusPoint.top1), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.top1, prevPoint?.top1 ?? null, true, n => `${(n * 100).toFixed(1)}pp`) },
+            { k: 'HHI', v: focusPoint.isSummary ? 'N/D' : focusPoint.hhi.toFixed(3), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.hhi, prevPoint?.hhi ?? null, true, n => n.toFixed(3)) },
           ].map(t => (
             <div key={t.k} className="bg-white border border-slate-200 rounded-xl p-3">
               <p className="text-[10px] font-black uppercase tracking-wider text-slate-500">{t.k}</p>
@@ -273,8 +273,12 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
         </ChartCard>
 
         {/* Concentration cumulative at focus */}
-        <ChartCard title={`Concentración acumulada — ${focusPoint.label}`} subtitle="% del portafolio por Top-N clientes" fileName={`Concentracion_${clientName}`} captureId="conc" registerNode={registerNode}>
-          <div style={{ height: 240 }}>
+      <ChartCard title={`Concentración acumulada — ${focusPoint.label}`} subtitle="% del portafolio por Top-N clientes" fileName={`Concentracion_${clientName}`} captureId="conc" registerNode={registerNode}>
+          {focusPoint.isSummary ? (
+            <div className="flex h-60 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 px-6 text-center">
+              <p className="text-sm font-bold text-slate-500">Este corte es resumen agregado; no trae acreditados para calcular Top-N clientes.</p>
+            </div>
+          ) : <div style={{ height: 240 }}>
             <ResponsiveContainer>
               <BarChart data={concData} layout="vertical" margin={{ top: 8, right: 40, left: 8, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
@@ -286,7 +290,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
-          </div>
+          </div>}
         </ChartCard>
 
         {/* HHI over time */}

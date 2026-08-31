@@ -35,6 +35,7 @@ export interface CockpitPeriodPoint {
   hhi: number;
   top1: number; top3: number; top5: number; top10: number;
   runoff: number | null;   // (saldo - prevSaldo) / prevSaldo
+  isSummary: boolean;
 }
 
 export interface CockpitMigration {
@@ -154,26 +155,28 @@ export function buildCockpitData(tapes: LoanTape_DB[]): CockpitData {
 
   const series: CockpitPeriodPoint[] = periods.map((p, i) => {
     const rows = byPeriod(p);
+    const isSummary = rows.length > 0 && rows.every(row => row.source_granularity && row.source_granularity !== 'loan');
     const total = sum(rows);
     const cl = classifyBalances(rows);
     const dist = dpdDistribution(rows);
     const dpd = DPD_BUCKETS.map(b => dist.find(d => d.bucket === b)?.balance || 0);
     const dpdPct = dpd.map(v => (total ? v / total : 0));
-    const ct = cumTop(rows, [1, 3, 5, 10]);
+    const ct = isSummary ? { 1: 0, 3: 0, 5: 0, 10: 0 } : cumTop(rows, [1, 3, 5, 10]);
     const prev = i > 0 ? sum(byPeriod(periods[i - 1])) : null;
     return {
       period: p, label: labels[i],
       saldo: total,
-      creditos: rows.length,
-      clientes: new Set(rows.map(clientKey)).size,
+      creditos: isSummary ? 0 : rows.length,
+      clientes: isSummary ? 0 : new Set(rows.map(clientKey)).size,
       wa_rate: weightedAverage(rows, 'interest_rate'),
       vig: cl.vig, atr: cl.atr, ven: cl.ven, sinDato: cl.sinDato,
       vigPct: total ? cl.vig / total : 0, atrPct: total ? cl.atr / total : 0, venPct: total ? cl.ven / total : 0,
       dpd, dpdPct,
       over180: dpd[5] || 0,
-      hhi: hhiOf(rows),
+      hhi: isSummary ? 0 : hhiOf(rows),
       top1: ct[1], top3: ct[3], top5: ct[5], top10: ct[10],
       runoff: prev && prev > 0 ? (total - prev) / prev : null,
+      isSummary,
     };
   });
 

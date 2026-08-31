@@ -187,3 +187,53 @@ test('loan tape period selection uses cutoff date instead of upload date', () =>
   assert.equal(loanTapePeriodDate(textMonthCutoff as any), '2025-12-31');
   assert.equal(sortLoanTapesByPeriod([oldCutoffUploadedLater, newestCutoffUploadedEarlier] as any[])[0].id, 'newest-cutoff');
 });
+
+test('COFINE summarized breakdown imports product and state workflow without fake DPD', () => {
+  const summary: SheetInput = {
+    name: 'Mayo 2024',
+    rows: [
+      ['', '', ''],
+      ['Desglose de cartera ', '', ''],
+      ['Fecha: 31 de mayo de 2024', '', ''],
+      ['', '', ''],
+      ['Producto', 'Saldo', '%'],
+      ['C Cuenta Corriente ', ' 417,438,191 ', '43.0%'],
+      ['C Simple', ' 391,196,991 ', '40.3%'],
+      ['Total', ' 808,635,182 ', '83.3%'],
+      ['', '', ''],
+      ['Estado', 'Saldo', '%'],
+      ['Nuevo León', ' 543,061,461 ', '56.0%'],
+      ['Tamaulipas', ' 131,178,201 ', '13.5%'],
+      ['Total', ' 674,239,662 ', '69.5%'],
+    ],
+  };
+
+  const res = importLoanTapeSheets([summary], '240531 - Desglose Cartera - COFINE.xlsx');
+  const profile = buildLoanTapeDataProfile(res.standardized, res.mappingReport);
+  const analysis = analyzeLoanTapesLocally([{
+    id: 'summary',
+    clientId: 'c1',
+    name: 'COFINE resumen',
+    fileName: '240531 - Desglose Cartera - COFINE.xlsx',
+    tapeType: 'credito',
+    uploadDate: '2026-08-31',
+    extractedData: { _standardized: res.standardized, _mappingReport: res.mappingReport, _summary: res.summary },
+  } as any], 'summary');
+
+  assert.equal(res.reconciliation.severity, 'ok');
+  assert.equal(res.reconciliation.validationCount, 0);
+  assert.equal(res.summary?.granularity, 'product_summary');
+  assert.equal(res.summary?.by_state?.length, 2);
+  assert.equal(res.standardized.length, 2);
+  assert.equal(res.standardized[0].loan_type, 'C Cuenta Corriente');
+  assert.equal(res.standardized[0].days_overdue, null);
+  assert.equal(res.standardized[0].source_granularity, 'product_summary');
+  assert.equal(profile.canAnalyze, true);
+  assert.equal(profile.readinessScore, 100);
+  assert.equal(profile.highValidationCount, 0);
+  assert.ok(profile.availableAnalyses.some(item => item.key === 'product_mix'));
+  assert.ok(profile.blockedAnalyses.some(item => item.key === 'dpd_quality'));
+  assert.equal(analysis.metrics.find(item => item.name === 'Numero de creditos')?.latestValue, 'N/D');
+  assert.equal(analysis.metrics.find(item => item.name === 'DPD ponderado por saldo')?.latestValue, 'N/D');
+  assert.equal(analysis.concentrations.by_state?.[0]?.name, 'Nuevo León');
+});
