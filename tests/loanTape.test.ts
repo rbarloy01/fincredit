@@ -91,9 +91,10 @@ test('analysis stays available with optional fields missing and formats rates as
   const res = importLoanTapeSheets([partial], '20260831 COFINE');
   const profile = buildLoanTapeDataProfile(res.standardized, res.mappingReport);
   assert.equal(profile.canAnalyze, true);
-  assert.ok(profile.readinessScore >= 65);
+  assert.equal(profile.readinessScore, 100);
   assert.ok(profile.availableAnalyses.some(item => item.key === 'dpd_quality'));
   assert.ok(profile.blockedAnalyses.some(item => item.key === 'product_mix'));
+  assert.deepEqual(profile.unmappedCriticalFields, []);
 
   const analysis = analyzeLoanTapesLocally([{
     id: 'lt1',

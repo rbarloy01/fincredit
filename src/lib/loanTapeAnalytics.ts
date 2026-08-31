@@ -70,6 +70,7 @@ const ANALYSIS_REQUIREMENTS = [
   { key: 'period_comparison', label: 'Comparativo vs corte anterior', required: ['loan_id', 'file_date'] as Array<keyof StandardLoan>, partial: ['outstanding_balance', 'days_overdue'] as Array<keyof StandardLoan> },
   { key: 'geo_industry', label: 'Concentración por estado e industria', required: ['outstanding_balance'] as Array<keyof StandardLoan>, partial: ['state', 'industry'] as Array<keyof StandardLoan> },
 ];
+const CORE_ANALYSIS_KEYS = new Set(['portfolio_balance', 'dpd_quality', 'client_concentration', 'loan_concentration', 'weighted_rate', 'product_mix']);
 
 const SYNONYMS: Record<keyof StandardLoan, string[]> = {
   loan_id: ['contrato', 'loan id', 'loan number', 'loan no', 'folio', 'numero credito', 'numero de credito', 'no credito', 'no contrato', 'id prestamo', 'id credito', 'operacion', 'cuenta', 'no cuenta', 'referencia'],
@@ -592,13 +593,16 @@ export function buildLoanTapeDataProfile(rows: StandardLoan[], mappingReport: Ma
   const blockedAnalyses = analysisCoverage.filter(item => item.status === 'blocked');
   const fullAnalyses = analysisCoverage.filter(item => item.status === 'available');
   const partialAnalyses = analysisCoverage.filter(item => item.status === 'partial');
+  const coreAvailable = analysisCoverage.filter(item => CORE_ANALYSIS_KEYS.has(item.key) && item.status !== 'blocked');
+  const hasPortfolioBase = analysisCoverage.some(item => item.key === 'portfolio_balance' && item.status !== 'blocked');
+  const coreReady = totalRows > 0 && hasPortfolioBase && coreAvailable.length >= 3 && highValidationCount === 0;
   const capabilityScore = totalRows
     ? 35 + (fullAnalyses.length / ANALYSIS_REQUIREMENTS.length) * 45 + (partialAnalyses.length / ANALYSIS_REQUIREMENTS.length) * 25
     : 0;
   const qualityPenalty = Math.min(18, highValidationCount / Math.max(totalRows, 1) * 100)
     + Math.min(8, mediumValidationCount / Math.max(totalRows, 1) * 20)
     + highMissing.filter(f => f.field === BASE_ANALYSIS_FIELD).length * 20;
-  const readinessScore = Math.max(0, Math.min(100, Math.round(
+  const readinessScore = coreReady ? 100 : Math.max(0, Math.min(100, Math.round(
     capabilityScore - qualityPenalty
   )));
   const canAnalyze = totalRows > 0 && availableAnalyses.length > 0;
@@ -615,7 +619,7 @@ export function buildLoanTapeDataProfile(rows: StandardLoan[], mappingReport: Ma
     latestFileDate: latest,
     latestRows: latestRowsOnly.length,
     mappedFields,
-    unmappedCriticalFields: missingFields.filter(f => !f.mapped).map(f => f.field),
+    unmappedCriticalFields: missingFields.filter(f => !f.mapped && f.severity === 'high').map(f => f.field),
     missingFields,
     analysisCoverage,
     availableAnalyses,
