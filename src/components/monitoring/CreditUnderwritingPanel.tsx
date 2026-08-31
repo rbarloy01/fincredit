@@ -4,6 +4,7 @@ import { AlertTriangle, ArrowDownRight, ArrowUpRight, Brain, CheckCircle, Circle
 import { evaluateCovenantAuto, evaluateCovenantForStatement, isPercentCovenant, resolveCovenantThreshold, standardRatios } from '../../lib/financialMetrics';
 import { predictCreditRisk, CREDIT_RISK_DISCLAIMER } from '../../lib/creditRiskModel';
 import { forecastCovenants } from '../../lib/covenantForecastModel';
+import { loanTapePeriodDate, sortLoanTapesByPeriod } from '../../lib/loanTapeAnalytics';
 
 interface Props {
   client: Client;
@@ -37,6 +38,14 @@ function pct(value: number | null | undefined) {
 function compactNumber(value: number | null | undefined) {
   if (value === null || value === undefined || !Number.isFinite(value)) return 'N/A';
   return value.toLocaleString('es-MX', { maximumFractionDigits: 4 });
+}
+
+function dateLabel(value?: string) {
+  if (!value) return 'sin corte';
+  const date = new Date(value.length === 10 ? `${value}T00:00:00` : value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : new Intl.DateTimeFormat('es-MX', { day: '2-digit', month: 'short', year: 'numeric' }).format(date).replace('.', '');
 }
 
 function statusClass(status: string) {
@@ -109,8 +118,9 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
   const sortedStatements = [...statements].sort((a, b) => a.periodDate.localeCompare(b.periodDate));
   const latestStatement = sortedStatements.at(-1);
   const previousStatement = sortedStatements.at(-2);
-  const sortedTapes = [...loanTapes].sort((a, b) => (b.uploadDate || '').localeCompare(a.uploadDate || ''));
+  const sortedTapes = sortLoanTapesByPeriod<LoanTape_DB>(loanTapes);
   const latestTape = sortedTapes[0];
+  const latestTapePeriod = latestTape ? loanTapePeriodDate(latestTape) : '';
   const tapeAnalysis = latestTape?.extractedData?._analysis || null;
   const tapeQuality = tapeAnalysis?.portfolioQuality || {};
   const tapeConcentrations = tapeAnalysis?.concentrations || {};
@@ -392,7 +402,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
         <div className="bg-white border border-slate-200 rounded-2xl p-5">
           <p className="text-xs font-black text-slate-400 uppercase tracking-widest">Loan tapes</p>
           <p className="text-2xl font-black text-slate-900 mt-2">{loanTapes.length}</p>
-          <p className="text-xs text-slate-500 font-bold">{latestTape?.fileName || 'sin archivo'}</p>
+          <p className="text-xs text-slate-500 font-bold">Último corte {dateLabel(latestTapePeriod)}</p>
         </div>
         <div className="bg-white border border-slate-200 rounded-2xl p-5">
           <p className="text-xs font-black text-slate-400 uppercase tracking-widest">Último periodo</p>
@@ -604,7 +614,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
             <FileSpreadsheet className="w-4 h-4 text-indigo-600" />Cartera / Loan Tape
           </h3>
           <span className="text-xs font-black text-slate-500 bg-slate-100 rounded-full px-3 py-1">
-            {latestTape?.fileName || 'sin archivo'}
+            Corte {dateLabel(latestTapePeriod)}
           </span>
         </div>
 
@@ -742,7 +752,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
             <div className="rounded-xl bg-slate-50 p-4">
               <p className="text-xs font-black text-slate-400 uppercase">Garantía / cartera</p>
               <p className="font-black text-slate-900">{latestTape?.name || 'Loan tape pendiente'}</p>
-              <p className="text-xs text-slate-500">{latestTape?.fileName || 'Sin archivo'}</p>
+              <p className="text-xs text-slate-500">Corte {dateLabel(latestTapePeriod)} · {latestTape?.fileName || 'Sin archivo'}</p>
             </div>
           </div>
         </div>

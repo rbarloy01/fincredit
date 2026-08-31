@@ -18,6 +18,7 @@ import {
   formatPercent as formatLiabilityPercent,
   LIABILITY_TYPE_LABELS,
 } from '../../lib/institutionalLiabilitiesAnalytics';
+import { sortLoanTapesByPeriod } from '../../lib/loanTapeAnalytics';
 
 interface Props {
   client: Client;
@@ -355,7 +356,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
     [statements]
   );
   const latest = sortedStatements.length > 0 ? sortedStatements[sortedStatements.length - 1] : null;
-  const latestTape = useMemo(() => loanTapes[0] || null, [loanTapes]);
+  const latestTape = useMemo(() => sortLoanTapesByPeriod<LoanTape_DB>(loanTapes)[0] || null, [loanTapes]);
   const tapeAnalysis: StructuredLoanTapeAnalysis | null = latestTape?.extractedData?._analysis || null;
   const liabilitiesSummary = useMemo(() => buildLiabilitiesSummary(institutionalLiabilities), [institutionalLiabilities]);
   const liabilityInsights = useMemo(() => buildLiabilitiesInsights(institutionalLiabilities), [institutionalLiabilities]);

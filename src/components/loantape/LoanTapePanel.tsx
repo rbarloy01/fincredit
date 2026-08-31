@@ -8,7 +8,7 @@ import {
   ShieldCheck, ShieldAlert, ShieldX, AlertTriangle, CheckCircle, XCircle,
   FileText, Bot, Plus, LayoutDashboard,
 } from 'lucide-react';
-import { analyzeLoanTapesLocally, answerLoanTapeQuestion, buildLoanTapeDataProfile, standardizeLoanTape } from '../../lib/loanTapeAnalytics';
+import { analyzeLoanTapesLocally, answerLoanTapeQuestion, buildLoanTapeDataProfile, loanTapePeriodDate, standardizeLoanTape } from '../../lib/loanTapeAnalytics';
 import {
   createLoanTapeWorkspaceBlock,
   LoanTapeAnalystState,
@@ -96,6 +96,13 @@ const fmtMoney = (value: number) => new Intl.NumberFormat('es-MX', { style: 'cur
 const fmtPct = (value: number) => `${((value || 0) * 100).toFixed(1)}%`;
 const fmtNum = (value: number) => Number.isFinite(Number(value)) ? Number(value).toFixed(2) : '—';
 const fmtSignal = (value: string) => value === 'high' ? 'Alta' : value === 'medium' ? 'Media' : value === 'low' ? 'Baja' : '—';
+const fmtDate = (value?: string) => {
+  if (!value) return 'sin fecha';
+  const date = new Date(value.length === 10 ? `${value}T00:00:00` : value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : new Intl.DateTimeFormat('es-MX', { day: '2-digit', month: 'short', year: 'numeric' }).format(date).replace('.', '');
+};
 const QUICK_QUESTIONS = ['qué falta', 'mora', 'top concentración', 'por producto', 'cambios vs mes anterior'];
 const BLOCK_PROMPTS = ['Resumen ejecutivo', 'Gráfica de mora por DPD', 'Top clientes por saldo', 'Cartera por producto', 'Evolución vs mes anterior'];
 function SmallDataTable({ title, rows, columns }: { title: string; rows?: any[]; columns: Array<{ key: string; label: string; format?: (value: any) => string }> }) {
@@ -537,6 +544,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
           const imp: any = (data && !Array.isArray(data)) ? data._import : null;
           const rawFileOnly = !!(data && !Array.isArray(data) && data._unsupportedImport);
           const profile = profilesByTape[tape.id] || buildLoanTapeDataProfile(standardizedRows, mappingRows);
+          const periodDate = loanTapePeriodDate(tape);
           const analystState = analystStates[tape.id] || normalizeLoanTapeAnalystState(tape.analystState);
 
           return (
@@ -559,7 +567,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                     }`}>{tape.tapeType.toUpperCase()}</span>
                   </div>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    {new Date(tape.uploadDate).toLocaleDateString('es-MX')} · {rawFileOnly ? 'archivo guardado sin filas analíticas' : `${rows.length} registros`}
+                    Corte {fmtDate(periodDate)} · subido {fmtDate(tape.uploadDate)} · {rawFileOnly ? 'archivo guardado sin filas analíticas' : `${rows.length} registros`}
                   </p>
 	                  {imp && (
 	                    <p className={`text-[11px] font-bold mt-0.5 truncate ${imp.severity === 'blocker' && rows.length === 0 ? 'text-rose-600' : imp.severity === 'blocker' || imp.severity === 'warning' ? 'text-amber-600' : 'text-emerald-600'}`}

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { importLoanTapeSheets, type SheetInput } from '../src/lib/loanTapeImport';
-import { analyzeLoanTapesLocally, buildLoanTapeDataProfile } from '../src/lib/loanTapeAnalytics';
+import { analyzeLoanTapesLocally, buildLoanTapeDataProfile, loanTapePeriodDate, sortLoanTapesByPeriod } from '../src/lib/loanTapeAnalytics';
 
 // SIAC-style sheet: two title rows, header on row index 2, one vigente + one vencida loan.
 const siac: SheetInput = {
@@ -162,4 +162,28 @@ test('COFINE profile maps real portfolio headers without confusing money columns
 
   assert.equal(analysis.metrics.find(item => item.name === 'Numero de creditos')?.latestValue, '2');
   assert.equal(analysis.metrics.find(item => item.name === 'DPD ponderado por saldo')?.latestValue, '41.2 dias');
+});
+
+test('loan tape period selection uses cutoff date instead of upload date', () => {
+  const oldCutoffUploadedLater = {
+    id: 'old-uploaded-later',
+    fileName: '250831 - Cartera - COFINE.xlsx',
+    uploadDate: '2026-08-31T21:50:09.932913+00:00',
+    extractedData: { _standardized: [{ file_date: '2025-08-31' }] },
+  };
+  const newestCutoffUploadedEarlier = {
+    id: 'newest-cutoff',
+    fileName: '260630 - LT Jun 26 - COFINE.xlsx',
+    uploadDate: '2026-08-31T21:48:45.761691+00:00',
+    extractedData: { _standardized: [{ file_date: '2026-06-30' }] },
+  };
+  const textMonthCutoff = {
+    id: 'dic-25',
+    fileName: '253112_LT Dic 25_COFINE.xlsx',
+    uploadDate: '2026-08-31T21:50:12.880182+00:00',
+    extractedData: { _standardized: [] },
+  };
+
+  assert.equal(loanTapePeriodDate(textMonthCutoff as any), '2025-12-31');
+  assert.equal(sortLoanTapesByPeriod([oldCutoffUploadedLater, newestCutoffUploadedEarlier] as any[])[0].id, 'newest-cutoff');
 });

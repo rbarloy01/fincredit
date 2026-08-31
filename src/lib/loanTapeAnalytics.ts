@@ -139,14 +139,86 @@ export function parseDate(value: any): string | null {
 
 function parseFileDate(fileName?: string): string | null {
   const raw = fileName || '';
+  const normalized = normalize(raw);
+  const monthByName: Record<string, number> = {
+    ene: 1, enero: 1, jan: 1, january: 1,
+    feb: 2, febrero: 2, february: 2,
+    mar: 3, marzo: 3, march: 3,
+    abr: 4, abril: 4, apr: 4, april: 4,
+    may: 5, mayo: 5,
+    jun: 6, junio: 6, june: 6,
+    jul: 7, julio: 7, july: 7,
+    ago: 8, agosto: 8, aug: 8, august: 8,
+    sep: 9, sept: 9, septiembre: 9, september: 9,
+    oct: 10, octubre: 10, october: 10,
+    nov: 11, noviembre: 11, november: 11,
+    dic: 12, diciembre: 12, dec: 12, december: 12,
+  };
+  const endOfMonth = (year: number, month: number) => {
+    if (month < 1 || month > 12) return null;
+    const date = new Date(year, month, 0);
+    return `${date.getFullYear()}-${String(month).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  };
+  const fullYear = (year: string) => {
+    if (year.length === 4) return Number(year);
+    const n = Number(year);
+    return n >= 70 ? 1900 + n : 2000 + n;
+  };
+  const monthPattern = Object.keys(monthByName).join('|');
+  let monthMatch = normalized.match(new RegExp(`\\b(${monthPattern})\\s*(\\d{2}|\\d{4})\\b`));
+  if (!monthMatch) monthMatch = normalized.match(new RegExp(`\\b(\\d{2}|\\d{4})\\s*(${monthPattern})\\b`));
+  if (monthMatch) {
+    const monthToken = monthByName[monthMatch[1]] ? monthMatch[1] : monthMatch[2];
+    const yearToken = monthByName[monthMatch[1]] ? monthMatch[2] : monthMatch[1];
+    const byName = endOfMonth(fullYear(yearToken), monthByName[monthToken]);
+    if (byName) return byName;
+  }
   const ymd = raw.match(/(20\d{2})[-_. ]?(\d{2})[-_. ]?(\d{2})/);
-  if (ymd) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
+  if (ymd) {
+    const month = Number(ymd[2]);
+    const day = Number(ymd[3]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
+  }
   const yymmdd = raw.match(/\b(\d{2})[-_. ]?(\d{2})[-_. ]?(\d{2})\b/);
   if (yymmdd) {
     const year = Number(yymmdd[1]) >= 70 ? `19${yymmdd[1]}` : `20${yymmdd[1]}`;
-    return `${year}-${yymmdd[2]}-${yymmdd[3]}`;
+    const month = Number(yymmdd[2]);
+    const day = Number(yymmdd[3]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) return `${year}-${yymmdd[2]}-${yymmdd[3]}`;
+    const altDay = Number(yymmdd[2]);
+    const altMonth = Number(yymmdd[3]);
+    if (altMonth >= 1 && altMonth <= 12 && altDay >= 1 && altDay <= 31) return `${year}-${yymmdd[3]}-${yymmdd[2]}`;
   }
   return null;
+}
+
+type LoanTapePeriodInput = {
+  extractedData: any;
+  fileName: string;
+  uploadDate: string;
+};
+
+export function loanTapeFileDates(tape: Pick<LoanTapePeriodInput, 'extractedData' | 'fileName'>): string[] {
+  const data: any = tape.extractedData;
+  const rows = Array.isArray(data?._standardized)
+    ? data._standardized
+    : Array.isArray(data?.rows)
+      ? data.rows
+      : [];
+  const dates = Array.from(new Set(rows.map((row: any) => row?.file_date).filter(Boolean) as string[])).sort();
+  const fromName = parseFileDate(tape.fileName);
+  return dates.length ? dates : fromName ? [fromName] : [];
+}
+
+export function loanTapePeriodDate(tape: LoanTapePeriodInput): string {
+  return loanTapeFileDates(tape).at(-1) || parseDate(tape.uploadDate) || tape.uploadDate || '';
+}
+
+export function sortLoanTapesByPeriod<T extends LoanTapePeriodInput>(tapes: T[]): T[] {
+  return [...tapes].sort((a, b) => {
+    const byPeriod = loanTapePeriodDate(b).localeCompare(loanTapePeriodDate(a));
+    return byPeriod || (b.uploadDate || '').localeCompare(a.uploadDate || '');
+  });
 }
 
 function parseRate(value: any): number | null {

@@ -100,17 +100,51 @@ const MOM_TOLERANCE = 0.4; // ±40% MoM balance swing → warn
 
 function fileDateISO(fileName?: string): string | null {
   const s = String(fileName || '');
+  const n = normalize(s);
+  const monthByName: Record<string, number> = {
+    ene: 1, enero: 1, jan: 1, january: 1,
+    feb: 2, febrero: 2, february: 2,
+    mar: 3, marzo: 3, march: 3,
+    abr: 4, abril: 4, apr: 4, april: 4,
+    may: 5, mayo: 5,
+    jun: 6, junio: 6, june: 6,
+    jul: 7, julio: 7, july: 7,
+    ago: 8, agosto: 8, aug: 8, august: 8,
+    sep: 9, sept: 9, septiembre: 9, september: 9,
+    oct: 10, octubre: 10, october: 10,
+    nov: 11, noviembre: 11, november: 11,
+    dic: 12, diciembre: 12, dec: 12, december: 12,
+  };
+  const endOfMonth = (year: number, month: number) => {
+    if (month < 1 || month > 12) return null;
+    const end = new Date(year, month, 0);
+    return `${end.getFullYear()}-${String(month).padStart(2, '0')}-${String(end.getDate()).padStart(2, '0')}`;
+  };
+  const fullYear = (rawYear: string) => {
+    if (rawYear.length === 4) return Number(rawYear);
+    const year = Number(rawYear);
+    return year >= 70 ? 1900 + year : 2000 + year;
+  };
+  const monthPattern = Object.keys(monthByName).join('|');
+  let monthMatch = n.match(new RegExp(`\\b(${monthPattern})\\s*(\\d{2}|\\d{4})\\b`));
+  if (!monthMatch) monthMatch = n.match(new RegExp(`\\b(\\d{2}|\\d{4})\\s*(${monthPattern})\\b`));
+  if (monthMatch) {
+    const monthToken = monthByName[monthMatch[1]] ? monthMatch[1] : monthMatch[2];
+    const yearToken = monthByName[monthMatch[1]] ? monthMatch[2] : monthMatch[1];
+    const byName = endOfMonth(fullYear(yearToken), monthByName[monthToken]);
+    if (byName) return byName;
+  }
   let m = s.match(/(20\d{2})(\d{2})(\d{2})/); // YYYYMMDD
-  let y: number, mo: number;
-  if (m) { y = +m[1]; mo = +m[2]; }
+  let y: number, mo: number, d: number;
+  if (m) { y = +m[1]; mo = +m[2]; d = +m[3]; }
   else {
     m = s.match(/(\d{2})(\d{2})(\d{2})/); // YYMMDD
     if (!m) return null;
-    y = 2000 + +m[1]; mo = +m[2];
+    y = 2000 + +m[1]; mo = +m[2]; d = +m[3];
   }
-  if (mo < 1 || mo > 12) return null;
-  const end = new Date(y, mo, 0); // last day of month `mo`
-  return `${end.getFullYear()}-${String(mo).padStart(2, '0')}-${String(end.getDate()).padStart(2, '0')}`;
+  if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return endOfMonth(y, mo);
+  if (d >= 1 && d <= 12 && mo >= 1 && mo <= 31) return endOfMonth(y, d);
+  return null;
 }
 
 function parseRate(raw: any): number | null {

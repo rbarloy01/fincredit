@@ -19,6 +19,7 @@ import {
 import { db, Client, Covenant_DB, FinancialStatement_DB, LoanTape_DB, Transaction } from '../../db/index';
 import { ALL_FACILITIES, facilityDisplayName, matchesFacilityFilter } from '../../lib/facilityHistory';
 import { evaluateCovenantAuto } from '../../lib/financialMetrics';
+import { loanTapePeriodDate } from '../../lib/loanTapeAnalytics';
 import { parseFinancialNumber } from '../../lib/numberParsing';
 
 type Disposition = {
@@ -302,10 +303,11 @@ function buildEvents(row: LifeRow, selectedTransactionId: string): TimelineEvent
 
   loanTapes.forEach(tape => {
     const stats = tapeStats(tape);
+    const periodDate = loanTapePeriodDate(tape);
     events.push({
       id: `loantape-${tape.id}`,
-      date: tape.uploadDate,
-      periodLabel: fmtDate(tape.uploadDate),
+      date: periodDate || tape.uploadDate,
+      periodLabel: periodDate ? fmtDate(periodDate) : fmtDate(tape.uploadDate),
       title: 'Loan tape actualizado',
       detail: `${stats.count} créditos, ${fmtCurrency(stats.total, currency) || 'saldo no calculado'}${stats.overdue ? `, ${stats.overdue} con mora` : ''}.`,
       type: 'loantape',
