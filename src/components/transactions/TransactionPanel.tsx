@@ -83,10 +83,42 @@ interface Disposition {
 type DispositionMap = Record<string, Disposition[]>;
 const dispositionsKey = (clientId: string) => `finmonitor_transaction_dispositions_${clientId}`;
 
+interface PipelineTransactionMeta {
+  pipelineStage: string;
+  priority: string;
+  utilizationPct: string;
+  currentBalance: string;
+  portfolioConcentrationPct: string;
+  monitoringStatus: string;
+  analystName: string;
+  lastUpdate: string;
+  committeeDate: string;
+  delayReason: string;
+}
+
+type PipelineTransactionMetaMap = Record<string, PipelineTransactionMeta>;
+const pipelineMetaKey = (clientId: string) => `finmonitor_transaction_pipeline_meta_${clientId}`;
+const PIPELINE_STAGES = ['1. Contacto', '2. Term Sheet', '3. Checklist', '4. Análisis', '5. Due Diligence', '6. Contrato', '7. Disposición', 'Monitoring'];
+const PIPELINE_PRIORITIES = ['Crítico', 'Alto', 'Medio', 'Bajo'];
+const MONITORING_STATUSES = ['Cumplimiento', 'Incumplimiento técnico', 'Incumplimiento'];
+
 const EMPTY_FORM: TxFormData = {
   name: '', description: '', date: '', creditType: 'Simple',
   originalAmount: '', currency: 'MXN', signedAt: '', maturityAt: '',
 };
+
+const emptyPipelineMeta = (): PipelineTransactionMeta => ({
+  pipelineStage: 'Monitoring',
+  priority: 'Medio',
+  utilizationPct: '',
+  currentBalance: '',
+  portfolioConcentrationPct: '',
+  monitoringStatus: 'Cumplimiento',
+  analystName: '',
+  lastUpdate: '',
+  committeeDate: '',
+  delayReason: '',
+});
 
 const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session, aiSettings, onCovenantsExtracted }) => {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -102,6 +134,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
   const [extractedMap, setExtractedMap] = useState<Record<string, ContractExtractionResult>>({});
   const [savingCovenants, setSavingCovenants] = useState<string | null>(null);
   const [dispositions, setDispositions] = useState<DispositionMap>({});
+  const [pipelineMeta, setPipelineMeta] = useState<PipelineTransactionMetaMap>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadingFor, setUploadingFor] = useState<string | null>(null);
 
@@ -125,6 +158,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
     }
     setFiles(fileMap);
     setDispositions(await db.getClientSetting<DispositionMap>(clientId, dispositionsKey(clientId), {}));
+    setPipelineMeta(await db.getClientSetting<PipelineTransactionMetaMap>(clientId, pipelineMetaKey(clientId), {}));
   };
 
   useEffect(() => { loadTransactions(); }, [clientId]);
@@ -195,6 +229,12 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
   const handleDeleteTx = async (id: string) => {
     if (!confirm('¿Eliminar esta transacción?')) return;
     await db.deleteTransaction(id);
+    const nextDispositions = { ...dispositions };
+    delete nextDispositions[id];
+    await saveDispositions(nextDispositions);
+    const nextPipelineMeta = { ...pipelineMeta };
+    delete nextPipelineMeta[id];
+    await savePipelineMeta(nextPipelineMeta);
     await loadTransactions();
     onCovenantsExtracted();
   };
@@ -229,6 +269,20 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
       [txId]: (dispositions[txId] || []).filter(item => item.id !== dispositionId),
     };
     await saveDispositions(next);
+  };
+
+  const savePipelineMeta = async (next: PipelineTransactionMetaMap) => {
+    setPipelineMeta(next);
+    await db.setClientSetting(clientId, pipelineMetaKey(clientId), next);
+  };
+
+  const updatePipelineMeta = (txId: string, updates: Partial<PipelineTransactionMeta>) => {
+    setPipelineMeta(prev => {
+      const current = prev[txId] || emptyPipelineMeta();
+      const next = { ...prev, [txId]: { ...current, ...updates } };
+      void db.setClientSetting(clientId, pipelineMetaKey(clientId), next);
+      return next;
+    });
   };
 
   const handleUploadFiles = async (txId: string, fileList: FileList) => {
@@ -508,6 +562,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
             const extraction = extractedMap[tx.id];
             const txDispositions = dispositions[tx.id] || [];
             const disposedTotal = txDispositions.reduce((sum, item) => sum + parseFinancialNumber(item.amount), 0);
+            const txPipelineMeta = pipelineMeta[tx.id] || emptyPipelineMeta();
 
             return (
               <div key={tx.id} className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
@@ -522,10 +577,23 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                     <div className="flex items-center gap-3">
                       <h3 className="font-black text-slate-900 text-sm truncate">{tx.name}</h3>
                       <span className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-md font-semibold flex-shrink-0">{tx.creditType}</span>
+                      {txPipelineMeta.pipelineStage && (
+                        <span className="text-xs bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md font-semibold flex-shrink-0">{txPipelineMeta.pipelineStage}</span>
+                      )}
+                      {txPipelineMeta.monitoringStatus && (
+                        <span className={`text-xs px-2 py-0.5 rounded-md font-semibold flex-shrink-0 ${
+                          txPipelineMeta.monitoringStatus === 'Cumplimiento'
+                            ? 'bg-emerald-50 text-emerald-700'
+                            : txPipelineMeta.monitoringStatus === 'Incumplimiento técnico'
+                              ? 'bg-amber-50 text-amber-700'
+                              : 'bg-rose-50 text-rose-700'
+                        }`}>{txPipelineMeta.monitoringStatus}</span>
+                      )}
                     </div>
                     <div className="flex items-center gap-4 mt-1 text-xs text-slate-500">
                       <span className="flex items-center gap-1"><Calendar className="w-3 h-3" />Disp. inicial {fmtDate(tx.date)}</span>
                       <span className="flex items-center gap-1"><DollarSign className="w-3 h-3" />Autorizado {fmtAmount(tx.originalAmount, tx.currency)}</span>
+                      {txPipelineMeta.utilizationPct && <span className="font-semibold text-slate-600">Utilización {txPipelineMeta.utilizationPct}%</span>}
                       {txDispositions.length > 0 && <span className="flex items-center gap-1 text-emerald-600 font-semibold">{txDispositions.length} disposición{txDispositions.length !== 1 ? 'es' : ''}</span>}
                       {txFiles.length > 0
                         ? <span className="flex items-center gap-1"><FileText className="w-3 h-3" />{txFiles.length} archivo{txFiles.length !== 1 ? 's' : ''}</span>
@@ -564,6 +632,61 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                       <div>
                         <span className="text-slate-500 font-bold uppercase tracking-wide">Autorizado / dispuesto</span>
                         <p className="text-slate-800 font-semibold mt-0.5">{fmtAmount(tx.originalAmount, tx.currency)} / {fmtAmount(disposedTotal, tx.currency)}</p>
+                      </div>
+                    </div>
+
+                    <div className="bg-white border border-slate-200 rounded-xl p-4">
+                      <div className="mb-3">
+                        <p className="text-xs font-black text-slate-700 uppercase tracking-widest">Pipeline / Monitoring de la facility</p>
+                        <p className="text-xs text-slate-400 mt-0.5">Campos operativos de la transacción, separados del Pipeline Master Org.</p>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                        <label>
+                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Etapa pipeline</span>
+                          <select className={inputClass} value={txPipelineMeta.pipelineStage} onChange={e => void updatePipelineMeta(tx.id, { pipelineStage: e.target.value })}>
+                            {PIPELINE_STAGES.map(stage => <option key={stage} value={stage}>{stage}</option>)}
+                          </select>
+                        </label>
+                        <label>
+                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Prioridad</span>
+                          <select className={inputClass} value={txPipelineMeta.priority} onChange={e => void updatePipelineMeta(tx.id, { priority: e.target.value })}>
+                            {PIPELINE_PRIORITIES.map(priority => <option key={priority} value={priority}>{priority}</option>)}
+                          </select>
+                        </label>
+                        <label>
+                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Utilización (%)</span>
+                          <input type="text" inputMode="decimal" className={inputClass} value={txPipelineMeta.utilizationPct} onChange={e => void updatePipelineMeta(tx.id, { utilizationPct: e.target.value })} placeholder="0.00" />
+                        </label>
+                        <label>
+                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Saldo actual</span>
+                          <input type="text" inputMode="decimal" className={inputClass} value={txPipelineMeta.currentBalance} onChange={e => void updatePipelineMeta(tx.id, { currentBalance: e.target.value })} placeholder="0.00" />
+                        </label>
+                        <label>
+                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Concentración portafolio (%)</span>
+                          <input type="text" inputMode="decimal" className={inputClass} value={txPipelineMeta.portfolioConcentrationPct} onChange={e => void updatePipelineMeta(tx.id, { portfolioConcentrationPct: e.target.value })} placeholder="0.00" />
+                        </label>
+                        <label>
+                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Estatus monitoring</span>
+                          <select className={inputClass} value={txPipelineMeta.monitoringStatus} onChange={e => void updatePipelineMeta(tx.id, { monitoringStatus: e.target.value })}>
+                            {MONITORING_STATUSES.map(status => <option key={status} value={status}>{status}</option>)}
+                          </select>
+                        </label>
+                        <label>
+                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Analista</span>
+                          <input className={inputClass} value={txPipelineMeta.analystName} onChange={e => void updatePipelineMeta(tx.id, { analystName: e.target.value })} placeholder="Responsable" />
+                        </label>
+                        <label>
+                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Última actualización</span>
+                          <input type="date" className={inputClass} value={txPipelineMeta.lastUpdate} onChange={e => void updatePipelineMeta(tx.id, { lastUpdate: e.target.value })} />
+                        </label>
+                        <label>
+                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Comité</span>
+                          <input type="date" className={inputClass} value={txPipelineMeta.committeeDate} onChange={e => void updatePipelineMeta(tx.id, { committeeDate: e.target.value })} />
+                        </label>
+                        <label className="md:col-span-2 xl:col-span-3">
+                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Motivo retraso / notas pipeline</span>
+                          <input className={inputClass} value={txPipelineMeta.delayReason} onChange={e => void updatePipelineMeta(tx.id, { delayReason: e.target.value })} placeholder="Riesgo, falta de información, comité, cliente, etc." />
+                        </label>
                       </div>
                     </div>
 

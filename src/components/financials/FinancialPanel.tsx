@@ -6,7 +6,7 @@ import { Upload, Trash2, Download, Plus, X, TrendingUp, Edit2, Check, FileText, 
 import type { DefinedConcept, VerticalBaseConfig } from '../../lib/export';
 import { loadExportModule } from '../../lib/exportLoader';
 import { reserveDownloadTarget } from '../../lib/browserDownload';
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { CartesianGrid, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { evaluateFormula, formulaLabel, standardRatios } from '../../lib/financialMetrics';
 import WorkingOverlay from '../common/WorkingOverlay';
 import { parseFinancialNumber } from '../../lib/numberParsing';
@@ -659,9 +659,13 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
     ['roa', 'ROA', '#e11d48', 'pct'],
     ['roe', 'ROE', '#4338ca', 'pct'],
   ] as const;
+  type ChartMetricFormat = typeof chartMetricDefs[number][3];
   const chartMetricFormat = Object.fromEntries(chartMetricDefs.map(([key, , , format]) => [key, format])) as Record<string, typeof chartMetricDefs[number][3]>;
-  const selectedChartFormats = chartMetricDefs.filter(([key]) => chartMetrics[key]).map(([, , , format]) => format);
-  const singleChartFormat = Array.from(new Set(selectedChartFormats)).length === 1 ? selectedChartFormats[0] : null;
+  const selectedChartMetricDefs = chartMetricDefs.filter(([key]) => chartMetrics[key]);
+  const chartHasMoney = selectedChartMetricDefs.some(([, , , format]) => format === 'money');
+  const chartHasRatio = selectedChartMetricDefs.some(([, , , format]) => format === 'ratio');
+  const chartHasPct = selectedChartMetricDefs.some(([, , , format]) => format === 'pct');
+  const chartAxisForFormat = (format: ChartMetricFormat) => format === 'money' ? 'money' : format;
   const formatMetricValue = (key: string, value: number) => {
     const format = chartMetricFormat[key];
     if (format === 'money') return fmtMoney(value);
@@ -669,11 +673,11 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
     if (format === 'ratio') return fmtRatio(value);
     return fmtNum(value);
   };
-  const formatAxisValue = (value: number) => {
-    if (singleChartFormat === 'money') return fmtCompact(value);
-    if (singleChartFormat === 'pct') return fmtPct(value);
-    if (singleChartFormat === 'ratio') return fmtRatio(value);
-    return fmtCompact(value);
+  const formatChartAxisValue = (value: number, format: ChartMetricFormat) => {
+    if (format === 'money') return fmtCompact(value);
+    if (format === 'pct') return fmtPct(value);
+    if (format === 'ratio') return fmtRatio(value);
+    return fmtNum(value);
   };
   const chartData = visibleStatements.map(stmt => {
     const ratios = standardRatios(stmt);
@@ -992,9 +996,38 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
               </div>
               <div ref={chartRef} className="h-72 mt-4 bg-white p-3 rounded-xl border border-slate-100">
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={chartData}>
-                    <XAxis dataKey="period" tick={{ fontSize: 11 }} />
-                    <YAxis tick={{ fontSize: 11 }} tickFormatter={(value) => formatAxisValue(Number(value))} width={72} />
+                  <LineChart data={chartData} margin={{ top: 8, right: chartHasRatio && chartHasPct ? 18 : 8, left: 8, bottom: 4 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                    <XAxis dataKey="period" tick={{ fontSize: 11, fill: '#64748b' }} tickMargin={8} />
+                    <YAxis
+                      yAxisId="money"
+                      hide={!chartHasMoney}
+                      tick={{ fontSize: 11, fill: '#64748b' }}
+                      tickFormatter={(value) => formatChartAxisValue(Number(value), 'money')}
+                      width={76}
+                      axisLine={false}
+                      tickLine={false}
+                    />
+                    <YAxis
+                      yAxisId="ratio"
+                      orientation="right"
+                      hide={!chartHasRatio}
+                      tick={{ fontSize: 11, fill: '#64748b' }}
+                      tickFormatter={(value) => formatChartAxisValue(Number(value), 'ratio')}
+                      width={58}
+                      axisLine={false}
+                      tickLine={false}
+                    />
+                    <YAxis
+                      yAxisId="pct"
+                      orientation="right"
+                      hide={!chartHasPct}
+                      tick={{ fontSize: 11, fill: '#64748b' }}
+                      tickFormatter={(value) => formatChartAxisValue(Number(value), 'pct')}
+                      width={58}
+                      axisLine={false}
+                      tickLine={false}
+                    />
                     <Tooltip
                       formatter={(value, name, entry) => {
                         const key = String((entry as any)?.dataKey || '');
@@ -1002,10 +1035,22 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
                         return [Number.isFinite(numeric) ? formatMetricValue(key, numeric) : value, name];
                       }}
                       labelStyle={{ color: '#0f172a', fontWeight: 800 }}
+                      contentStyle={{ borderRadius: 12, borderColor: '#e2e8f0', boxShadow: '0 12px 30px rgba(15, 23, 42, 0.10)' }}
                     />
-                    <Legend />
-                    {chartMetricDefs.filter(([key]) => chartMetrics[key]).map(([key, label, color]) => (
-                      <Line key={key} type="monotone" dataKey={key} name={label} stroke={color} dot={false} connectNulls />
+                    <Legend wrapperStyle={{ paddingTop: 8, fontSize: 11, fontWeight: 700 }} />
+                    {selectedChartMetricDefs.map(([key, label, color, format]) => (
+                      <Line
+                        key={key}
+                        yAxisId={chartAxisForFormat(format)}
+                        type="monotone"
+                        dataKey={key}
+                        name={label}
+                        stroke={color}
+                        strokeWidth={2.5}
+                        dot={{ r: 3, strokeWidth: 1.5 }}
+                        activeDot={{ r: 5 }}
+                        connectNulls
+                      />
                     ))}
                   </LineChart>
                 </ResponsiveContainer>

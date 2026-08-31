@@ -39,20 +39,20 @@ type Severity = 'high' | 'medium' | 'low';
 const CRITICAL_FIELDS: Array<keyof StandardLoan> = ['loan_id', 'client', 'amount', 'outstanding_balance', 'interest_rate', 'loan_type', 'days_overdue', 'start_date', 'end_date'];
 
 const SYNONYMS: Record<keyof StandardLoan, string[]> = {
-  loan_id: ['contrato', 'loan id', 'loan number', 'loan no', 'folio', 'numero credito', 'no contrato', 'id prestamo', 'operacion'],
-  client: ['cliente', 'client', 'customer', 'razon social', 'nombre', 'client id', 'apellidos'],
-  amount: ['amount', 'loan amount', 'lended amount', 'principal', 'original amount', 'monto original', 'monto otorgado', 'monto maximo', 'costo'],
-  outstanding_balance: ['capital balance', 'saldo capital', 'saldo insoluto', 'capital por pagar', 'saldo insoluto capital'],
-  interest_rate: ['interest rate', 'tasa', 'tasa interes', 'rate', 'rate %'],
-  loan_status: ['status', 'estado', 'loan status', 'estatus'],
-  start_date: ['start date', 'origination date', 'fecha inicio', 'fecha otorgamiento', 'disbursement date'],
-  end_date: ['end date', 'maturity date', 'fecha vencimiento', 'fecha fin', 'due date'],
+  loan_id: ['contrato', 'loan id', 'loan number', 'loan no', 'folio', 'numero credito', 'numero de credito', 'no credito', 'no contrato', 'id prestamo', 'id credito', 'operacion', 'cuenta', 'no cuenta', 'referencia'],
+  client: ['cliente', 'client', 'customer', 'razon social', 'nombre', 'nombre cliente', 'nombre acreditado', 'acreditado', 'deudor', 'borrower', 'obligor', 'client id', 'apellidos', 'rfc'],
+  amount: ['amount', 'loan amount', 'lended amount', 'principal', 'original amount', 'monto original', 'monto otorgado', 'monto maximo', 'monto autorizado', 'importe dispuesto', 'importe original', 'limite credito', 'linea autorizada', 'costo'],
+  outstanding_balance: ['capital balance', 'saldo capital', 'saldo insoluto', 'saldo actual', 'saldo vigente', 'saldo total', 'capital por pagar', 'capital pendiente', 'saldo insoluto capital', 'principal balance', 'outstanding', 'balance'],
+  interest_rate: ['interest rate', 'tasa', 'tasa interes', 'tasa de interes', 'tasa final', 'tasa base', 'rate', 'rate %', 'tir', 'tna'],
+  loan_status: ['status', 'estado credito', 'estado del credito', 'loan status', 'estatus', 'estatus credito', 'situacion', 'condicion', 'clasificacion'],
+  start_date: ['start date', 'origination date', 'fecha inicio', 'fecha otorgamiento', 'fecha apertura', 'fecha disposicion', 'fecha alta', 'disbursement date'],
+  end_date: ['end date', 'maturity date', 'fecha vencimiento', 'fecha fin', 'fecha pago final', 'due date'],
   loan_type: ['loan type', 'producto', 'product', 'product type', 'tipo contrato', 'tipo credito', 'tipo prestamo', 'tipo producto', 'linea', 'modalidad', 'subproducto', 'segmento', 'programa', 'plan', 'esquema'],
-  days_overdue: ['days overdue', 'days past due', 'dpd', 'mora dias', 'dias atraso', 'dias de atraso', 'dias vencidos', 'delinquent days'],
+  days_overdue: ['days overdue', 'days past due', 'dpd', 'mora dias', 'dias mora', 'dias atraso', 'dias de atraso', 'dias vencidos', 'dias vencido', 'dias vencida', 'delinquent days'],
   currency: ['currency', 'moneda', 'divisa'],
-  industry: ['industry', 'giro', 'sector', 'industria'],
-  state: ['state', 'provincia', 'estado residencia', 'estado de residencia', 'region'],
-  file_date: ['file date', 'fecha archivo', 'fecha corte', 'fecha reporte'],
+  industry: ['industry', 'giro', 'sector', 'industria', 'actividad economica', 'ramo'],
+  state: ['state', 'provincia', 'entidad', 'estado residencia', 'estado de residencia', 'region', 'plaza', 'localidad'],
+  file_date: ['file date', 'fecha archivo', 'fecha corte', 'fecha reporte', 'corte', 'periodo'],
 };
 
 export const PAID_STATUSES = ['paid', 'fully paid', 'paid off', 'closed', 'canceled', 'cancelled', 'liquidated', 'liquidado', 'pagado'];
@@ -71,6 +71,18 @@ export function parseNumber(value: any): number | null {
   return parseNullableFinancialNumber(value);
 }
 
+const MEXICAN_STATES = new Set([
+  'aguascalientes', 'baja california', 'baja california sur', 'campeche', 'chiapas', 'chihuahua',
+  'ciudad de mexico', 'cdmx', 'coahuila', 'colima', 'durango', 'guanajuato', 'guerrero',
+  'hidalgo', 'jalisco', 'mexico', 'estado de mexico', 'michoacan', 'morelos', 'nayarit',
+  'nuevo leon', 'oaxaca', 'puebla', 'queretaro', 'quintana roo', 'san luis potosi',
+  'sinaloa', 'sonora', 'tabasco', 'tamaulipas', 'tlaxcala', 'veracruz', 'yucatan', 'zacatecas',
+]);
+
+const STATUS_WORDS = ['vigente', 'vencido', 'vencida', 'atrasado', 'atrasada', 'liquidado', 'liquidada', 'pagado', 'pagada', 'castigado', 'cerrado', 'activo', 'mora'];
+const PRODUCT_WORDS = ['credito', 'prestamo', 'factoraje', 'arrendamiento', 'simple', 'revolvente', 'nomina', 'auto', 'pyme', 'leasing', 'linea'];
+const CURRENCY_WORDS = ['mxn', 'usd', 'eur', 'pesos', 'dolares', 'dolares americanos'];
+
 function excelSerialToDate(serial: number): string | null {
   if (!Number.isFinite(serial) || serial < 20000 || serial > 80000) return null;
   const ms = Math.round((serial - 25569) * 86400 * 1000);
@@ -86,6 +98,7 @@ export function parseDate(value: any): string | null {
   if (direct) return `${direct[1]}-${direct[2].padStart(2, '0')}-${direct[3].padStart(2, '0')}`;
   const mx = raw.match(/(\d{1,2})[-/_.](\d{1,2})[-/_.](20\d{2})/);
   if (mx) return `${mx[3]}-${mx[2].padStart(2, '0')}-${mx[1].padStart(2, '0')}`;
+  if (!/(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|ene|abr|ago|dic)/i.test(raw)) return null;
   const d = new Date(raw);
   return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
 }
@@ -102,7 +115,70 @@ function parseFileDate(fileName?: string): string | null {
   return null;
 }
 
-function pickColumns(headers: string[]) {
+function parseRate(value: any): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const n = parseNumber(typeof value === 'string' ? value.replace('%', '') : value);
+  if (n === null) return null;
+  return n > 1 ? Math.round((n / 100) * 1e6) / 1e6 : n;
+}
+
+function valueSampleScore(target: keyof StandardLoan, values: any[]): number {
+  const sample = values.filter(v => v !== null && v !== undefined && String(v).trim() !== '').slice(0, 50);
+  if (!sample.length) return 0;
+  const normalizedValues = sample.map(normalize);
+  const numbers = sample.map(parseNumber).filter((v): v is number => v !== null && Number.isFinite(v));
+  const dates = sample.map(parseDate).filter(Boolean);
+  const textValues = normalizedValues.filter(Boolean);
+  const uniquePct = new Set(textValues).size / Math.max(textValues.length, 1);
+  const numberPct = numbers.length / sample.length;
+  const datePct = dates.length / sample.length;
+  const avgAbs = numbers.length ? numbers.reduce((a, b) => a + Math.abs(b), 0) / numbers.length : 0;
+  const intPct = numbers.length ? numbers.filter(n => Math.abs(n - Math.round(n)) < 0.000001).length / numbers.length : 0;
+  const withinRatePct = numbers.length ? numbers.filter(n => n >= 0 && n <= 100).length / numbers.length : 0;
+  const hasWords = (words: string[]) => textValues.some(v => words.some(word => v.includes(word)));
+
+  if (target === 'start_date' || target === 'end_date' || target === 'file_date') return datePct >= 0.7 ? 35 : datePct >= 0.3 ? 12 : 0;
+  if (target === 'currency') return hasWords(CURRENCY_WORDS) ? 35 : 0;
+  if (target === 'loan_status') return hasWords(STATUS_WORDS) ? 30 : 0;
+  if (target === 'loan_type') return hasWords(PRODUCT_WORDS) ? 25 : 0;
+  if (target === 'state') return textValues.some(v => MEXICAN_STATES.has(v)) ? 30 : 0;
+  if (target === 'days_overdue') return numberPct >= 0.75 && intPct >= 0.9 && avgAbs <= 3650 ? 25 : 0;
+  if (target === 'interest_rate') return numberPct >= 0.7 && withinRatePct >= 0.9 && avgAbs <= 100 ? 18 : 0;
+  if (target === 'amount' || target === 'outstanding_balance') return numberPct >= 0.7 && avgAbs >= 1000 ? 18 : numberPct >= 0.7 ? 8 : 0;
+  if (target === 'loan_id') return uniquePct >= 0.8 ? 16 : 0;
+  if (target === 'client') return textValues.length / sample.length >= 0.6 && uniquePct >= 0.15 ? 12 : 0;
+  if (target === 'industry') return textValues.length / sample.length >= 0.6 ? 8 : 0;
+  return 0;
+}
+
+function headerHeuristicScore(target: keyof StandardLoan, norm: string): number {
+  if (!norm) return 0;
+  if (target === 'loan_id' && /(folio|contrato|credito|cuenta|operacion|referencia)/.test(norm) && /(no|num|numero|id|clave|codigo|cuenta|folio)/.test(norm)) return 35;
+  if (target === 'client' && /(cliente|acreditado|deudor|razon social|empresa|nombre)/.test(norm) && !/(credito|contrato|producto|estatus|estado)/.test(norm)) return 35;
+  if (target === 'amount' && /(monto|importe|limite|linea|autorizad|otorgad|dispuest|original)/.test(norm) && !/(saldo|insoluto|vencid|vigente|actual)/.test(norm)) return 35;
+  if (target === 'outstanding_balance' && /(saldo|insoluto|balance|capital|principal|cartera)/.test(norm) && !/(tasa|dias)/.test(norm)) return 40;
+  if (target === 'interest_rate' && /(tasa|rate|interes|tir|tna)/.test(norm)) return 40;
+  if (target === 'loan_status' && /(estatus|status|situacion|condicion|clasificacion|estado credito)/.test(norm)) return 35;
+  if (target === 'start_date' && /(fecha|date)/.test(norm) && /(inicio|apertura|otorg|disposicion|alta|originacion)/.test(norm)) return 40;
+  if (target === 'end_date' && /(fecha|date|vencimiento|maturity|due)/.test(norm) && /(venc|fin|maturity|due|pago final)/.test(norm)) return 40;
+  if (target === 'loan_type' && /(producto|tipo|modalidad|subproducto|segmento|programa|plan|esquema)/.test(norm)) return 35;
+  if (target === 'days_overdue' && /(dpd|dias|mora|atras|vencid|delinquent)/.test(norm)) return 45;
+  if (target === 'currency' && /(moneda|divisa|currency)/.test(norm)) return 45;
+  if (target === 'industry' && /(giro|sector|industria|actividad|ramo)/.test(norm)) return 35;
+  if (target === 'state' && /(estado|entidad|provincia|region|plaza|localidad)/.test(norm) && !/(credito|estatus|status|situacion|condicion)/.test(norm)) return 25;
+  if (target === 'file_date' && /(corte|reporte|archivo|periodo)/.test(norm) && /(fecha|date|corte|periodo)/.test(norm)) return 40;
+  return 0;
+}
+
+function headerMatchScore(target: keyof StandardLoan, norm: string): { score: number; confidence: MappingNote['confidence']; reasoning: string } {
+  const terms = SYNONYMS[target].map(normalize);
+  if (terms.includes(norm)) return { score: 100, confidence: 'high', reasoning: 'Header matched exact loan tape synonym' };
+  if (terms.some(t => norm.includes(t) || t.includes(norm))) return { score: 75, confidence: 'medium', reasoning: 'Header matched fuzzy loan tape synonym' };
+  const heuristic = headerHeuristicScore(target, norm);
+  return heuristic ? { score: heuristic, confidence: 'low', reasoning: 'Header matched semantic loan tape pattern' } : { score: 0, confidence: 'low', reasoning: '' };
+}
+
+function pickColumns(headers: string[], rows: any[] = []) {
   const mapping: Partial<Record<keyof StandardLoan, string>> = {};
   const notes: MappingNote[] = [];
   const used = new Set<string>();
@@ -111,16 +187,35 @@ function pickColumns(headers: string[]) {
   const capitalVigente = normalized.find(h => h.norm.includes('capital vigente'))?.header;
   const capitalVencido = normalized.find(h => h.norm.includes('capital vencido'))?.header;
 
-  for (const target of Object.keys(SYNONYMS) as Array<keyof StandardLoan>) {
+  const targetOrder: Array<keyof StandardLoan> = [
+    'days_overdue', 'outstanding_balance', 'amount', 'interest_rate', 'start_date', 'end_date',
+    'loan_id', 'client', 'loan_status', 'loan_type', 'currency', 'industry', 'state', 'file_date',
+  ];
+
+  for (const target of targetOrder) {
     if (target === 'file_date') continue;
     if (target === 'outstanding_balance' && capitalVigente && capitalVencido) continue;
-    const terms = SYNONYMS[target].map(normalize);
-    const exact = normalized.find(h => !used.has(h.header) && terms.includes(h.norm));
-    const fuzzy = exact || normalized.find(h => !used.has(h.header) && terms.some(t => h.norm.includes(t) || t.includes(h.norm)));
-    if (fuzzy) {
-      mapping[target] = fuzzy.header;
-      used.add(fuzzy.header);
-      notes.push({ source_header: fuzzy.header, target_term: target, confidence: exact ? 'high' : 'medium', reasoning: 'Header matched loan tape synonym' });
+    const candidates = normalized
+      .filter(h => !used.has(h.header))
+      .map(h => {
+        const headerScore = headerMatchScore(target, h.norm);
+        const values = rows.map(row => row?.[h.header]);
+        const valueScore = valueSampleScore(target, values);
+        return { ...h, score: headerScore.score + valueScore, headerScore, valueScore };
+      })
+      .filter(h => h.score >= 30)
+      .sort((a, b) => b.score - a.score);
+
+    const best = candidates[0];
+    if (best) {
+      mapping[target] = best.header;
+      used.add(best.header);
+      notes.push({
+        source_header: best.header,
+        target_term: target,
+        confidence: best.headerScore.confidence === 'high' || best.score >= 85 ? 'high' : best.score >= 55 ? 'medium' : 'low',
+        reasoning: best.headerScore.reasoning || `Column inferred from value pattern (${best.valueScore} score)`,
+      });
     }
   }
 
@@ -133,7 +228,7 @@ function pickColumns(headers: string[]) {
 
 export function standardizeLoanTape(rows: any[], fileName?: string) {
   const headers = rows[0] ? Object.keys(rows[0]) : [];
-  const { mapping, notes, capitalVigente, capitalVencido } = pickColumns(headers);
+  const { mapping, notes, capitalVigente, capitalVencido } = pickColumns(headers, rows);
   const fallbackFileDate = parseFileDate(fileName);
 
   const standardized: StandardLoan[] = rows.map(row => {
@@ -149,7 +244,7 @@ export function standardizeLoanTape(rows: any[], fileName?: string) {
       client: get('client') ? String(get('client')).trim() : null,
       amount: parseNumber(get('amount')),
       outstanding_balance: balance,
-      interest_rate: parseNumber(get('interest_rate')),
+      interest_rate: parseRate(get('interest_rate')),
       loan_status: get('loan_status') ? String(get('loan_status')).trim() : null,
       start_date: parseDate(get('start_date')),
       end_date: parseDate(get('end_date')),
@@ -160,7 +255,11 @@ export function standardizeLoanTape(rows: any[], fileName?: string) {
       state: get('state') ? String(get('state')).trim() : null,
       file_date: parseDate(get('file_date')) || fallbackFileDate,
     };
-  }).filter(row => Object.values(row).some(v => v !== null && v !== ''));
+  }).filter(row => [
+    row.loan_id, row.client, row.amount, row.outstanding_balance, row.interest_rate,
+    row.loan_status, row.start_date, row.end_date, row.loan_type, row.days_overdue,
+    row.industry, row.state, row.file_date,
+  ].some(v => v !== null && v !== undefined && v !== ''));
 
   return { standardized, mappingReport: notes };
 }

@@ -55,3 +55,25 @@ test('MoM sanity: a big balance drop vs previous total raises a warning', () => 
   // 2.9M vs 6.0M ≈ -52% → warning
   assert.equal(res.reconciliation.severity, 'warning');
 });
+
+test('generic semantic mapper understands ordered tables with non-standard headers', () => {
+  const custom: SheetInput = {
+    name: 'Servicer custom',
+    rows: [
+      ['ID Operación', 'Nombre Acreditado', 'Línea autorizada', 'Saldo actual', 'TNA %', 'Apertura', 'Vence', 'Modalidad', 'Mora', 'Entidad'],
+      ['OP-1', 'ACME SA', 1500000, 1200000, '24%', '2025-01-15', '2027-01-15', 'Credito simple', 0, 'Nuevo Leon'],
+      ['OP-2', 'BETA SA', 800000, 500000, '28%', '2024-06-01', '2026-06-01', 'Factoraje', 120, 'Jalisco'],
+    ],
+  };
+  const res = importLoanTapeSheets([custom], '20260831 custom loan tape');
+  assert.equal(res.standardized.length, 2);
+  assert.equal(res.reconciliation.severity, 'ok');
+  assert.equal(res.standardized[0].loan_id, 'OP-1');
+  assert.equal(res.standardized[0].client, 'ACME SA');
+  assert.equal(res.standardized[0].amount, 1500000);
+  assert.equal(res.standardized[0].outstanding_balance, 1200000);
+  assert.equal(res.standardized[0].interest_rate, 0.24);
+  assert.equal(res.standardized[0].days_overdue, 0);
+  assert.equal(res.standardized[0].state, 'Nuevo Leon');
+  assert.equal(res.standardized[1].loan_type, 'Factoraje');
+});

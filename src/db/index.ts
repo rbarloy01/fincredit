@@ -1125,6 +1125,20 @@ export const db = {
     return data.value as T;
   },
 
+  async getClientSettingsForClients<T>(clientIds: string[], key: string): Promise<Record<string, T>> {
+    if (!clientIds.length) return {};
+    const { data, error } = await supabase
+      .from('client_settings')
+      .select('client_id,value')
+      .eq('key', key)
+      .in('client_id', clientIds);
+    if (error) { console.warn('getClientSettingsForClients', error.message); return {}; }
+    return (data || []).reduce((acc, row) => {
+      acc[row.client_id] = row.value as T;
+      return acc;
+    }, {} as Record<string, T>);
+  },
+
   async setClientSetting<T>(clientId: string, key: string, value: T): Promise<void> {
     localStorage.setItem(key, JSON.stringify(value));
     const { error } = await supabase

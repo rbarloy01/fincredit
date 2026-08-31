@@ -31,6 +31,13 @@ interface Props {
   onTapesChange: (tapes: LoanTape_DB[]) => void;
 }
 
+const TABULAR_LOAN_TAPE_EXTENSIONS = ['.xlsx', '.xls', '.csv'];
+
+function isTabularLoanTapeFile(file: File): boolean {
+  const name = file.name.toLowerCase();
+  return TABULAR_LOAN_TAPE_EXTENSIONS.some(ext => name.endsWith(ext));
+}
+
 function StatusBadge({ status }: { status?: string }) {
   if (status === 'good') return (
     <span className="flex items-center gap-1 text-xs font-black text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full">
@@ -238,9 +245,44 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
   useEffect(() => { loadTapes(); }, [clientId]);
 
   const saveLoanTapeFile = async (file: File) => {
-    if (!file.name.endsWith('.xlsx') && !file.name.endsWith('.xls') && !file.name.endsWith('.csv')) {
-      throw new Error(`${file.name}: solo se aceptan archivos Excel (.xlsx, .xls) o CSV`);
+    const isTabular = isTabularLoanTapeFile(file);
+
+    if (!isTabular) {
+      const sourceDocument = await db.uploadClientDocument(clientId, file, 'loan_tape', {
+        clientName,
+        uploadSurface: 'loan_tape_panel',
+        originalMimeType: file.type || 'application/octet-stream',
+        parseMode: 'raw_file',
+      });
+
+      return db.createLoanTape({
+        clientId,
+        sourceDocumentId: sourceDocument.id,
+        name: file.name.replace(/\.[^.]+$/, ''),
+        fileName: file.name,
+        tapeType: 'otro',
+        extractedData: {
+          rows: [],
+          _standardized: [],
+          _mappingReport: [],
+          _unsupportedImport: true,
+          _import: {
+            severity: 'warning',
+            messages: [`${file.name}: archivo guardado, sin filas analíticas automáticas. Sube Excel/CSV para estandarizar cartera.`],
+            sheets: [],
+            totalBalance: 0,
+            unmappedSheetsWithData: [],
+            validationCount: 0,
+          },
+          _sourceFile: {
+            name: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            sizeBytes: file.size,
+          },
+        },
+      });
     }
+
     const buffer = await file.arrayBuffer();
     const XLSX = await import('xlsx');
     const workbook = XLSX.read(new Uint8Array(buffer), { type: 'array' });
@@ -272,6 +314,8 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
       uploadSurface: 'loan_tape_panel',
       rows: result.standardized.length,
       tapeType,
+      originalMimeType: file.type || 'application/octet-stream',
+      parseMode: 'tabular',
     });
 
     return db.createLoanTape({
@@ -317,7 +361,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
       const localAnalysis = analyzeLoanTapesLocally(localTapes, tape.id);
       let analysis = localAnalysis;
       try {
-        analysis = { ...localAnalysis, ...(await analyzeLoanTape(aiSettings, rows, clientName || clientId)), portfolioQuality: localAnalysis.portfolioQuality, dpd_distribution: localAnalysis.dpd_distribution, concentrations: localAnalysis.concentrations, anomalies: localAnalysis.anomalies, validation: localAnalysis.validation };
+        analysis = { ...localAnalysis, ...(await analyzeLoanTape(aiSettings, standardized, clientName || clientId)), portfolioQuality: localAnalysis.portfolioQuality, dpd_distribution: localAnalysis.dpd_distribution, concentrations: localAnalysis.concentrations, anomalies: localAnalysis.anomalies, validation: localAnalysis.validation };
       } catch (error) {
         if (aiSettings.apiKey) throw error;
         console.warn('Loan tape AI analysis unavailable; using local analysis.', error);
@@ -444,7 +488,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
               </button>
             </>
           )}
-          <input ref={fileInputRef} type="file" multiple accept=".xlsx,.xls,.csv" className="hidden"
+          <input ref={fileInputRef} type="file" multiple className="hidden"
             onChange={e => {
               if (e.target.files?.length) handleFilesSelect(e.target.files);
               e.currentTarget.value = '';
@@ -455,7 +499,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
             className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-400 text-white font-bold px-4 py-2.5 rounded-xl text-sm transition-all"
           >
             <Upload className="w-4 h-4" />
-            {uploading ? 'Procesando...' : 'Subir Loan Tape(s)'}
+            {uploading ? 'Procesando...' : 'Subir archivo(s)'}
           </button>
         </div>
       </div>
@@ -476,7 +520,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
         <div className="bg-white border border-slate-200 rounded-2xl p-12 text-center">
           <BarChart3 className="w-10 h-10 text-slate-300 mx-auto mb-3" />
           <p className="text-slate-500 font-semibold">Sin loan tapes cargados</p>
-          <p className="text-slate-400 text-sm mt-1">Sube un Excel con la cartera de crédito</p>
+          <p className="text-slate-400 text-sm mt-1">Sube cualquier archivo; Excel y CSV se estandarizan automáticamente</p>
         </div>
       )}
 
@@ -490,6 +534,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
           const standardizedRows: any[] = Array.isArray(data?._standardized) ? data._standardized : [];
           const analysis: StructuredLoanTapeAnalysis | null = data?._analysis || null;
           const imp: any = (data && !Array.isArray(data)) ? data._import : null;
+          const rawFileOnly = !!(data && !Array.isArray(data) && data._unsupportedImport);
           const profile = profilesByTape[tape.id] || buildLoanTapeDataProfile(standardizedRows, mappingRows);
           const analystState = analystStates[tape.id] || normalizeLoanTapeAnalystState(tape.analystState);
 
@@ -500,8 +545,8 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                 <button onClick={() => setExpanded(isExpanded ? null : tape.id)} className="text-slate-400 hover:text-slate-700 transition-colors">
                   {isExpanded ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
                 </button>
-                <div className="w-10 h-10 bg-emerald-100 rounded-xl flex items-center justify-center flex-shrink-0">
-                  <FileSpreadsheet className="w-5 h-5 text-emerald-600" />
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${rawFileOnly ? 'bg-slate-100' : 'bg-emerald-100'}`}>
+                  {rawFileOnly ? <FileText className="w-5 h-5 text-slate-500" /> : <FileSpreadsheet className="w-5 h-5 text-emerald-600" />}
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
@@ -513,7 +558,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                     }`}>{tape.tapeType.toUpperCase()}</span>
                   </div>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    {new Date(tape.uploadDate).toLocaleDateString('es-MX')} · {rows.length} registros
+                    {new Date(tape.uploadDate).toLocaleDateString('es-MX')} · {rawFileOnly ? 'archivo guardado sin filas analíticas' : `${rows.length} registros`}
                   </p>
                   {imp && (
                     <p className={`text-[11px] font-bold mt-0.5 truncate ${imp.severity === 'blocker' ? 'text-rose-600' : imp.severity === 'warning' ? 'text-amber-600' : 'text-emerald-600'}`}
@@ -526,7 +571,8 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                   {analysis && <StatusBadge status={analysis.overallStatus} />}
                   <button
                     onClick={() => handleAnalyze(tape)}
-                    disabled={analyzing === tape.id}
+                    disabled={analyzing === tape.id || rows.length === 0}
+                    title={rows.length === 0 ? 'Este archivo se guardó, pero no tiene filas tabulares para analizar.' : undefined}
                     className="flex items-center gap-1.5 text-xs bg-indigo-50 border border-indigo-200 text-indigo-700 font-bold px-3 py-1.5 rounded-lg hover:bg-indigo-100 transition-all disabled:opacity-60"
                   >
                     {analyzing === tape.id ? (
@@ -542,6 +588,17 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                   </button>
                 </div>
               </div>
+
+              {isExpanded && !analysis && rawFileOnly && (
+                <div className="border-t border-slate-100 bg-slate-50 px-6 py-5">
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
+                    <p className="text-sm font-black text-slate-900">Archivo guardado</p>
+                    <p className="mt-1 text-sm leading-6 text-slate-500">
+                      Este tipo de archivo queda asociado al cliente como documento de loan tape. Para análisis automático de cartera, sube también una versión Excel o CSV.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {/* Expanded: analysis */}
               {isExpanded && analysis && (

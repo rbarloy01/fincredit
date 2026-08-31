@@ -1,8 +1,8 @@
-import React, { Suspense, useState, useEffect, useRef } from 'react';
+import React, { Suspense, useState, useEffect } from 'react';
 import { db, Client, Transaction, FinancialStatement_DB, Covenant_DB, LoanTape_DB, InstitutionalLiability_DB, CustomField } from '../../db/index';
 import { Session } from '../../services/auth';
 import { AISettings } from '../../services/ai';
-import { ChevronLeft, Building2, Download, FileText, Trash2, Pencil } from 'lucide-react';
+import { ChevronLeft, Building2, Trash2, Pencil } from 'lucide-react';
 import TransactionPanel from '../transactions/TransactionPanel';
 import FinancialCovenantsPanel from '../covenants/FinancialCovenantsPanel';
 import HacerNoHacerPanel from '../covenants/HacerNoHacerPanel';
@@ -10,9 +10,7 @@ import CreditUnderwritingPanel from '../monitoring/CreditUnderwritingPanel';
 import AuditPanel from '../audit/AuditPanel';
 import WorkingOverlay from '../common/WorkingOverlay';
 import CompanyOverviewPanel from './CompanyOverviewPanel';
-import { ALL_FACILITIES, facilityDisplayName, matchesFacilityFilter } from '../../lib/facilityHistory';
 import { lazyWithChunkRetry } from '../../lib/lazyWithChunkRetry';
-import { loadExportModule } from '../../lib/exportLoader';
 import { timed } from '../../lib/telemetry';
 
 const FinancialPanel = lazyWithChunkRetry(() => import('../financials/FinancialPanel'), 'financial-panel');
@@ -30,12 +28,11 @@ interface Props {
   onEdit?: (client: Client) => void;
 }
 
-type Tab = 'monitor' | 'crm' | 'resumen' | 'company_overview' | 'transacciones' | 'estados' | 'auditoria' | 'loantape' | 'pasivos_institucionales' | 'cov_financiero' | 'hacer_no_hacer' | 'reporte';
+type Tab = 'monitor' | 'crm' | 'company_overview' | 'transacciones' | 'estados' | 'auditoria' | 'loantape' | 'pasivos_institucionales' | 'cov_financiero' | 'hacer_no_hacer' | 'reporte';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'monitor', label: 'Underwriting' },
   { id: 'crm', label: 'CRM' },
-  { id: 'resumen', label: 'Resumen' },
   { id: 'company_overview', label: 'Company Overview' },
   { id: 'transacciones', label: 'Transacciones' },
   { id: 'estados', label: 'Estados Financieros' },
@@ -47,23 +44,6 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'reporte', label: 'Reporte' },
 ];
 
-function fmtCurrency(value: number, currency: string): string {
-  const prefix = currency === 'MXN' ? '$' : currency === 'USD' ? 'USD ' : '€';
-  if (value >= 1_000_000) return `${prefix}${(value / 1_000_000).toFixed(2)}M`;
-  if (value >= 1_000) return `${prefix}${(value / 1_000).toFixed(1)}K`;
-  return `${prefix}${value.toLocaleString('es-MX')}`;
-}
-
-const StatusCircle = ({ status }: { status?: string }) => {
-  const bg = status === 'paid' ? 'bg-emerald-500' : status === 'unpaid' ? 'bg-rose-500' : 'bg-slate-200';
-  return (
-    <div className={`w-6 h-6 rounded-full ${bg} flex items-center justify-center mx-auto`}>
-      {status === 'paid' && <svg className="w-3 h-3 text-white" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-6" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>}
-      {status === 'unpaid' && <svg className="w-3 h-3 text-white" viewBox="0 0 12 12" fill="none"><path d="M3 3l6 6M9 3l-6 6" stroke="white" strokeWidth="2" strokeLinecap="round" /></svg>}
-    </div>
-  );
-};
-
 const TabFallback = () => (
   <div className="flex items-center justify-center py-16">
     <svg className="animate-spin h-7 w-7 text-indigo-500" viewBox="0 0 24 24" fill="none">
@@ -72,174 +52,6 @@ const TabFallback = () => (
     </svg>
   </div>
 );
-
-const ResumenTab: React.FC<{ client: Client; transactions: Transaction[]; covenants: Covenant_DB[] }> = ({ client, transactions, covenants }) => {
-  const [selectedTransactionId, setSelectedTransactionId] = useState(ALL_FACILITIES);
-  const history = (client.paymentHistory || []).filter(item => matchesFacilityFilter(item, selectedTransactionId, transactions.length)).slice(0, 6);
-  const aforo = (client.aforoHistory || []).filter(item => matchesFacilityFilter(item, selectedTransactionId, transactions.length)).slice(0, 6);
-  const transactionName = (transactionId?: string) => transactions.find(tx => tx.id === transactionId)?.name || '';
-  const selectedFacilityLabel = selectedTransactionId === ALL_FACILITIES
-    ? 'Todas las facilities'
-    : transactionName(selectedTransactionId) || 'Facility seleccionada';
-  const [exporting, setExporting] = useState<'excel' | 'pdf' | null>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
-
-  const handleExport = async (format: 'excel' | 'pdf') => {
-    setExporting(format);
-    try {
-      const { exportResumen } = await loadExportModule();
-      await exportResumen(client, transactions, covenants, format, format === 'pdf' ? panelRef.current ?? undefined : undefined);
-    } finally {
-      setExporting(null);
-    }
-  };
-
-  return (
-    <div ref={panelRef} className="space-y-6">
-      {/* Export bar */}
-      <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-        <label className="block w-full md:w-80">
-          <span className="mb-1 block text-[10px] font-black uppercase tracking-widest text-slate-400">Facility</span>
-          <select
-            value={selectedTransactionId}
-            onChange={event => setSelectedTransactionId(event.target.value)}
-            className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 outline-none focus:ring-2 focus:ring-indigo-300"
-          >
-            <option value={ALL_FACILITIES}>Todas las facilities</option>
-            {transactions.map(tx => (
-              <option key={tx.id} value={tx.id}>{tx.name || tx.creditType || 'Facility sin nombre'}</option>
-            ))}
-          </select>
-        </label>
-        <div className="flex justify-end gap-2">
-          <button onClick={() => handleExport('excel')} disabled={!!exporting} className="flex items-center gap-1.5 bg-white border border-slate-200 text-slate-600 font-bold px-3 py-2 rounded-xl text-xs hover:bg-slate-50 disabled:opacity-50 transition-all">
-            {exporting === 'excel' ? <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg> : <Download className="w-3.5 h-3.5" />}
-            Excel
-          </button>
-          <button onClick={() => handleExport('pdf')} disabled={!!exporting} className="flex items-center gap-1.5 bg-white border border-slate-200 text-slate-600 font-bold px-3 py-2 rounded-xl text-xs hover:bg-slate-50 disabled:opacity-50 transition-all">
-            {exporting === 'pdf' ? <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg> : <FileText className="w-3.5 h-3.5" />}
-            PDF
-          </button>
-        </div>
-      </div>
-
-      {/* Credit profile */}
-      <div className="bg-white border border-slate-200 rounded-2xl p-6">
-        <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-5">Perfil Crediticio</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div className="bg-slate-50 rounded-xl p-4">
-            <p className="text-xs text-slate-500 font-bold uppercase tracking-wide">Línea Total</p>
-            <p className="text-xl font-black text-slate-900 mt-1">{fmtCurrency(client.totalCreditValue, client.currency)}</p>
-          </div>
-          <div className="bg-slate-50 rounded-xl p-4">
-            <p className="text-xs text-slate-500 font-bold uppercase tracking-wide">Moneda</p>
-            <p className="text-xl font-black text-slate-900 mt-1">{client.currency}</p>
-          </div>
-          <div className="bg-slate-50 rounded-xl p-4">
-            <p className="text-xs text-slate-500 font-bold uppercase tracking-wide">Calificación</p>
-            <p className="text-xl font-black text-slate-900 mt-1">{client.score || '—'}</p>
-          </div>
-          <div className="bg-slate-50 rounded-xl p-4">
-            <p className="text-xs text-slate-500 font-bold uppercase tracking-wide">Días en Mora</p>
-            <p className="text-xl font-black text-slate-900 mt-1">{client.maxDefaultDays}</p>
-          </div>
-          <div className="bg-slate-50 rounded-xl p-4">
-            <p className="text-xs text-slate-500 font-bold uppercase tracking-wide">Tipo de Crédito</p>
-            <p className="text-sm font-bold text-slate-900 mt-1">{client.creditType?.join(', ') || '—'}</p>
-          </div>
-          <div className="bg-slate-50 rounded-xl p-4">
-            <p className="text-xs text-slate-500 font-bold uppercase tracking-wide">Industria</p>
-            <p className="text-sm font-bold text-slate-900 mt-1">{client.industry}</p>
-          </div>
-          <div className="bg-slate-50 rounded-xl p-4">
-            <p className="text-xs text-slate-500 font-bold uppercase tracking-wide">Analista</p>
-            <p className="text-sm font-bold text-slate-900 mt-1">{client.analystName || '—'}</p>
-          </div>
-          <div className="bg-slate-50 rounded-xl p-4">
-            <p className="text-xs text-slate-500 font-bold uppercase tracking-wide">Frecuencia</p>
-            <p className="text-sm font-bold text-slate-900 mt-1 capitalize">{client.frequency}</p>
-          </div>
-        </div>
-      </div>
-
-      {/* Payment history */}
-      {history.length > 0 && (
-        <div className="bg-white border border-slate-200 rounded-2xl p-6">
-          <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-5">Historial de Pagos</h3>
-          <p className="mb-4 text-xs font-semibold text-slate-500">{selectedFacilityLabel}</p>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="bg-slate-50">
-                  <th className="text-left px-4 py-2 text-xs font-black text-slate-600 uppercase tracking-wider">Mes</th>
-                  <th className="text-center px-4 py-2 text-xs font-black text-slate-600 uppercase tracking-wider">Principal</th>
-                  <th className="text-center px-4 py-2 text-xs font-black text-slate-600 uppercase tracking-wider">Interés</th>
-                </tr>
-              </thead>
-              <tbody>
-                {history.map((h, i) => (
-                  <tr key={i} className="border-t border-slate-100">
-                    <td className="px-4 py-3 font-semibold text-slate-700">{h.month}</td>
-                    <td className="px-4 py-3"><StatusCircle status={h.principalStatus} /></td>
-                    <td className="px-4 py-3"><StatusCircle status={h.interestStatus} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Aforo */}
-      {aforo.length > 0 && (
-        <div className="bg-white border border-slate-200 rounded-2xl p-6">
-          <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-1">Historial de Aforo</h3>
-          <p className="text-xs text-slate-500 mb-5">{selectedFacilityLabel} · Requerido: {client.aforoRequerido || 'N/D'}</p>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="bg-slate-50">
-                  <th className="text-left px-4 py-2 text-xs font-black text-slate-600 uppercase tracking-wider">Mes</th>
-                  <th className="text-center px-4 py-2 text-xs font-black text-slate-600 uppercase tracking-wider">Valor</th>
-                  <th className="text-center px-4 py-2 text-xs font-black text-slate-600 uppercase tracking-wider">Estado</th>
-                  {aforo.some(a => a.transactionId) && <th className="text-left px-4 py-2 text-xs font-black text-slate-600 uppercase tracking-wider">Facility</th>}
-                </tr>
-              </thead>
-              <tbody>
-                {aforo.map((a, i) => (
-                  <tr key={i} className="border-t border-slate-100">
-                    <td className="px-4 py-3 font-semibold text-slate-700">{a.month}</td>
-                    <td className="px-4 py-3 text-center font-mono text-slate-800">{a.value}</td>
-                    <td className="px-4 py-3 text-center">
-                      <span className={`text-xs font-black px-2 py-1 rounded-lg ${
-                        a.status === 'good' ? 'bg-emerald-100 text-emerald-800' :
-                        a.status === 'warning' ? 'bg-amber-100 text-amber-800' :
-                        'bg-rose-100 text-rose-800'
-                      }`}>
-                        {a.status === 'good' ? 'CUMPLE' : a.status === 'warning' ? 'ALERTA' : 'INCUMPLE'}
-                      </span>
-                    </td>
-                    {aforo.some(item => item.transactionId) && (
-                      <td className="px-4 py-3 text-xs font-bold text-slate-500">{facilityDisplayName(transactionName(a.transactionId), a)}</td>
-                    )}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Opinion */}
-      {client.opinion && (
-        <div className="bg-white border border-slate-200 rounded-2xl p-6">
-          <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-4">Opinión del Analista</h3>
-          <p className="text-slate-700 text-sm leading-relaxed whitespace-pre-wrap">{client.opinion}</p>
-        </div>
-      )}
-    </div>
-  );
-};
 
 const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, onDeleted, onEdit }) => {
   const [client, setClient] = useState<Client | null>(null);
@@ -408,7 +220,6 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
               loanTapes={loanTapes}
             />
           )}
-          {activeTab === 'resumen' && <ResumenTab client={client} transactions={transactions} covenants={covenants} />}
           {activeTab === 'crm' && (
             <CrmPanel
               clientId={clientId}
@@ -418,6 +229,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
           {activeTab === 'company_overview' && (
             <CompanyOverviewPanel
               client={client}
+              transactions={transactions}
               statements={statements}
               covenants={covenants}
               customFields={customFields}
@@ -498,7 +310,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
               customFields={customFields}
               onCustomFieldsChange={setCustomFields}
               onClientUpdate={handleClientUpdate}
-              onClose={() => setActiveTab('resumen')}
+              onClose={() => setActiveTab('monitor')}
             />
           )}
         </Suspense>

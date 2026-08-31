@@ -23,13 +23,26 @@ function ts(value?: string): number {
   return Number.isFinite(t) ? t : 0;
 }
 
-// A client's current pipeline stage = the most recently recorded `nextStage`
-// (the stage the deal is moving into). Falls back to the first stage.
+// A client's current pipeline stage = the most recently recorded stage signal.
+// Most activities log it as `nextStage` (the stage the deal is moving into),
+// but once a deal is disbursed its log simply switches to logging with
+// `phase: 'Monitoring'` going forward, with no explicit "next stage" activity
+// ever recorded — so that phase tag is treated as its own signal too.
+// Falls back to the first stage.
 export function currentStage(activities: CrmActivity[] = []): CrmStage {
-  const staged = activities
-    .filter(a => a.nextStage && (CRM_STAGES as readonly string[]).includes(a.nextStage))
+  const signals = activities
+    .map(a => {
+      if (a.nextStage && (CRM_STAGES as readonly string[]).includes(a.nextStage)) {
+        return { stage: a.nextStage as CrmStage, createdAt: a.createdAt };
+      }
+      if (a.phase === 'Monitoring') {
+        return { stage: 'Monitoring' as CrmStage, createdAt: a.createdAt };
+      }
+      return null;
+    })
+    .filter((s): s is NonNullable<typeof s> => s !== null)
     .sort((a, b) => ts(b.createdAt) - ts(a.createdAt));
-  return (staged[0]?.nextStage as CrmStage) || CRM_STAGES[0];
+  return signals[0]?.stage || CRM_STAGES[0];
 }
 
 export function groupClientsByStage<T extends { id: string }>(

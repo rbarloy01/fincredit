@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle, ArrowRight, Building2, CalendarClock, FileWarning,
-  Gauge, Moon, ShieldAlert, ShieldCheck, TrendingUp,
+  Gauge, Moon, ShieldAlert, ShieldCheck, TrendingUp, Briefcase, PieChart, Hourglass, Gavel,
 } from 'lucide-react';
 import { Client, ClientStatus, CrmActivity, Covenant_DB, FinancialStatement_DB, Transaction, db } from '../../db/index';
 import { CREDIT_RISK_DISCLAIMER } from '../../lib/creditRiskModel';
 import { buildPortfolioSummary, ClientSignal, PortfolioSummary } from '../../lib/portfolioAnalytics';
+import { buildPipelineSummary, MasterOrgPipelineMeta, PipelineSummary } from '../../lib/pipelineAnalytics';
 import WorkingOverlay from '../common/WorkingOverlay';
 
 interface Props {
@@ -25,6 +26,30 @@ function fmtCompact(value: number, currency = 'MXN') {
   if (abs >= 1_000) return `${prefix}${(value / 1_000).toFixed(0)}k`;
   return `${prefix}${Math.round(value).toLocaleString('es-MX')}`;
 }
+
+function fmtPct(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value)) return '—';
+  return `${(value * 100).toFixed(0)}%`;
+}
+
+function fmtDays(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value)) return '—';
+  return `${Math.round(value)} d`;
+}
+
+const MONITORING_ESTATUS_TONE: Record<string, string> = {
+  Cumplimiento: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+  'Incumplimiento técnico': 'border-amber-200 bg-amber-50 text-amber-700',
+  Incumplimiento: 'border-rose-200 bg-rose-50 text-rose-700',
+};
+
+const RESULTADO_TONE: Record<string, string> = {
+  Aprobado: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+  Cerrado: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+  'Rechazado por Axcess': 'border-rose-200 bg-rose-50 text-rose-700',
+  'Rechazado por cliente': 'border-rose-200 bg-rose-50 text-rose-700',
+  Dormant: 'border-slate-200 bg-slate-50 text-slate-600',
+};
 
 function fmtDate(value?: string | Date | null) {
   if (!value) return '—';
@@ -146,6 +171,7 @@ const DashboardPage: React.FC<Props> = ({ onSelectClient }) => {
   const [covenantsByClient, setCovenantsByClient] = useState<Record<string, Covenant_DB[]>>({});
   const [transactionsByClient, setTransactionsByClient] = useState<Record<string, Transaction[]>>({});
   const [activitiesByClient, setActivitiesByClient] = useState<Record<string, CrmActivity[]>>({});
+  const [pipelineMetaByClient, setPipelineMetaByClient] = useState<Record<string, MasterOrgPipelineMeta>>({});
   const [statusFilter, setStatusFilter] = useState<'activo' | 'dormant' | 'cerrado' | 'todos'>('activo');
   const [taggingId, setTaggingId] = useState('');
   const [detailsLoading, setDetailsLoading] = useState(false);
@@ -189,17 +215,19 @@ const DashboardPage: React.FC<Props> = ({ onSelectClient }) => {
       try {
         for (let i = 0; i < missing.length; i += DETAIL_BATCH_SIZE) {
           const batch = missing.slice(i, i + DETAIL_BATCH_SIZE);
-          const [nextStatements, nextCovenants, nextTransactions, nextActivities] = await Promise.all([
+          const [nextStatements, nextCovenants, nextTransactions, nextActivities, nextPipelineMeta] = await Promise.all([
             db.getDashboardStatementsForClients(batch),
             db.getCovenantsForClients(batch),
             db.getTransactionsForClients(batch),
             db.getCrmActivitiesForClients(batch),
+            db.getClientSettingsForClients<MasterOrgPipelineMeta>(batch, 'master_org_pipeline'),
           ]);
           if (!active) return;
           setStatementsByClient(prev => ({ ...prev, ...nextStatements }));
           setCovenantsByClient(prev => ({ ...prev, ...nextCovenants }));
           setTransactionsByClient(prev => ({ ...prev, ...nextTransactions }));
           setActivitiesByClient(prev => ({ ...prev, ...nextActivities }));
+          setPipelineMetaByClient(prev => ({ ...prev, ...nextPipelineMeta }));
           // Marca como cargados aunque no tengan datos, para no reintentar en cada cambio de filtro.
           batch.forEach(id => loadedDetailIds.current.add(id));
           await yieldToBrowser();
@@ -248,6 +276,11 @@ const DashboardPage: React.FC<Props> = ({ onSelectClient }) => {
     now: new Date(),
     maturityWindowDays: 90,
   }), [filteredClients, statementsByClient, covenantsByClient, transactionsByClient, activitiesByClient]);
+
+  const pipelineSummary: PipelineSummary = useMemo(
+    () => buildPipelineSummary(filteredClients, activitiesByClient, pipelineMetaByClient, new Date()),
+    [filteredClients, activitiesByClient, pipelineMetaByClient],
+  );
 
   const primaryCurrency = useMemo(() => {
     const entries = Object.entries(summary.exposureByCurrency);
@@ -473,6 +506,140 @@ const DashboardPage: React.FC<Props> = ({ onSelectClient }) => {
             })
           )}
         </SectionCard>
+      </div>
+
+      {/* Pipeline de Crédito (KPIs equivalentes a UWBR / Dashboard Ejecutivo del Master Org) */}
+      <div className="mt-8 border-t border-slate-200 pt-6">
+        <p className="mb-4 text-[11px] font-black uppercase tracking-[0.18em] text-indigo-600">Pipeline de crédito · Master Org</p>
+
+        <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-5">
+          <StatTile label="Pipeline bruto" value={fmtCompact(pipelineSummary.underwriting.montoTotal)} hint={`${pipelineSummary.underwriting.deals} deals activos`} icon={Briefcase} tone="indigo" />
+          <StatTile label="Pipeline ajustado" value={fmtCompact(pipelineSummary.underwriting.montoAjustado)} hint="ponderado × prob. por etapa" icon={Gauge} tone="slate" />
+          <StatTile label="Nuevos prospectos" value={`${pipelineSummary.underwriting.nuevosProspectosTrimestre}`} hint="este trimestre" icon={TrendingUp} tone="emerald" />
+          <StatTile label="Créditos activos (Monitoring)" value={`${pipelineSummary.monitoring.creditosActivos}`} hint={`${fmtCompact(pipelineSummary.monitoring.saldoVigente)} saldo vigente`} icon={Building2} tone="slate" />
+          <StatTile label="Comité de crédito" value={`${pipelineSummary.comite.casos}`} hint={pipelineSummary.comite.proximaFecha ? `próximo: ${fmtDate(pipelineSummary.comite.proximaFecha)}` : 'sin fecha próxima'} icon={Gavel} tone="amber" />
+        </div>
+
+        <div className="mb-5 grid grid-cols-1 gap-4 xl:grid-cols-2">
+          <SectionCard title="Underwriting por etapa" count={pipelineSummary.underwriting.deals} icon={Briefcase} accent="text-indigo-500">
+            {pipelineSummary.underwriting.porEtapa.length === 0 ? (
+              <EmptyRow text="Sin deals activos en el pipeline." />
+            ) : (
+              <div className="space-y-1.5 p-2">
+                {pipelineSummary.underwriting.porEtapa.map(e => (
+                  <div key={e.stage} className="flex items-center justify-between rounded-lg px-3 py-2 text-sm hover:bg-slate-50">
+                    <span className="font-black text-slate-800">{e.stage}</span>
+                    <span className="font-bold text-slate-500">{e.count} · {fmtCompact(e.monto)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </SectionCard>
+
+          <SectionCard title="Monitoring por estatus" count={pipelineSummary.monitoring.creditosActivos} icon={PieChart} accent="text-emerald-500">
+            {pipelineSummary.monitoring.porEstatus.length === 0 ? (
+              <EmptyRow text="Sin créditos en monitoreo." />
+            ) : (
+              <>
+                <div className="flex flex-wrap gap-2 p-2">
+                  {pipelineSummary.monitoring.porEstatus.map(e => (
+                    <span key={e.estatus} className={`rounded-md border px-2.5 py-1 text-[11px] font-black uppercase tracking-wider ${MONITORING_ESTATUS_TONE[e.estatus] || 'border-slate-200 bg-slate-50 text-slate-600'}`}>
+                      {e.estatus} · {e.count}
+                    </span>
+                  ))}
+                  <span className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-black uppercase tracking-wider text-slate-600">
+                    % Utilización prom. · {fmtPct(pipelineSummary.monitoring.pctUtilizacionPromedio)}
+                  </span>
+                </div>
+                {pipelineSummary.monitoring.clientesIncumplimiento.length > 0 && (
+                  <div className="mt-1 space-y-1 border-t border-slate-100 p-2">
+                    {pipelineSummary.monitoring.clientesIncumplimiento.map(c => (
+                      <button
+                        key={`${c.clientId}-${c.estatus}`}
+                        type="button"
+                        onClick={() => onSelectClient(c.clientId)}
+                        className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm hover:bg-rose-50/60"
+                      >
+                        <span className="font-black text-slate-800">{c.name}</span>
+                        <span className={`rounded-md border px-2 py-0.5 text-[10px] font-black uppercase tracking-wider ${MONITORING_ESTATUS_TONE[c.estatus] || 'border-slate-200 bg-slate-50 text-slate-600'}`}>{c.estatus}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </SectionCard>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+          <SectionCard title="Ciclo de vida promedio por etapa" icon={Hourglass} accent="text-slate-500">
+            {pipelineSummary.cicloVidaPorEtapa.length === 0 ? (
+              <EmptyRow text="Aún no hay suficiente historial de transiciones de etapa." />
+            ) : (
+              <div className="overflow-x-auto p-2">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="text-[10px] font-black uppercase tracking-wider text-slate-400">
+                      <th className="px-3 py-1.5">Etapa</th>
+                      <th className="px-3 py-1.5">Promedio</th>
+                      <th className="px-3 py-1.5">Mínimo</th>
+                      <th className="px-3 py-1.5">Máximo</th>
+                      <th className="px-3 py-1.5">n</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pipelineSummary.cicloVidaPorEtapa.map(s => (
+                      <tr key={s.stage} className="border-t border-slate-100">
+                        <td className="px-3 py-2 font-black text-slate-800">{s.stage}</td>
+                        <td className="px-3 py-2 font-bold text-slate-600">{fmtDays(s.avgDays)}</td>
+                        <td className="px-3 py-2 font-bold text-slate-500">{fmtDays(s.minDays)}</td>
+                        <td className="px-3 py-2 font-bold text-slate-500">{fmtDays(s.maxDays)}</td>
+                        <td className="px-3 py-2 font-bold text-slate-400">{s.n}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </SectionCard>
+
+          <SectionCard title="Eficiencia" icon={Moon} accent="text-slate-500">
+            <div className="flex flex-wrap gap-2 p-2">
+              {pipelineSummary.eficiencia.porResultado.map(r => (
+                <span key={r.resultado} className={`rounded-md border px-2.5 py-1 text-[11px] font-black uppercase tracking-wider ${RESULTADO_TONE[r.resultado] || 'border-slate-200 bg-slate-50 text-slate-600'}`}>
+                  {r.resultado} · {r.count}
+                </span>
+              ))}
+              {pipelineSummary.eficiencia.porResultado.length === 0 && (
+                <span className="text-xs font-semibold text-slate-400">Sin historial de deals cerrados/rechazados aún.</span>
+              )}
+            </div>
+            <div className="grid grid-cols-2 gap-3 border-t border-slate-100 p-3 sm:grid-cols-3">
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Dormant nuevos (trimestre)</p>
+                <p className="text-xl font-black text-slate-900">{pipelineSummary.eficiencia.dormantTrimestre}</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Deal velocity prom.</p>
+                <p className="text-xl font-black text-slate-900">{fmtDays(pipelineSummary.eficiencia.dealVelocityPromedioDias)}</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Motivo principal</p>
+                <p className="truncate text-sm font-black text-slate-900">{pipelineSummary.eficiencia.motivosNoCierre[0]?.motivo || '—'}</p>
+              </div>
+            </div>
+            {pipelineSummary.eficiencia.motivosNoCierre.length > 1 && (
+              <div className="space-y-1 border-t border-slate-100 p-2">
+                {pipelineSummary.eficiencia.motivosNoCierre.slice(1, 5).map(m => (
+                  <div key={m.motivo} className="flex items-center justify-between rounded-lg px-3 py-1.5 text-xs">
+                    <span className="font-bold text-slate-600">{m.motivo}</span>
+                    <span className="font-black text-slate-400">{m.count}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </SectionCard>
+        </div>
       </div>
     </div>
   );

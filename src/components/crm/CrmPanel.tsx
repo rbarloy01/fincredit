@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, Clock, Mail, Pencil, Phone, Plus, Save, Star, Trash2, UserRound, UsersRound, X } from 'lucide-react';
+import { Briefcase, CheckCircle2, Clock, Mail, Pencil, Phone, Plus, Save, Star, Trash2, UserRound, UsersRound, X } from 'lucide-react';
 import { CrmActivity, CrmActivityType, CrmContact, CrmInfluence, CrmPriority, CrmRelationship, CrmTimelineItem, db } from '../../db/index';
+import { HistorialMeta, MasterOrgPipelineMeta, MonitoringLineMeta, UnderwritingMeta } from '../../lib/pipelineAnalytics';
 import { Session } from '../../services/auth';
 
 interface Props {
@@ -115,6 +116,39 @@ const PHASES = ['Underwriting', 'Monitoring', 'Renovación', 'Apoyo'];
 const RECORD_TYPES = ['Comunicación', 'Reunión', 'Doc. Recibido', 'Avance', 'Avance de etapa', 'Disposición', 'Nota'];
 const STAGES = ['1. Contacto', '2. Term Sheet', '3. Checklist', '4. Análisis', '5. Due Diligence', '6. Contrato', '7. Disposición', 'Monitoring'];
 
+const CATEGORIAS = ['Nuevo Cliente', 'Renovación', 'Reingreso'];
+const PRIORIDADES = ['Crítico', 'Alto', 'Medio', 'Bajo'];
+const MONITOREO_ESTATUS = ['Cumplimiento', 'Incumplimiento técnico', 'Incumplimiento'];
+const RESULTADOS = ['En proceso', 'Aprobado', 'Cerrado', 'Rechazado por Axcess', 'Rechazado por cliente', 'Dormant'];
+const REACTIVABLE_OPCIONES = ['Sí', 'No', 'Quizás'];
+
+const emptyUnderwriting = (): UnderwritingMeta => ({
+  folio: '', monto: null, montoAjustado: null, categoria: CATEGORIAS[0], prioridad: PRIORIDADES[2],
+  etapaActual: '', diasEnEtapa: null, probCierre: '', primerContacto: '', fechaEstComite: '',
+  analista: '', ultimaActualizacion: '', motivoRetraso: '', estatus: '',
+});
+const emptyMonitoringLine = (): MonitoringLineMeta => ({
+  contrato: '', monto: null, saldoActual: null, pctUtilizacion: null, concentracionPortafolio: null,
+  estatus: MONITOREO_ESTATUS[0], analista: '', ultimaActualizacion: '',
+});
+const emptyHistorial = (): HistorialMeta => ({
+  folio: '', monto: null, categoria: CATEGORIAS[0], prioridad: PRIORIDADES[2], etapaDondeQuedo: '',
+  diasEnProceso: null, analista: '', resultado: RESULTADOS[5], motivo: '', reactivable: REACTIVABLE_OPCIONES[1],
+  fechaEstimadaReactivacion: '', dealVelocityDias: null,
+});
+const emptyPipelineMeta = (): MasterOrgPipelineMeta => ({ underwriting: null, monitoring: [], historial: [] });
+
+const toPercentInput = (value: number | null | undefined) => {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '';
+  return String(Math.round(value * 10000) / 100);
+};
+
+const fromPercentInput = (value: string) => {
+  if (value === '') return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric / 100 : null;
+};
+
 const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
   const [contacts, setContacts] = useState<CrmContact[]>([]);
   const [activities, setActivities] = useState<CrmActivity[]>([]);
@@ -126,19 +160,26 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [pipeline, setPipeline] = useState<MasterOrgPipelineMeta>(emptyPipelineMeta);
+  const [pipelineSaving, setPipelineSaving] = useState(false);
+  const [pipelineSaved, setPipelineSaved] = useState(false);
+  const [timelinePaged, setTimelinePaged] = useState(true);
+  const [timelineVisibleCount, setTimelineVisibleCount] = useState(20);
 
   const loadCrm = async () => {
     setLoading(true);
     setError('');
     try {
-      const [nextContacts, nextActivities, nextTimeline] = await Promise.all([
+      const [nextContacts, nextActivities, nextTimeline, nextPipeline] = await Promise.all([
         db.getCrmContacts(clientId),
         db.getCrmActivities(clientId),
         db.getCrmTimeline(clientId),
+        db.getClientSetting<MasterOrgPipelineMeta>(clientId, 'master_org_pipeline', emptyPipelineMeta()),
       ]);
       setContacts(nextContacts);
       setActivities(nextActivities);
       setTimeline(nextTimeline);
+      setPipeline(nextPipeline);
     } catch (err: any) {
       setError(err.message || 'No se pudo cargar CRM.');
     } finally {
@@ -146,15 +187,51 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
     }
   };
 
+  const savePipeline = async () => {
+    setPipelineSaving(true);
+    setPipelineSaved(false);
+    setError('');
+    try {
+      await db.setClientSetting(clientId, 'master_org_pipeline', pipeline);
+      setPipelineSaved(true);
+      window.setTimeout(() => setPipelineSaved(false), 2000);
+    } catch (err: any) {
+      setError(err.message || 'No se pudo guardar el pipeline.');
+    } finally {
+      setPipelineSaving(false);
+    }
+  };
+
+  const addMonitoringLine = () => setPipeline(prev => ({ ...prev, monitoring: [...prev.monitoring, emptyMonitoringLine()] }));
+  const removeMonitoringLine = (index: number) => setPipeline(prev => ({ ...prev, monitoring: prev.monitoring.filter((_, i) => i !== index) }));
+  const updateMonitoringLine = (index: number, patch: Partial<MonitoringLineMeta>) =>
+    setPipeline(prev => ({ ...prev, monitoring: prev.monitoring.map((line, i) => (i === index ? { ...line, ...patch } : line)) }));
+
+  const addHistorial = () => setPipeline(prev => ({ ...prev, historial: [...prev.historial, emptyHistorial()] }));
+  const removeHistorial = (index: number) => setPipeline(prev => ({ ...prev, historial: prev.historial.filter((_, i) => i !== index) }));
+  const updateHistorial = (index: number, patch: Partial<HistorialMeta>) =>
+    setPipeline(prev => ({ ...prev, historial: prev.historial.map((h, i) => (i === index ? { ...h, ...patch } : h)) }));
+
   useEffect(() => {
     setContactDraft({ ...emptyContact(), clientId, createdBy: session.userId });
     setActivityDraft({ ...emptyActivity(), clientId, createdBy: session.userId, ownerId: session.userId });
+    setTimelinePaged(true);
+    setTimelineVisibleCount(20);
     void loadCrm();
   }, [clientId]);
 
   const openActivities = useMemo(() => activities.filter(item => item.status === 'planned'), [activities]);
   const doneActivities = useMemo(() => activities.filter(item => item.status === 'done'), [activities]);
   const primaryContact = contacts.find(contact => contact.isPrimary);
+  const visibleTimeline = timelinePaged ? timeline.slice(0, timelineVisibleCount) : timeline;
+  const hiddenTimelineCount = Math.max(0, timeline.length - visibleTimeline.length);
+  const timelinePage = Math.max(1, Math.ceil(visibleTimeline.length / 20));
+  const timelinePages = Math.max(1, Math.ceil(timeline.length / 20));
+
+  const toggleTimelineMode = () => {
+    setTimelineVisibleCount(20);
+    setTimelinePaged(current => !current);
+  };
 
   const saveContact = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -217,6 +294,18 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
     setSaving(true);
     setError('');
     try {
+      const original = contacts.find(contact => contact.id === editingContact.id);
+      const changedFields = original ? [
+        ['nombre', original.name, editingContact.name],
+        ['cargo', original.title, editingContact.title],
+        ['area', original.department, editingContact.department],
+        ['email', original.email, editingContact.email],
+        ['telefono', original.phone, editingContact.phone],
+        ['influencia', original.influence, editingContact.influence],
+        ['relacion', original.relationship, editingContact.relationship],
+        ['principal', String(original.isPrimary), String(editingContact.isPrimary)],
+        ['notas', original.notes, editingContact.notes],
+      ].filter(([, before, after]) => String(before || '').trim() !== String(after || '').trim()).map(([label]) => label) : [];
       await db.updateCrmContact(editingContact.id, {
         name: editingContact.name.trim(),
         title: editingContact.title.trim(),
@@ -228,6 +317,28 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
         isPrimary: editingContact.isPrimary,
         notes: editingContact.notes.trim(),
       });
+      if (changedFields.length) {
+        await db.createCrmActivity({
+          clientId,
+          contactId: editingContact.id,
+          type: 'note',
+          phase: 'Apoyo',
+          recordType: 'Nota',
+          nextStage: '',
+          contactName: editingContact.name.trim(),
+          analystName: '',
+          subject: `Contacto actualizado: ${editingContact.name.trim()}`,
+          quickNote: `Campos modificados: ${changedFields.join(', ')}`,
+          nextStep: '',
+          detail: '',
+          status: 'done',
+          priority: 'normal',
+          dueAt: undefined,
+          completedAt: new Date().toISOString(),
+          ownerId: session.userId,
+          createdBy: session.userId,
+        });
+      }
       setEditingContact(null);
       await loadCrm();
     } catch (err: any) {
@@ -322,6 +433,182 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
         <div className="crm-card crm-metric crm-metric-blue">
           <p className="text-[11px] font-black uppercase tracking-wider text-blue-700">Contacto principal</p>
           <p className="mt-1 truncate text-lg font-black text-slate-900">{primaryContact?.name || 'Sin asignar'}</p>
+        </div>
+      </div>
+
+      <div className="crm-card p-5">
+        <div className="mb-4 flex items-center justify-between gap-3 border-b border-slate-200 pb-3">
+          <div className="flex items-center gap-2">
+            <Briefcase className="h-4 w-4 text-indigo-600" />
+            <h2 className="text-sm font-black uppercase tracking-widest text-slate-900">Pipeline (Master Org)</h2>
+          </div>
+          <button
+            type="button"
+            onClick={savePipeline}
+            disabled={pipelineSaving}
+            className="flex items-center gap-2 rounded-lg bg-indigo-700 px-3 py-2 text-xs font-black text-white hover:bg-indigo-600 disabled:opacity-50"
+          >
+            <Save className="h-3.5 w-3.5" />
+            {pipelineSaving ? 'Guardando…' : pipelineSaved ? 'Guardado ✓' : 'Guardar pipeline'}
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 gap-5 xl:grid-cols-3">
+          {/* Underwriting */}
+          <div>
+            <label className="mb-3 flex items-center gap-2 text-sm font-bold text-slate-600">
+              <input
+                className="h-4 w-4 rounded border-slate-300 text-indigo-600"
+                type="checkbox"
+                checked={!!pipeline.underwriting}
+                onChange={e => setPipeline(prev => ({ ...prev, underwriting: e.target.checked ? emptyUnderwriting() : null }))}
+              />
+              Deal activo en Underwriting
+            </label>
+            {pipeline.underwriting && (
+              <div className="space-y-3">
+                <label>
+                  <span className={labelClass}>Monto</span>
+                  <input
+                    className={inputClass}
+                    type="number"
+                    value={pipeline.underwriting.monto ?? ''}
+                    onChange={e => setPipeline(prev => ({ ...prev, underwriting: prev.underwriting && { ...prev.underwriting, monto: e.target.value === '' ? null : Number(e.target.value) } }))}
+                    placeholder="MXN"
+                  />
+                </label>
+                <label>
+                  <span className={labelClass}>Categoría</span>
+                  <select
+                    className={inputClass}
+                    value={pipeline.underwriting.categoria}
+                    onChange={e => setPipeline(prev => ({ ...prev, underwriting: prev.underwriting && { ...prev.underwriting, categoria: e.target.value } }))}
+                  >
+                    {CATEGORIAS.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </label>
+                <label>
+                  <span className={labelClass}>Prioridad</span>
+                  <select
+                    className={inputClass}
+                    value={pipeline.underwriting.prioridad}
+                    onChange={e => setPipeline(prev => ({ ...prev, underwriting: prev.underwriting && { ...prev.underwriting, prioridad: e.target.value } }))}
+                  >
+                    {PRIORIDADES.map(p => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                </label>
+                <label>
+                  <span className={labelClass}>Fecha estimada de comité</span>
+                  <input
+                    className={inputClass}
+                    type="date"
+                    value={pipeline.underwriting.fechaEstComite}
+                    onChange={e => setPipeline(prev => ({ ...prev, underwriting: prev.underwriting && { ...prev.underwriting, fechaEstComite: e.target.value } }))}
+                  />
+                </label>
+                <p className="text-[11px] font-semibold text-slate-400">La etapa actual se calcula en vivo desde el Timeline (más abajo) — no se edita aquí.</p>
+              </div>
+            )}
+          </div>
+
+          {/* Monitoring */}
+          <div>
+            <div className="mb-3 flex items-center justify-between">
+              <p className={labelClass}>Líneas de monitoreo</p>
+              <button type="button" onClick={addMonitoringLine} className="flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-600 hover:bg-slate-50">
+                <Plus className="h-3 w-3" />Agregar
+              </button>
+            </div>
+            <div className="space-y-4">
+              {pipeline.monitoring.length === 0 && <p className="text-xs font-semibold text-slate-400">Sin líneas activas.</p>}
+              {pipeline.monitoring.map((line, i) => (
+                <div key={i} className="space-y-2 rounded-lg border border-slate-200 p-3">
+                  <div className="flex items-end justify-between gap-2">
+                    <label className="flex-1">
+                      <span className={labelClass}>Folio / contrato</span>
+                      <input
+                        className={`${inputClass} !py-1.5 text-xs`}
+                        value={line.contrato}
+                        onChange={e => updateMonitoringLine(i, { contrato: e.target.value })}
+                        placeholder="Contrato, línea o facility"
+                      />
+                    </label>
+                    <button type="button" onClick={() => removeMonitoringLine(i)} className="ml-2 rounded-md p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600">
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label>
+                      <span className={labelClass}>Monto original</span>
+                      <input className={`${inputClass} !py-1.5 text-xs`} type="number" value={line.monto ?? ''} onChange={e => updateMonitoringLine(i, { monto: e.target.value === '' ? null : Number(e.target.value) })} placeholder="0.00" />
+                    </label>
+                    <label>
+                      <span className={labelClass}>Saldo actual</span>
+                      <input className={`${inputClass} !py-1.5 text-xs`} type="number" value={line.saldoActual ?? ''} onChange={e => updateMonitoringLine(i, { saldoActual: e.target.value === '' ? null : Number(e.target.value) })} placeholder="0.00" />
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label>
+                      <span className={labelClass}>Utilización (%)</span>
+                      <input className={`${inputClass} !py-1.5 text-xs`} type="number" step="0.01" min="0" value={toPercentInput(line.pctUtilizacion)} onChange={e => updateMonitoringLine(i, { pctUtilizacion: fromPercentInput(e.target.value) })} placeholder="0.00" />
+                    </label>
+                    <label>
+                      <span className={labelClass}>Estatus</span>
+                      <select className={`${inputClass} !py-1.5 text-xs`} value={line.estatus} onChange={e => updateMonitoringLine(i, { estatus: e.target.value })}>
+                        {MONITOREO_ESTATUS.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label>
+                      <span className={labelClass}>Concentración portafolio (%)</span>
+                      <input className={`${inputClass} !py-1.5 text-xs`} type="number" step="0.01" min="0" value={toPercentInput(line.concentracionPortafolio)} onChange={e => updateMonitoringLine(i, { concentracionPortafolio: fromPercentInput(e.target.value) })} placeholder="0.00" />
+                    </label>
+                    <label>
+                      <span className={labelClass}>Última actualización</span>
+                      <input className={`${inputClass} !py-1.5 text-xs`} type="date" value={line.ultimaActualizacion} onChange={e => updateMonitoringLine(i, { ultimaActualizacion: e.target.value })} />
+                    </label>
+                  </div>
+                  <label>
+                    <span className={labelClass}>Analista</span>
+                    <input className={`${inputClass} !py-1.5 text-xs`} value={line.analista} onChange={e => updateMonitoringLine(i, { analista: e.target.value })} placeholder="Responsable" />
+                  </label>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Historial: un cliente puede tener más de un desenlace (ej. rechazado y luego aprobado en un reingreso) */}
+          <div>
+            <div className="mb-3 flex items-center justify-between">
+              <p className={labelClass}>Desenlaces históricos</p>
+              <button type="button" onClick={addHistorial} className="flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-600 hover:bg-slate-50">
+                <Plus className="h-3 w-3" />Agregar
+              </button>
+            </div>
+            <div className="space-y-4">
+              {pipeline.historial.length === 0 && <p className="text-xs font-semibold text-slate-400">Sin desenlaces registrados.</p>}
+              {pipeline.historial.map((h, i) => (
+                <div key={i} className="space-y-2 rounded-lg border border-slate-200 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <select className={`${inputClass} !py-1.5 text-xs`} value={h.resultado} onChange={e => updateHistorial(i, { resultado: e.target.value })}>
+                      {RESULTADOS.map(r => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                    <button type="button" onClick={() => removeHistorial(i)} className="ml-2 rounded-md p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600">
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  <input className={`${inputClass} !py-1.5 text-xs`} value={h.motivo} onChange={e => updateHistorial(i, { motivo: e.target.value })} placeholder="Motivo: riesgo identificado, tasa muy alta…" />
+                  <div className="grid grid-cols-2 gap-2">
+                    <select className={`${inputClass} !py-1.5 text-xs`} value={h.reactivable} onChange={e => updateHistorial(i, { reactivable: e.target.value })}>
+                      {REACTIVABLE_OPCIONES.map(r => <option key={r} value={r}>{`Reactivable: ${r}`}</option>)}
+                    </select>
+                    <input className={`${inputClass} !py-1.5 text-xs`} type="number" value={h.dealVelocityDias ?? ''} onChange={e => updateHistorial(i, { dealVelocityDias: e.target.value === '' ? null : Number(e.target.value) })} placeholder="Deal velocity (días)" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
 
@@ -746,15 +1033,30 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
           </div>
 
           <div className="crm-card p-5">
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
               <h2 className="text-sm font-black uppercase tracking-widest text-slate-900">Timeline</h2>
-              {timeline.length > 0 && <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-black text-slate-500">{timeline.length}</span>}
+              <div className="flex items-center gap-2">
+                {timeline.length > 20 && (
+                  <button
+                    type="button"
+                    onClick={toggleTimelineMode}
+                    className="rounded-lg border border-slate-200 px-3 py-1.5 text-[10px] font-black uppercase tracking-wider text-slate-600 transition hover:bg-slate-50"
+                  >
+                    {timelinePaged ? 'Mostrar todo' : 'Ver 20 en 20'}
+                  </button>
+                )}
+                {timeline.length > 0 && (
+                  <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-black text-slate-500">
+                    {timelinePaged ? `${visibleTimeline.length}/${timeline.length} · Pag. ${timelinePage}/${timelinePages}` : `${timeline.length} total`}
+                  </span>
+                )}
+              </div>
             </div>
             <div className="relative mt-5">
               {timeline.length === 0 && <p className="py-8 text-center text-sm font-semibold text-slate-400">Aún no hay historia CRM para este cliente</p>}
               {timeline.length > 0 && <span className="absolute left-4 top-2 bottom-2 w-px bg-slate-200" aria-hidden />}
               <div className="space-y-5">
-                {timeline.map(item => {
+                {visibleTimeline.map(item => {
                   const nodeStyle = timelineNodeStyle(item);
                   const chip = timelineStatusChip(item);
                   return (
@@ -778,6 +1080,17 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
                     </div>
                   );
                 })}
+                {timelinePaged && hiddenTimelineCount > 0 && (
+                  <div className="relative pl-11">
+                    <button
+                      type="button"
+                      onClick={() => setTimelineVisibleCount(count => Math.min(count + 20, timeline.length))}
+                      className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-black text-slate-600 transition hover:bg-slate-50"
+                    >
+                      Cargar siguientes {Math.min(20, hiddenTimelineCount)} ({hiddenTimelineCount} restantes)
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           </div>
