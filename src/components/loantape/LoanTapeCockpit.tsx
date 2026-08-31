@@ -64,6 +64,15 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
   const prevPoint = focusIdxInSel > 0 ? sel[focusIdxInSel - 1] : null;
 
   const togglePeriod = (p: string) => setSelected(prev => (prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p]).sort());
+  const isolatePeriod = (period: string) => {
+    setSelected([period]);
+    setFocus(period);
+  };
+  const isolatePeriodFromChart = (event: any) => {
+    const label = event?.activeLabel || event?.payload?.label || event?.label;
+    const period = data.periods.find((p, index) => data.labels[index] === label);
+    if (period) isolatePeriod(period);
+  };
   const preset = (which: 'todo' | 'u3' | 'trim' | 'y2026') => {
     if (which === 'todo') return setSelected(data.periods);
     if (which === 'u3') return setSelected(data.periods.slice(-3));
@@ -148,6 +157,11 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
           {([['todo', 'Todo'], ['u3', 'Últimos 3'], ['trim', 'Trimestral'], ['y2026', '2026']] as const).map(([k, lbl]) => (
             <button key={k} onClick={() => preset(k)} className="text-[11px] font-bold px-2 py-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">{lbl}</button>
           ))}
+          {selected.length === 1 && (
+            <span className="text-[11px] font-black text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1">
+              Filtrado: {periodLabel(selected[0])}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-3 flex-wrap">
           <label className="flex items-center gap-1.5 text-xs font-bold text-slate-600">
@@ -206,14 +220,14 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
       <ChartCard title="Evolución de saldo & cartera vencida (>90d)" subtitle="Barras = saldo · línea = % vencida" fileName={`Evolucion_${clientName}`} captureId="evo" registerNode={registerNode} legend={[{ label: 'Saldo', color: C.indigo }, { label: 'Vencida %', color: C.red }]}>
         <div style={{ height: 260 }}>
           <ResponsiveContainer>
-            <ComposedChart data={evoData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+            <ComposedChart data={evoData} onClick={isolatePeriodFromChart} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
               <XAxis dataKey="label" tick={{ fontSize: 11 }} />
               <YAxis yAxisId="l" tickFormatter={v => moneyM(Number(v))} tick={{ fontSize: 11 }} width={78} />
               <YAxis yAxisId="r" orientation="right" tickFormatter={v => pctPoint(Number(v))} tick={{ fontSize: 11 }} width={58} />
               <Tooltip contentStyle={tooltipStyle} formatter={(v: any, n: any) => n === 'saldo' ? money(Number(v)) : pctPoint(Number(v))} />
-              <Bar yAxisId="l" dataKey="saldo" fill={C.indigo} radius={[3, 3, 0, 0]} name="Saldo" />
-              <Line yAxisId="r" dataKey="venPct" stroke={C.red} strokeWidth={2.4} dot={{ r: 3 }} name="Vencida %" />
+              <Bar yAxisId="l" dataKey="saldo" fill={C.indigo} radius={[3, 3, 0, 0]} name="Saldo" cursor="pointer" />
+              <Line yAxisId="r" dataKey="venPct" stroke={C.red} strokeWidth={2.4} dot={{ r: 4, cursor: 'pointer' }} activeDot={{ r: 6, onClick: isolatePeriodFromChart }} name="Vencida %" />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -224,15 +238,15 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
         <ChartCard title="Migración de calidad de cartera" subtitle="% del saldo por estatus, por corte" fileName={`Calidad_${clientName}`} captureId="calidad" registerNode={registerNode} legend={[{ label: 'Vigente', color: C.green }, { label: 'Atrasada', color: C.amber }, { label: 'Vencida', color: C.red }]}>
           <div style={{ height: 240 }}>
             <ResponsiveContainer>
-              <BarChart data={qualData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }} stackOffset="expand">
+              <BarChart data={qualData} onClick={isolatePeriodFromChart} margin={{ top: 8, right: 12, left: 0, bottom: 0 }} stackOffset="expand">
                 <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
                 <XAxis dataKey="label" tick={{ fontSize: 11 }} />
                 <YAxis tickFormatter={v => pctS(Number(v))} tick={{ fontSize: 11 }} width={58} />
                 <Tooltip contentStyle={tooltipStyle} formatter={(v: any) => pctS(Number(v))} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Bar dataKey="Vigente" stackId="q" fill={C.green} />
-                <Bar dataKey="Atrasada" stackId="q" fill={C.amber} />
-                <Bar dataKey="Vencida" stackId="q" fill={C.red} />
+                <Bar dataKey="Vigente" stackId="q" fill={C.green} cursor="pointer" />
+                <Bar dataKey="Atrasada" stackId="q" fill={C.amber} cursor="pointer" />
+                <Bar dataKey="Vencida" stackId="q" fill={C.red} cursor="pointer" />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -250,7 +264,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
                   {sel.map(s => {
                     const p = s.dpdPct[bi] || 0; const danger = bi >= 4; const base = danger ? '244,63,94' : bi >= 2 ? '245,158,11' : '5,150,105';
                     const a = Math.min(1, p * (danger ? 9 : 4) + 0.06);
-                    return <div key={s.period} title={`${s.label} · ${b} · ${pctS(p)}`} className="h-6 rounded flex items-center justify-center text-[9px] font-black" style={{ background: `rgba(${base},${a})`, color: a > 0.5 ? '#fff' : '#94a3b8' }}>{p > 0.04 ? (p * 100).toFixed(0) : ''}</div>;
+                    return <button key={s.period} onClick={() => isolatePeriod(s.period)} title={`${s.label} · ${b} · ${pctS(p)}`} className="h-6 rounded flex items-center justify-center text-[9px] font-black" style={{ background: `rgba(${base},${a})`, color: a > 0.5 ? '#fff' : '#94a3b8' }}>{p > 0.04 ? (p * 100).toFixed(0) : ''}</button>;
                   })}
                 </React.Fragment>
               ))}
@@ -279,15 +293,15 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
         <ChartCard title="HHI & Top-1 en el tiempo" subtitle="Índice Herfindahl (0-1) y concentración del cliente #1" fileName={`HHI_${clientName}`} captureId="hhi" registerNode={registerNode} legend={[{ label: 'HHI', color: C.indigo }, { label: 'Top-1 %', color: C.cyan }]}>
           <div style={{ height: 240 }}>
             <ResponsiveContainer>
-              <ComposedChart data={hhiData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+              <ComposedChart data={hhiData} onClick={isolatePeriodFromChart} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
                 <XAxis dataKey="label" tick={{ fontSize: 11 }} />
                 <YAxis yAxisId="l" tick={{ fontSize: 11 }} tickFormatter={v => Number(v).toLocaleString('es-MX', { maximumFractionDigits: 3 })} width={54} />
                 <YAxis yAxisId="r" orientation="right" tickFormatter={v => pctPoint(Number(v))} tick={{ fontSize: 11 }} width={58} />
                 <Tooltip contentStyle={tooltipStyle} formatter={(v: any, n: any) => n === 'Top-1 %' ? pctPoint(Number(v)) : Number(v).toLocaleString('es-MX', { maximumFractionDigits: 3 })} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Line yAxisId="l" dataKey="HHI" stroke={C.indigo} strokeWidth={2.2} dot={{ r: 2 }} />
-                <Line yAxisId="r" dataKey="Top1" stroke={C.cyan} strokeWidth={2.2} dot={{ r: 2 }} name="Top-1 %" />
+                <Line yAxisId="l" dataKey="HHI" stroke={C.indigo} strokeWidth={2.2} dot={{ r: 4, cursor: 'pointer' }} activeDot={{ r: 6, onClick: isolatePeriodFromChart }} />
+                <Line yAxisId="r" dataKey="Top1" stroke={C.cyan} strokeWidth={2.2} dot={{ r: 4, cursor: 'pointer' }} activeDot={{ r: 6, onClick: isolatePeriodFromChart }} name="Top-1 %" />
               </ComposedChart>
             </ResponsiveContainer>
           </div>
@@ -297,14 +311,14 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
         <ChartCard title="Roll-rate — deterioro vs. cura" subtitle="Créditos que empeoran (↑) vs. que se curan (↓) por corte" fileName={`RollRate_${clientName}`} captureId="roll" registerNode={registerNode} legend={[{ label: 'Deteriorados', color: C.red }, { label: 'Curados', color: C.green }]}>
           <div style={{ height: 240 }}>
             <ResponsiveContainer>
-              <BarChart data={rollData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }} stackOffset="sign">
+              <BarChart data={rollData} onClick={isolatePeriodFromChart} margin={{ top: 8, right: 12, left: 0, bottom: 0 }} stackOffset="sign">
                 <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
                 <XAxis dataKey="label" tick={{ fontSize: 11 }} />
                 <YAxis tick={{ fontSize: 11 }} tickFormatter={v => intS(Number(v))} width={44} />
                 <Tooltip contentStyle={tooltipStyle} formatter={(v: any) => intS(Number(v))} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Bar dataKey="Deteriorados" fill={C.red} stackId="s" radius={[3, 3, 0, 0]} />
-                <Bar dataKey="Curados" fill={C.green} stackId="s" radius={[0, 0, 3, 3]} />
+                <Bar dataKey="Deteriorados" fill={C.red} stackId="s" radius={[3, 3, 0, 0]} cursor="pointer" />
+                <Bar dataKey="Curados" fill={C.green} stackId="s" radius={[0, 0, 3, 3]} cursor="pointer" />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -314,13 +328,13 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
         <ChartCard title="Tendencia de clientes principales" subtitle="Saldo (MXN M) por corte · top 5" fileName={`Clientes_${clientName}`} captureId="clientes" registerNode={registerNode} legend={data.topClients.map((c, i) => ({ label: c.length > 16 ? c.slice(0, 16) + '…' : c, color: CLIENT_COLORS[i % CLIENT_COLORS.length] }))}>
           <div style={{ height: 240 }}>
             <ResponsiveContainer>
-              <LineChart data={cliData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+              <LineChart data={cliData} onClick={isolatePeriodFromChart} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" />
                 <XAxis dataKey="label" tick={{ fontSize: 11 }} />
                 <YAxis tickFormatter={v => moneyMillions(Number(v))} tick={{ fontSize: 11 }} width={72} />
                 <Tooltip contentStyle={tooltipStyle} formatter={(v: any) => moneyMillions(Number(v))} />
                 <Legend wrapperStyle={{ fontSize: 10 }} />
-                {data.topClients.map((c, i) => <Line key={c} dataKey={c} stroke={CLIENT_COLORS[i % CLIENT_COLORS.length]} strokeWidth={2} dot={false} connectNulls name={c.length > 16 ? c.slice(0, 16) + '…' : c} />)}
+                {data.topClients.map((c, i) => <Line key={c} dataKey={c} stroke={CLIENT_COLORS[i % CLIENT_COLORS.length]} strokeWidth={2} dot={{ r: 3, cursor: 'pointer' }} activeDot={{ r: 5, onClick: isolatePeriodFromChart }} connectNulls name={c.length > 16 ? c.slice(0, 16) + '…' : c} />)}
               </LineChart>
             </ResponsiveContainer>
           </div>
