@@ -22,7 +22,7 @@ export type SheetInput = { name: string; rows: any[][] };
 
 type Field =
   | 'loan_id' | 'client' | 'amount' | 'capVig' | 'capVen' | 'outstanding_balance'
-  | 'interest_rate' | 'start_date' | 'end_date' | 'loan_type' | 'days_overdue' | 'state';
+  | 'interest_rate' | 'start_date' | 'end_date' | 'loan_type' | 'days_overdue' | 'loan_status' | 'state';
 
 interface SheetProfile {
   name: string;
@@ -49,6 +49,22 @@ const PROFILES: SheetProfile[] = [
       capVig: ['Capital Vigente'], capVen: ['Capital Vencido'], interest_rate: ['Tasa Final', 'Tasa Base'],
       start_date: ['Fecha Apertura'], end_date: ['Fecha Vencimiento'],
       loan_type: ['Descripcion Producto'], days_overdue: ['Días de atraso', 'Dias Atraso'], state: ['Descripcion Estado'],
+    },
+  },
+  {
+    name: 'COFINE',
+    headerProbe: ['Número de Préstamo Intermediario ', 'Saldo Total (pesos)', 'Días de Vencidos.'],
+    columnMap: {
+      loan_id: ['Número de Préstamo Intermediario ', 'Numero de Prestamo Intermediario', 'Número de Préstamo Intermediario'],
+      client: ['Id cliente'],
+      amount: ['Monto Otorgado  (pesos)', 'Monto Otorgado (pesos)'],
+      capVig: ['Capital Vigente (pesos)'],
+      capVen: ['Capital Mosoro y vencido (pesos)', 'Capital Moroso y vencido (pesos)', 'Capital Vencido (pesos)'],
+      interest_rate: ['Tasa / Sobretasa Acreditado', 'Tasa base ANUAL de interés'],
+      start_date: ['Fecha de  Otorgamiento (dd/mm/aaaa)', 'Fecha de Otorgamiento (dd/mm/aaaa)'],
+      loan_type: ['Tipo de Crédito'],
+      days_overdue: ['Días de Vencidos.', 'Dias de Vencidos', 'Días Vencidos'],
+      loan_status: ['Estatus del Crédito'],
     },
   },
 ];
@@ -115,6 +131,11 @@ function statusFromDpd(dpd: number | null): string | null {
   return 'Vigente';
 }
 
+function normalizeStatus(raw: any, dpd: number | null): string | null {
+  if (!isBlank(raw)) return String(raw).trim();
+  return statusFromDpd(dpd);
+}
+
 const isBlank = (v: any) => v === null || v === undefined || String(v).trim() === '';
 const nonEmptyCells = (row: any[]) => row.filter(c => !isBlank(c)).length;
 
@@ -148,7 +169,7 @@ function extractWithProfile(rows: any[][], headerIdx: number, profile: SheetProf
   const push = (target: string, field: Field, srcs?: string[]) => {
     if (idx[field] !== undefined) notes.push({ source_header: (srcs || [])[0] || target, target_term: target, confidence: 'high', reasoning: `${profile.name}: ${field}` } as MappingNote);
   };
-  (['loan_id', 'client', 'amount', 'interest_rate', 'start_date', 'end_date', 'loan_type', 'days_overdue', 'state'] as const).forEach(f => push(f, f as Field, profile.columnMap[f as Field]));
+  (['loan_id', 'client', 'amount', 'interest_rate', 'start_date', 'end_date', 'loan_type', 'days_overdue', 'loan_status', 'state'] as const).forEach(f => push(f, f as Field, profile.columnMap[f as Field]));
   if (idx.capVig !== undefined || idx.capVen !== undefined) notes.push({ source_header: 'Capital vigente + Capital Vencido', target_term: 'outstanding_balance', confidence: 'high', reasoning: `${profile.name}: capVig+capVen` } as MappingNote);
 
   const g = (row: any[], f: Field) => (idx[f] !== undefined ? row[idx[f]!] : null);
@@ -160,14 +181,21 @@ function extractWithProfile(rows: any[][], headerIdx: number, profile: SheetProf
     const cvig = parseNumber(g(row, 'capVig')) || 0;
     const cven = parseNumber(g(row, 'capVen')) || 0;
     const ob = (idx.capVig !== undefined || idx.capVen !== undefined) ? cvig + cven : parseNumber(g(row, 'outstanding_balance'));
-    const dpd = parseNumber(g(row, 'days_overdue'));
+    const explicitDpd = parseNumber(g(row, 'days_overdue'));
+    const dpd = explicitDpd !== null
+      ? explicitDpd
+      : cven > 0
+        ? 91
+        : cvig > 0
+          ? 0
+          : null;
     std.push({
       loan_id: String(lid).trim(),
       client: isBlank(g(row, 'client')) ? null : String(g(row, 'client')).trim(),
       amount: parseNumber(g(row, 'amount')),
       outstanding_balance: ob === null ? null : Math.round(ob * 100) / 100,
       interest_rate: parseRate(g(row, 'interest_rate')),
-      loan_status: statusFromDpd(dpd),
+      loan_status: normalizeStatus(g(row, 'loan_status'), dpd),
       start_date: parseDate(g(row, 'start_date')),
       end_date: parseDate(g(row, 'end_date')),
       loan_type: isBlank(g(row, 'loan_type')) ? null : String(g(row, 'loan_type')).trim(),

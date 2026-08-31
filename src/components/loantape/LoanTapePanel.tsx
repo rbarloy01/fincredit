@@ -533,6 +533,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
           const mappingRows: any[] = Array.isArray(data?._mappingReport) ? data._mappingReport : [];
           const standardizedRows: any[] = Array.isArray(data?._standardized) ? data._standardized : [];
           const analysis: StructuredLoanTapeAnalysis | null = data?._analysis || null;
+          const hardValidationRows = (analysis?.validation || []).filter((item: any) => item.severity === 'high');
           const imp: any = (data && !Array.isArray(data)) ? data._import : null;
           const rawFileOnly = !!(data && !Array.isArray(data) && data._unsupportedImport);
           const profile = profilesByTape[tape.id] || buildLoanTapeDataProfile(standardizedRows, mappingRows);
@@ -945,8 +946,8 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                   </div>
 
                   <SmallDataTable
-                    title="Validación de Datos"
-                    rows={analysis.validation}
+                    title="Errores Duros de Datos"
+                    rows={hardValidationRows}
                     columns={[
                       { key: 'loan_id', label: 'Crédito' },
                       { key: 'rule_id', label: 'Regla' },

@@ -107,3 +107,59 @@ test('analysis stays available with optional fields missing and formats rates as
   } as any], 'lt1');
   assert.equal(analysis.metrics.find(item => item.name === 'Tasa ponderada por saldo')?.latestValue, '25.2%');
 });
+
+test('COFINE profile maps real portfolio headers without confusing money columns for DPD', () => {
+  const cofine: SheetInput = {
+    name: 'PORTAFOLIO',
+    rows: [
+      [
+        'Id cliente',
+        'Número de Préstamo Intermediario ',
+        'Fecha de  Otorgamiento (dd/mm/aaaa)',
+        'Monto Otorgado  (pesos)',
+        'Indicador Moneda Extranjera',
+        'Plazo  Original (meses)',
+        'Tasa base ANUAL de interés',
+        'Tasa / Sobretasa Acreditado',
+        'Capital Vigente (pesos)',
+        'Intereses Vigentes (pesos)',
+        'Capital Mosoro y vencido (pesos)',
+        'Intereses Mosoros y vencidos (pesos)',
+        'Saldo Total (pesos)',
+        'Meses vencidos a "x" fecha',
+        'Tipo de Crédito',
+        'Días de Vencidos.',
+        'Estatus del Crédito',
+      ],
+      ['3', '003 - 1', '19/03/2014', '8000000.00', '0', '180', 'TIIE', '7.50', '1911111.69', '6370.37', '.00', '.00', '1917482.06', '0', 'C SIMPLE', '0', 'VIGENTE'],
+      ['24', '024 - 9', '15/01/2020', '5000000.00', '0', '60', 'TIIE', '10.00', '0.00', '0.00', '1000000.00', '0.00', '1000000.00', '4', 'C SIMPLE', '120', 'VENCIDO'],
+    ],
+  };
+
+  const res = importLoanTapeSheets([cofine], '250831 - Cartera - COFINE.xlsx');
+  const profile = buildLoanTapeDataProfile(res.standardized, res.mappingReport);
+  const targetFor = (header: string) => res.mappingReport.find(item => item.source_header === header)?.target_term;
+
+  assert.equal(res.reconciliation.severity, 'ok');
+  assert.equal(res.standardized.length, 2);
+  assert.equal(res.standardized[0].loan_id, '003 - 1');
+  assert.equal(res.standardized[1].days_overdue, 120);
+  assert.equal(res.standardized[1].outstanding_balance, 1000000);
+  assert.equal(targetFor('Capital Mosoro y vencido (pesos)'), undefined);
+  assert.equal(targetFor('Días de Vencidos.'), 'days_overdue');
+  assert.equal(profile.readinessScore, 100);
+  assert.equal(profile.highValidationCount, 0);
+
+  const analysis = analyzeLoanTapesLocally([{
+    id: 'lt-cofine',
+    clientId: 'c1',
+    name: 'COFINE',
+    fileName: '250831 - Cartera - COFINE.xlsx',
+    tapeType: 'credito',
+    uploadDate: '2026-08-31',
+    extractedData: { _standardized: res.standardized, _mappingReport: res.mappingReport },
+  } as any], 'lt-cofine');
+
+  assert.equal(analysis.metrics.find(item => item.name === 'Numero de creditos')?.latestValue, '2');
+  assert.equal(analysis.metrics.find(item => item.name === 'DPD ponderado por saldo')?.latestValue, '41.2 dias');
+});

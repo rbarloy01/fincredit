@@ -70,19 +70,19 @@ const ANALYSIS_REQUIREMENTS = [
   { key: 'period_comparison', label: 'Comparativo vs corte anterior', required: ['loan_id', 'file_date'] as Array<keyof StandardLoan>, partial: ['outstanding_balance', 'days_overdue'] as Array<keyof StandardLoan> },
   { key: 'geo_industry', label: 'Concentración por estado e industria', required: ['outstanding_balance'] as Array<keyof StandardLoan>, partial: ['state', 'industry'] as Array<keyof StandardLoan> },
 ];
-const CORE_ANALYSIS_KEYS = new Set(['portfolio_balance', 'dpd_quality', 'client_concentration', 'loan_concentration', 'weighted_rate', 'product_mix']);
+const CORE_ANALYSIS_KEYS = new Set(['portfolio_balance', 'dpd_quality', 'client_concentration', 'loan_concentration', 'weighted_rate']);
 
 const SYNONYMS: Record<keyof StandardLoan, string[]> = {
-  loan_id: ['contrato', 'loan id', 'loan number', 'loan no', 'folio', 'numero credito', 'numero de credito', 'no credito', 'no contrato', 'id prestamo', 'id credito', 'operacion', 'cuenta', 'no cuenta', 'referencia'],
-  client: ['cliente', 'client', 'customer', 'razon social', 'nombre', 'nombre cliente', 'nombre acreditado', 'acreditado', 'deudor', 'borrower', 'obligor', 'client id', 'apellidos', 'rfc'],
+  loan_id: ['contrato', 'loan id', 'loan number', 'loan no', 'folio', 'numero credito', 'numero de credito', 'numero de prestamo intermediario', 'prestamo intermediario', 'no credito', 'no contrato', 'id prestamo', 'id credito', 'operacion', 'cuenta', 'no cuenta', 'referencia'],
+  client: ['cliente', 'client', 'customer', 'razon social', 'nombre', 'nombre cliente', 'nombre acreditado', 'acreditado', 'deudor', 'borrower', 'obligor', 'client id', 'id cliente', 'apellidos', 'rfc'],
   amount: ['amount', 'loan amount', 'lended amount', 'principal', 'original amount', 'monto original', 'monto otorgado', 'monto maximo', 'monto autorizado', 'importe dispuesto', 'importe original', 'limite credito', 'linea autorizada', 'costo'],
-  outstanding_balance: ['capital balance', 'saldo capital', 'saldo insoluto', 'saldo actual', 'saldo vigente', 'saldo total', 'capital por pagar', 'capital pendiente', 'saldo insoluto capital', 'principal balance', 'outstanding', 'balance'],
-  interest_rate: ['interest rate', 'tasa', 'tasa interes', 'tasa de interes', 'tasa final', 'tasa base', 'rate', 'rate %', 'tir', 'tna'],
+  outstanding_balance: ['capital balance', 'saldo capital', 'saldo insoluto', 'saldo actual', 'saldo vigente', 'saldo total', 'capital vigente', 'capital vencido', 'capital moroso y vencido', 'capital mosoro y vencido', 'capital por pagar', 'capital pendiente', 'saldo insoluto capital', 'principal balance', 'outstanding', 'balance'],
+  interest_rate: ['interest rate', 'tasa', 'tasa interes', 'tasa de interes', 'tasa final', 'tasa base', 'tasa anual de interes', 'tasa sobretasa acreditado', 'rate', 'rate %', 'tir', 'tna'],
   loan_status: ['status', 'estado credito', 'estado del credito', 'loan status', 'estatus', 'estatus credito', 'situacion', 'condicion', 'clasificacion'],
   start_date: ['start date', 'origination date', 'fecha inicio', 'fecha otorgamiento', 'fecha apertura', 'fecha disposicion', 'fecha alta', 'disbursement date'],
   end_date: ['end date', 'maturity date', 'fecha vencimiento', 'fecha fin', 'fecha pago final', 'due date'],
   loan_type: ['loan type', 'producto', 'product', 'product type', 'tipo contrato', 'tipo credito', 'tipo prestamo', 'tipo producto', 'linea', 'modalidad', 'subproducto', 'segmento', 'programa', 'plan', 'esquema'],
-  days_overdue: ['days overdue', 'days past due', 'dpd', 'mora dias', 'dias mora', 'dias atraso', 'dias de atraso', 'dias vencidos', 'dias vencido', 'dias vencida', 'delinquent days'],
+  days_overdue: ['days overdue', 'days past due', 'dpd', 'mora dias', 'dias mora', 'dias atraso', 'dias de atraso', 'dias vencidos', 'dias de vencidos', 'dias vencido', 'dias vencida', 'delinquent days'],
   currency: ['currency', 'moneda', 'divisa'],
   industry: ['industry', 'giro', 'sector', 'industria', 'actividad economica', 'ramo'],
   state: ['state', 'provincia', 'entidad', 'estado residencia', 'estado de residencia', 'region', 'plaza', 'localidad'],
@@ -187,15 +187,19 @@ function valueSampleScore(target: keyof StandardLoan, values: any[]): number {
 
 function headerHeuristicScore(target: keyof StandardLoan, norm: string): number {
   if (!norm) return 0;
+  const looksMonetary = /(capital|interes|saldo|monto|importe|pesos|balance|principal|cartera)/.test(norm);
   if (target === 'loan_id' && /(folio|contrato|credito|cuenta|operacion|referencia)/.test(norm) && /(no|num|numero|id|clave|codigo|cuenta|folio)/.test(norm)) return 35;
+  if (target === 'loan_id' && /(prestamo|credito)/.test(norm) && /(intermediario|numero|num|no)/.test(norm)) return 40;
   if (target === 'client' && /(cliente|acreditado|deudor|razon social|empresa|nombre)/.test(norm) && !/(credito|contrato|producto|estatus|estado)/.test(norm)) return 35;
   if (target === 'amount' && /(monto|importe|limite|linea|autorizad|otorgad|dispuest|original)/.test(norm) && !/(saldo|insoluto|vencid|vigente|actual)/.test(norm)) return 35;
   if (target === 'outstanding_balance' && /(saldo|insoluto|balance|capital|principal|cartera)/.test(norm) && !/(tasa|dias)/.test(norm)) return 40;
   if (target === 'interest_rate' && /(tasa|rate|interes|tir|tna)/.test(norm)) return 40;
   if (target === 'loan_status' && /(estatus|status|situacion|condicion|clasificacion|estado credito)/.test(norm)) return 35;
   if (target === 'start_date' && /(fecha|date)/.test(norm) && /(inicio|apertura|otorg|disposicion|alta|originacion)/.test(norm)) return 40;
+  if (target === 'end_date' && /(dias|meses)/.test(norm) && /(vencid|mora|atras)/.test(norm)) return 0;
   if (target === 'end_date' && /(fecha|date|vencimiento|maturity|due)/.test(norm) && /(venc|fin|maturity|due|pago final)/.test(norm)) return 40;
   if (target === 'loan_type' && /(producto|tipo|modalidad|subproducto|segmento|programa|plan|esquema)/.test(norm)) return 35;
+  if (target === 'days_overdue' && looksMonetary) return 0;
   if (target === 'days_overdue' && /(dpd|dias|mora|atras|vencid|delinquent)/.test(norm)) return 45;
   if (target === 'currency' && /(moneda|divisa|currency)/.test(norm)) return 45;
   if (target === 'industry' && /(giro|sector|industria|actividad|ramo)/.test(norm)) return 35;
@@ -218,8 +222,8 @@ function pickColumns(headers: string[], rows: any[] = []) {
   const used = new Set<string>();
   const normalized = headers.map(h => ({ header: h, norm: normalize(h) }));
 
-  const capitalVigente = normalized.find(h => h.norm.includes('capital vigente'))?.header;
-  const capitalVencido = normalized.find(h => h.norm.includes('capital vencido'))?.header;
+  const capitalVigente = normalized.find(h => /capital.*vigente/.test(h.norm) && !/interes/.test(h.norm))?.header;
+  const capitalVencido = normalized.find(h => /capital.*(vencid|moros|mosor)/.test(h.norm) && !/interes/.test(h.norm))?.header;
 
   const targetOrder: Array<keyof StandardLoan> = [
     'days_overdue', 'outstanding_balance', 'amount', 'interest_rate', 'start_date', 'end_date',
@@ -272,6 +276,17 @@ export function standardizeLoanTape(rows: any[], fileName?: string) {
     const balance = capitalA !== null || capitalB !== null
       ? (capitalA || 0) + (capitalB || 0)
       : parseNumber(get('outstanding_balance'));
+    const explicitDpd = parseNumber(get('days_overdue'));
+    const statusText = get('loan_status') ? String(get('loan_status')).trim() : null;
+    const inferredDpd = explicitDpd !== null
+      ? explicitDpd
+      : capitalB !== null && capitalB > 0
+        ? 91
+        : statusText && /(vencid|mora|atras)/.test(normalize(statusText))
+          ? 91
+          : capitalA !== null
+            ? 0
+            : null;
 
     return {
       loan_id: get('loan_id') ? String(get('loan_id')).trim() : null,
@@ -279,11 +294,11 @@ export function standardizeLoanTape(rows: any[], fileName?: string) {
       amount: parseNumber(get('amount')),
       outstanding_balance: balance,
       interest_rate: parseRate(get('interest_rate')),
-      loan_status: get('loan_status') ? String(get('loan_status')).trim() : null,
+      loan_status: statusText,
       start_date: parseDate(get('start_date')),
       end_date: parseDate(get('end_date')),
       loan_type: get('loan_type') ? String(get('loan_type')).trim() : null,
-      days_overdue: parseNumber(get('days_overdue')),
+      days_overdue: inferredDpd,
       currency: get('currency') ? String(get('currency')).trim() : 'MXN',
       industry: get('industry') ? String(get('industry')).trim() : null,
       state: get('state') ? String(get('state')).trim() : null,
@@ -505,7 +520,19 @@ function validate(rows: StandardLoan[]) {
     });
     if (r.amount !== null && r.amount <= 0) issues.push({ loan_id: loanId, rule_id: 'amount_positive', field: 'amount', message: 'amount debe ser mayor a cero cuando viene informado', severity: 'medium' });
     if (r.outstanding_balance !== null && r.outstanding_balance < 0) issues.push({ loan_id: loanId, rule_id: 'balance_non_negative', field: 'outstanding_balance', message: 'outstanding_balance no puede ser negativo', severity: 'high' });
-    if (r.amount !== null && r.outstanding_balance !== null && r.outstanding_balance > r.amount) issues.push({ loan_id: loanId, rule_id: 'balance_lte_amount', field: 'outstanding_balance', message: 'outstanding_balance excede amount', severity: 'high' });
+    if (r.amount !== null && r.outstanding_balance !== null && r.outstanding_balance > r.amount) {
+      const overAmount = r.outstanding_balance - r.amount;
+      const tolerance = Math.max(100, Math.abs(r.amount) * 0.01);
+      if (overAmount > tolerance) {
+        issues.push({
+          loan_id: loanId,
+          rule_id: 'balance_lte_amount',
+          field: 'outstanding_balance',
+          message: 'outstanding_balance excede amount fuera de tolerancia; revisar si amount es linea original o si hubo capitalizacion.',
+          severity: 'medium',
+        });
+      }
+    }
     if (r.interest_rate !== null && r.interest_rate < 0) issues.push({ loan_id: loanId, rule_id: 'rate_non_negative', field: 'interest_rate', message: 'interest_rate no puede ser negativa', severity: 'medium' });
     if (r.days_overdue !== null && r.days_overdue < 0) issues.push({ loan_id: loanId, rule_id: 'dpd_non_negative', field: 'days_overdue', message: 'days_overdue no puede ser negativo', severity: 'high' });
     if (r.start_date && r.end_date && r.end_date <= r.start_date) issues.push({ loan_id: loanId, rule_id: 'date_order', field: 'end_date', message: 'end_date debe ser posterior a start_date', severity: 'high' });
@@ -593,16 +620,22 @@ export function buildLoanTapeDataProfile(rows: StandardLoan[], mappingReport: Ma
   const blockedAnalyses = analysisCoverage.filter(item => item.status === 'blocked');
   const fullAnalyses = analysisCoverage.filter(item => item.status === 'available');
   const partialAnalyses = analysisCoverage.filter(item => item.status === 'partial');
-  const coreAvailable = analysisCoverage.filter(item => CORE_ANALYSIS_KEYS.has(item.key) && item.status !== 'blocked');
-  const hasPortfolioBase = analysisCoverage.some(item => item.key === 'portfolio_balance' && item.status !== 'blocked');
-  const coreReady = totalRows > 0 && hasPortfolioBase && coreAvailable.length >= 3 && highValidationCount === 0;
+  const scoredCoreAnalyses = analysisCoverage.filter(item => CORE_ANALYSIS_KEYS.has(item.key));
+  const coreCapabilityScore = scoredCoreAnalyses.reduce((score, item) => {
+    if (item.status === 'available') return score + 1;
+    if (item.status === 'partial') return score + 0.7;
+    return score;
+  }, 0) / Math.max(scoredCoreAnalyses.length, 1) * 100;
+  const optionalCapabilityBonus = analysisCoverage
+    .filter(item => !CORE_ANALYSIS_KEYS.has(item.key) && item.status !== 'blocked')
+    .reduce((score, item) => score + (item.status === 'available' ? 1 : 0.5), 0);
   const capabilityScore = totalRows
-    ? 35 + (fullAnalyses.length / ANALYSIS_REQUIREMENTS.length) * 45 + (partialAnalyses.length / ANALYSIS_REQUIREMENTS.length) * 25
+    ? Math.min(100, coreCapabilityScore + optionalCapabilityBonus)
     : 0;
   const qualityPenalty = Math.min(18, highValidationCount / Math.max(totalRows, 1) * 100)
     + Math.min(8, mediumValidationCount / Math.max(totalRows, 1) * 20)
     + highMissing.filter(f => f.field === BASE_ANALYSIS_FIELD).length * 20;
-  const readinessScore = coreReady ? 100 : Math.max(0, Math.min(100, Math.round(
+  const readinessScore = Math.max(0, Math.min(100, Math.round(
     capabilityScore - qualityPenalty
   )));
   const canAnalyze = totalRows > 0 && availableAnalyses.length > 0;
@@ -836,7 +869,8 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
   const top10Pct = topShare(latest, 10);
   const previousTop10Pct = topShare(previousRows, 10);
   const missingDpdPct = q.sin_dato?.pct || 0;
-  const validationPenalty = Math.min(15, validation.length / Math.max(selectedRows.length, 1) * 20);
+  const highValidation = validation.filter(item => item.severity === 'high');
+  const validationPenalty = Math.min(15, highValidation.length / Math.max(selectedRows.length, 1) * 20);
   const riskScore = Math.min(100, Math.round(
     (vencidaPct * 100 * 4)
     + (atrasadaPct * 100 * 1.5)
@@ -853,7 +887,7 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
 
   const findings = [
     ...dataProfile.missingFields.filter(f => f.severity !== 'low').slice(0, 5).map(f => ({ severity: f.severity, category: 'Preparación de Datos', title: `${f.field} ${f.mapped ? 'incompleto' : 'sin mapear'}`, detail: f.mapped ? `${fmtPct(f.missingPct)} de filas sin dato.` : 'No encontré una columna equivalente en el archivo.', recommendation: f.impact })),
-    ...validation.slice(0, 10).map(v => ({ severity: v.severity, category: 'Calidad de Datos', title: v.rule_id, detail: `${v.loan_id}: ${v.message}`, recommendation: 'Revisar mapeo o dato fuente.' })),
+    ...highValidation.slice(0, 10).map(v => ({ severity: v.severity, category: 'Calidad de Datos', title: v.rule_id, detail: `${v.loan_id}: ${v.message}`, recommendation: 'Revisar mapeo o dato fuente.' })),
     ...concentrations.by_client.filter(c => c.severity !== 'low').slice(0, 5).map(c => ({ severity: c.severity, category: 'Concentración', title: `Concentración en ${c.name}`, detail: `${fmtPct(c.pct)} del saldo de cartera`, recommendation: 'Revisar límite contractual por acreditado.' })),
     ...(anomalySet.dpd_deterioration?.length ? [{ severity: 'medium', category: 'Deterioro', title: `${anomalySet.dpd_deterioration.length} créditos entraron en mora`, detail: 'Comparación contra el corte anterior.', recommendation: 'Priorizar cobranza y revisar si el deterioro está concentrado por cliente/producto.' }] : []),
     ...(anomalySet.disappeared_loans?.length ? [{ severity: 'low', category: 'Cambios de Portafolio', title: `${anomalySet.disappeared_loans.length} créditos desaparecieron`, detail: 'Puede ser pago, recompra, castigo o inconsistencia de ID.', recommendation: 'Validar contra movimientos y calendario de vencimientos.' }] : []),
