@@ -63,8 +63,17 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
   const focusIdxInSel = sel.findIndex(s => s.period === focusPoint.period);
   const prevPoint = focusIdxInSel > 0 ? sel[focusIdxInSel - 1] : null;
 
-  const togglePeriod = (p: string) => setSelected(prev => (prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p]).sort());
+  const clearPeriodFilter = () => setSelected(data.periods);
+  const togglePeriod = (p: string) => setSelected(prev => {
+    if (prev.length === 1 && prev[0] === p) return data.periods;
+    const next = prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p].sort();
+    return next.length ? next : data.periods;
+  });
   const isolatePeriod = (period: string) => {
+    if (selected.length === 1 && selected[0] === period) {
+      clearPeriodFilter();
+      return;
+    }
     setSelected([period]);
     setFocus(period);
   };
@@ -158,9 +167,12 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
             <button key={k} onClick={() => preset(k)} className="text-[11px] font-bold px-2 py-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">{lbl}</button>
           ))}
           {selected.length === 1 && (
-            <span className="text-[11px] font-black text-indigo-700 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1">
-              Filtrado: {periodLabel(selected[0])}
-            </span>
+            <div className="flex items-center gap-1.5 rounded-lg border border-indigo-100 bg-indigo-50 px-2 py-1">
+              <span className="text-[11px] font-black text-indigo-700">Filtrado: {periodLabel(selected[0])}</span>
+              <button onClick={clearPeriodFilter} className="text-[10px] font-black uppercase tracking-wide text-indigo-500 hover:text-indigo-800">
+                Quitar filtro
+              </button>
+            </div>
           )}
         </div>
         <div className="flex items-center gap-3 flex-wrap">
