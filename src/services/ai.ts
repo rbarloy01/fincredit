@@ -570,6 +570,10 @@ function normalizeLiabilityType(value: unknown): ExtractedInstitutionalLiability
   return 'otro';
 }
 
+function providerSupportsMedia(provider: AIProvider) {
+  return provider === 'gemini' || provider === 'openai' || provider === 'claude';
+}
+
 function normalizeDateString(value: unknown): string | undefined {
   const raw = String(value || '').trim();
   if (!raw) return undefined;
@@ -908,6 +912,22 @@ export async function extractLoanTapeSheetsFromDocument(
   const isDocument = !Array.isArray(content) && 'text' in content;
   const documentText = isDocument ? String(content.text || '') : '';
   const documentMedia = isDocument ? content.media : content as AIMedia | AIMedia[];
+  const mediaItems = documentMedia ? (Array.isArray(documentMedia) ? documentMedia : [documentMedia]).filter(item => item.base64 && item.mimeType) : [];
+  if (mediaItems.length > 0 && !providerSupportsMedia(settings.provider)) {
+    const normalized = normalizeAISettings(settings);
+    const visualProvider = (['gemini', 'openai', 'claude'] as AIProvider[])
+      .find(provider => normalized.providers?.[provider]?.enabled);
+    if (visualProvider) {
+      const config = normalized.providers?.[visualProvider] || providerSettings(normalized, visualProvider);
+      settings = {
+        ...normalized,
+        provider: visualProvider,
+        apiKey: config.apiKey,
+        model: config.model,
+        fallbackModels: config.fallbackModels,
+      };
+    }
+  }
   const system = `Eres un extractor OCR/tabular para loan tapes de crédito.
 Reconstruyes tablas desde imágenes, PDFs escaneados o texto pegado y devuelves únicamente JSON válido.
 No hagas análisis de riesgo aquí. No inventes columnas ni valores.`;
