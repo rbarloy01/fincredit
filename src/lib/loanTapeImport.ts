@@ -22,7 +22,7 @@ export type SheetInput = { name: string; rows: any[][] };
 
 type Field =
   | 'loan_id' | 'client' | 'amount' | 'capVig' | 'capVen' | 'outstanding_balance'
-  | 'interest_rate' | 'start_date' | 'end_date' | 'loan_type' | 'days_overdue' | 'state';
+  | 'interest_rate' | 'start_date' | 'end_date' | 'loan_type' | 'days_overdue' | 'loan_status' | 'state';
 
 interface SheetProfile {
   name: string;
@@ -49,6 +49,24 @@ const PROFILES: SheetProfile[] = [
       capVig: ['Capital Vigente'], capVen: ['Capital Vencido'], interest_rate: ['Tasa Final', 'Tasa Base'],
       start_date: ['Fecha Apertura'], end_date: ['Fecha Vencimiento'],
       loan_type: ['Descripcion Producto'], days_overdue: ['Días de atraso', 'Dias Atraso'], state: ['Descripcion Estado'],
+    },
+  },
+  {
+    name: 'COFINE_PORTAFOLIO',
+    headerProbe: ['Número de Préstamo Intermediario', 'Capital Vigente (pesos)', 'Saldo Total (pesos)'],
+    columnMap: {
+      loan_id: ['Número de Préstamo Intermediario'],
+      client: ['Id cliente'],
+      amount: ['Monto Otorgado  (pesos)', 'Monto Otorgado (pesos)'],
+      outstanding_balance: ['Saldo Total (pesos)'],
+      capVig: ['Capital Vigente (pesos)'],
+      capVen: ['Capital Moroso y vencido (pesos)', 'Capital Mosoro y vencido (pesos)', 'Capital Vencido (pesos)'],
+      interest_rate: ['Tasa / Sobretasa Acreditado'],
+      start_date: ['Fecha de  Otorgamiento (dd/mm/aaaa)', 'Fecha de Otorgamiento (dd/mm/aaaa)'],
+      loan_type: ['Tipo de Crédito', 'Tipo de Credito'],
+      days_overdue: ['Días de Vencidos.', 'Dias de Vencidos.', 'Días Vencidos', 'Dias Vencidos'],
+      loan_status: ['Estatus del Crédito', 'Estatus del Credito'],
+      state: ['Sector'],
     },
   },
 ];
@@ -85,14 +103,20 @@ const MOM_TOLERANCE = 0.4; // ±40% MoM balance swing → warn
 function fileDateISO(fileName?: string): string | null {
   const s = String(fileName || '');
   let m = s.match(/(20\d{2})(\d{2})(\d{2})/); // YYYYMMDD
-  let y: number, mo: number;
-  if (m) { y = +m[1]; mo = +m[2]; }
+  let y: number, mo: number, day: number;
+  if (m) { y = +m[1]; mo = +m[2]; day = +m[3]; }
   else {
     m = s.match(/(\d{2})(\d{2})(\d{2})/); // YYMMDD
     if (!m) return null;
-    y = 2000 + +m[1]; mo = +m[2];
+    y = 2000 + +m[1]; mo = +m[2]; day = +m[3];
   }
-  if (mo < 1 || mo > 12) return null;
+  if (mo < 1 || mo > 12) {
+    const swappedMonth = day;
+    const swappedDay = mo;
+    if (swappedMonth < 1 || swappedMonth > 12) return null;
+    mo = swappedMonth;
+    day = swappedDay;
+  }
   const end = new Date(y, mo, 0); // last day of month `mo`
   return `${end.getFullYear()}-${String(mo).padStart(2, '0')}-${String(end.getDate()).padStart(2, '0')}`;
 }
@@ -148,8 +172,8 @@ function extractWithProfile(rows: any[][], headerIdx: number, profile: SheetProf
   const push = (target: string, field: Field, srcs?: string[]) => {
     if (idx[field] !== undefined) notes.push({ source_header: (srcs || [])[0] || target, target_term: target, confidence: 'high', reasoning: `${profile.name}: ${field}` } as MappingNote);
   };
-  (['loan_id', 'client', 'amount', 'interest_rate', 'start_date', 'end_date', 'loan_type', 'days_overdue', 'state'] as const).forEach(f => push(f, f as Field, profile.columnMap[f as Field]));
-  if (idx.capVig !== undefined || idx.capVen !== undefined) notes.push({ source_header: 'Capital vigente + Capital Vencido', target_term: 'outstanding_balance', confidence: 'high', reasoning: `${profile.name}: capVig+capVen` } as MappingNote);
+  (['loan_id', 'client', 'amount', 'outstanding_balance', 'interest_rate', 'start_date', 'end_date', 'loan_type', 'days_overdue', 'loan_status', 'state'] as const).forEach(f => push(f, f as Field, profile.columnMap[f as Field]));
+  if (idx.outstanding_balance === undefined && (idx.capVig !== undefined || idx.capVen !== undefined)) notes.push({ source_header: 'Capital vigente + Capital Vencido', target_term: 'outstanding_balance', confidence: 'high', reasoning: `${profile.name}: capVig+capVen` } as MappingNote);
 
   const g = (row: any[], f: Field) => (idx[f] !== undefined ? row[idx[f]!] : null);
   const std: StandardLoan[] = [];
@@ -159,15 +183,17 @@ function extractWithProfile(rows: any[][], headerIdx: number, profile: SheetProf
     if (isBlank(lid) || normalize(lid) === 'nan') continue;
     const cvig = parseNumber(g(row, 'capVig')) || 0;
     const cven = parseNumber(g(row, 'capVen')) || 0;
-    const ob = (idx.capVig !== undefined || idx.capVen !== undefined) ? cvig + cven : parseNumber(g(row, 'outstanding_balance'));
+    const reportedBalance = parseNumber(g(row, 'outstanding_balance'));
+    const ob = reportedBalance !== null ? reportedBalance : ((idx.capVig !== undefined || idx.capVen !== undefined) ? cvig + cven : null);
     const dpd = parseNumber(g(row, 'days_overdue'));
+    const rawStatus = g(row, 'loan_status');
     std.push({
       loan_id: String(lid).trim(),
       client: isBlank(g(row, 'client')) ? null : String(g(row, 'client')).trim(),
       amount: parseNumber(g(row, 'amount')),
       outstanding_balance: ob === null ? null : Math.round(ob * 100) / 100,
       interest_rate: parseRate(g(row, 'interest_rate')),
-      loan_status: statusFromDpd(dpd),
+      loan_status: !isBlank(rawStatus) ? String(rawStatus).trim() : statusFromDpd(dpd),
       start_date: parseDate(g(row, 'start_date')),
       end_date: parseDate(g(row, 'end_date')),
       loan_type: isBlank(g(row, 'loan_type')) ? null : String(g(row, 'loan_type')).trim(),

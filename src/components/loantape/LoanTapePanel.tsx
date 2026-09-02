@@ -210,7 +210,8 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
   useEffect(() => { loadTapes(); }, [clientId]);
 
   const saveLoanTapeFile = async (file: File) => {
-    if (!file.name.endsWith('.xlsx') && !file.name.endsWith('.xls') && !file.name.endsWith('.csv')) {
+    const lowerFileName = file.name.toLowerCase();
+    if (!lowerFileName.endsWith('.xlsx') && !lowerFileName.endsWith('.xls') && !lowerFileName.endsWith('.csv')) {
       throw new Error(`${file.name}: solo se aceptan archivos Excel (.xlsx, .xls) o CSV`);
     }
     const buffer = await file.arrayBuffer();
