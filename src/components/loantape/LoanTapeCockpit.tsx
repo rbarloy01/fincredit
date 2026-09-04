@@ -3,12 +3,13 @@ import {
   ResponsiveContainer, ComposedChart, BarChart, LineChart,
   Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Cell,
 } from 'recharts';
-import { FileSpreadsheet, LayoutDashboard } from 'lucide-react';
+import { FileSpreadsheet, LayoutDashboard, RotateCcw, Search } from 'lucide-react';
 import { LoanTape_DB } from '../../db/index';
 import {
   buildCockpitData, buildVintage, snapshotAnalysis, buildCockpitNarrative,
   periodLabel, periodQuality, DPD_BUCKETS, type CockpitData,
 } from '../../lib/loanTapeCockpit';
+import type { StandardLoan } from '../../lib/loanTapeAnalytics';
 import { loadExportModule } from '../../lib/exportLoader';
 import { reserveDownloadTarget } from '../../lib/browserDownload';
 import ChartCard from './ChartCard';
@@ -18,11 +19,74 @@ const CLIENT_COLORS = ['#4f46e5', '#06b6d4', '#059669', '#f59e0b', '#ef4444'];
 const money = (v: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 0 }).format(v || 0);
 const moneyM = (v: number) => `$${((v || 0) / 1e6).toFixed(1)}M`;
 const pctS = (v: number) => `${((v || 0) * 100).toFixed(1)}%`;
+const clean = (v: any) => String(v ?? '').trim();
+const norm = (v: any) => clean(v).toLowerCase();
+
+type SlicerState = {
+  product: string;
+  status: string;
+  dpdBucket: string;
+  sector: string;
+  borrower: string;
+  query: string;
+};
+
+const EMPTY_SLICERS: SlicerState = { product: '', status: '', dpdBucket: '', sector: '', borrower: '', query: '' };
 
 interface Props { tapes: LoanTape_DB[]; clientName?: string; }
 
+function bucketForDpd(days: number | null | undefined) {
+  if (days === null || days === undefined) return 'Sin DPD';
+  if (days <= 0) return '0 dias';
+  if (days <= 30) return '1-30';
+  if (days <= 60) return '31-60';
+  if (days <= 90) return '61-90';
+  if (days <= 180) return '91-180';
+  return '>180';
+}
+
+function topOptions(rows: StandardLoan[], field: keyof Pick<StandardLoan, 'client' | 'loan_type' | 'loan_status' | 'state'>, limit = 24) {
+  const totals = new Map<string, { balance: number; count: number }>();
+  rows.forEach(row => {
+    const key = clean(row[field]);
+    if (!key) return;
+    const current = totals.get(key) || { balance: 0, count: 0 };
+    current.balance += row.outstanding_balance || 0;
+    current.count += 1;
+    totals.set(key, current);
+  });
+  return [...totals.entries()]
+    .sort((a, b) => b[1].balance - a[1].balance || b[1].count - a[1].count)
+    .slice(0, limit)
+    .map(([value, meta]) => ({ value, label: value, meta }));
+}
+
+function filterTapes(tapes: LoanTape_DB[], filters: SlicerState): LoanTape_DB[] {
+  const q = norm(filters.query);
+  return tapes.map(tape => {
+    const data: any = tape.extractedData;
+    const rows = Array.isArray(data?._standardized) ? data._standardized as StandardLoan[] : [];
+    const filtered = rows.filter(row => {
+      if (filters.product && clean(row.loan_type) !== filters.product) return false;
+      if (filters.status && clean(row.loan_status) !== filters.status) return false;
+      if (filters.dpdBucket && bucketForDpd(row.days_overdue) !== filters.dpdBucket) return false;
+      if (filters.sector && clean(row.state) !== filters.sector) return false;
+      if (filters.borrower && clean(row.client) !== filters.borrower) return false;
+      if (q) {
+        const haystack = `${row.loan_id || ''} ${row.client || ''} ${row.loan_type || ''} ${row.loan_status || ''} ${row.state || ''}`.toLowerCase();
+        if (!haystack.includes(q)) return false;
+      }
+      return true;
+    });
+    return { ...tape, extractedData: { ...(data || {}), _standardized: filtered } };
+  });
+}
+
 export default function LoanTapeCockpit({ tapes, clientName }: Props) {
-  const data: CockpitData = useMemo(() => buildCockpitData(tapes), [tapes]);
+  const baseData: CockpitData = useMemo(() => buildCockpitData(tapes), [tapes]);
+  const [filters, setFilters] = useState<SlicerState>(EMPTY_SLICERS);
+  const filteredTapes = useMemo(() => filterTapes(tapes, filters), [tapes, filters]);
+  const data: CockpitData = useMemo(() => buildCockpitData(filteredTapes), [filteredTapes]);
   const periodsKey = data.periods.join('|');
 
   const [selected, setSelected] = useState<string[]>(data.periods);
@@ -42,7 +106,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
   const nodesRef = useRef<Record<string, HTMLElement | null>>({});
   const registerNode = useCallback((id: string, node: HTMLElement | null) => { nodesRef.current[id] = node; }, []);
 
-  if (!data.periods.length) {
+  if (!baseData.periods.length) {
     return (
       <div className="bg-white border border-slate-200 rounded-2xl p-12 text-center">
         <LayoutDashboard className="w-10 h-10 text-slate-300 mx-auto mb-3" />
@@ -55,7 +119,31 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
   const selSet = new Set(selected);
   const sel = data.series.filter(s => selSet.has(s.period));
   const mig = data.migration.filter(m => selSet.has(m.period));
-  const focusPoint = data.series.find(s => s.period === focus) || sel[sel.length - 1] || data.series[data.series.length - 1];
+  const emptyPoint = {
+    period: '',
+    label: '—',
+    saldo: 0,
+    creditos: 0,
+    clientes: 0,
+    wa_rate: null,
+    vig: 0,
+    atr: 0,
+    ven: 0,
+    sinDato: 0,
+    vigPct: 0,
+    atrPct: 0,
+    venPct: 0,
+    dpd: [0, 0, 0, 0, 0, 0],
+    dpdPct: [0, 0, 0, 0, 0, 0],
+    over180: 0,
+    hhi: 0,
+    top1: 0,
+    top3: 0,
+    top5: 0,
+    top10: 0,
+    runoff: null,
+  };
+  const focusPoint = data.series.find(s => s.period === focus) || sel[sel.length - 1] || data.series[data.series.length - 1] || emptyPoint;
   const focusIdxInSel = sel.findIndex(s => s.period === focusPoint.period);
   const prevPoint = focusIdxInSel > 0 ? sel[focusIdxInSel - 1] : null;
 
@@ -90,9 +178,30 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
   const vintage = useMemo(() => buildVintage(data, focusPoint.period), [data, focusPoint.period]);
   const vintData = vintage.map(v => ({ cohort: v.cohort, Vigente: +(v.vig / 1e6).toFixed(2), Atrasada: +(v.atr / 1e6).toFixed(2), Vencida: +(v.ven / 1e6).toFixed(2), venPct: +(v.venPct * 100).toFixed(1) }));
   const narrative = useMemo(() => buildCockpitNarrative(data, selected), [data, selected]);
-  const snapFocus = useMemo(() => snapshotAnalysis(tapes, focusPoint.period), [tapes, focusPoint.period]);
-  const snapA = useMemo(() => (compare && cmpA ? snapshotAnalysis(tapes, cmpA) : null), [tapes, compare, cmpA]);
-  const snapB = useMemo(() => (compare && cmpB ? snapshotAnalysis(tapes, cmpB) : null), [tapes, compare, cmpB]);
+  const snapFocus = useMemo(() => snapshotAnalysis(filteredTapes, focusPoint.period), [filteredTapes, focusPoint.period]);
+  const snapA = useMemo(() => (compare && cmpA ? snapshotAnalysis(filteredTapes, cmpA) : null), [filteredTapes, compare, cmpA]);
+  const snapB = useMemo(() => (compare && cmpB ? snapshotAnalysis(filteredTapes, cmpB) : null), [filteredTapes, compare, cmpB]);
+  const filterOptions = useMemo(() => {
+    const rows = baseData.allRows;
+    const bucketTotals = new Map<string, { balance: number; count: number }>();
+    rows.forEach(row => {
+      const key = bucketForDpd(row.days_overdue);
+      const current = bucketTotals.get(key) || { balance: 0, count: 0 };
+      current.balance += row.outstanding_balance || 0;
+      current.count += 1;
+      bucketTotals.set(key, current);
+    });
+    return {
+      product: topOptions(rows, 'loan_type'),
+      status: topOptions(rows, 'loan_status'),
+      sector: topOptions(rows, 'state'),
+      borrower: topOptions(rows, 'client', 40),
+      dpdBucket: [...DPD_BUCKETS, 'Sin DPD'].map(value => ({ value, label: value, meta: bucketTotals.get(value) || { balance: 0, count: 0 } })),
+    };
+  }, [baseData.allRows]);
+  const activeFilterCount = Object.values(filters).filter(Boolean).length;
+  const resetFilters = () => setFilters(EMPTY_SLICERS);
+  const updateFilter = (key: keyof SlicerState, value: string) => setFilters(prev => ({ ...prev, [key]: value }));
 
   const handleExcel = async () => {
     setExporting(true);
@@ -105,7 +214,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
         try { const b64 = await mod.captureNodePng(node); if (b64) images.push({ id, base64: b64 }); } catch { /* skip */ }
       }
       await mod.exportLoanTapeCockpit(
-        tapes, clientName || 'Cliente', selected,
+        filteredTapes, clientName || 'Cliente', selected,
         { data, vintage, narrative, snapshot: snapFocus, focusPeriod: focusPoint.period, focusLabel: focusPoint.label },
         images, target,
       );
@@ -168,10 +277,50 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
             </label>
           )}
         </div>
+        <div className="border-t border-slate-100 pt-3">
+          <div className="flex items-center justify-between gap-3 flex-wrap mb-2">
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">Segmentación</p>
+              <p className="text-xs font-semibold text-slate-500">{data.allRows.length.toLocaleString('es-MX')} registros filtrados · {money(data.series.at(-1)?.saldo || 0)} último saldo visible</p>
+            </div>
+            {activeFilterCount > 0 && (
+              <button onClick={resetFilters} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-black text-slate-600 hover:bg-slate-50">
+                <RotateCcw className="h-3.5 w-3.5" />
+                Limpiar filtros ({activeFilterCount})
+              </button>
+            )}
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-6 gap-2">
+            <Slicer label="Producto" value={filters.product} options={filterOptions.product} onChange={v => updateFilter('product', v)} />
+            <Slicer label="Estatus" value={filters.status} options={filterOptions.status} onChange={v => updateFilter('status', v)} />
+            <Slicer label="Bucket DPD" value={filters.dpdBucket} options={filterOptions.dpdBucket} onChange={v => updateFilter('dpdBucket', v)} />
+            <Slicer label="Sector" value={filters.sector} options={filterOptions.sector} onChange={v => updateFilter('sector', v)} />
+            <Slicer label="Acreditado" value={filters.borrower} options={filterOptions.borrower} onChange={v => updateFilter('borrower', v)} />
+            <label className="min-w-0">
+              <span className="mb-1 block text-[10px] font-black uppercase tracking-wider text-slate-400">Buscar</span>
+              <span className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2 py-1.5 focus-within:border-indigo-300">
+                <Search className="h-3.5 w-3.5 text-slate-400" />
+                <input
+                  value={filters.query}
+                  onChange={e => updateFilter('query', e.target.value)}
+                  placeholder="crédito, cliente..."
+                  className="min-w-0 flex-1 bg-transparent text-xs font-semibold text-slate-700 outline-none placeholder:text-slate-400"
+                />
+              </span>
+            </label>
+          </div>
+        </div>
       </div>
 
+      {!data.periods.length && (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-6">
+          <p className="text-sm font-black text-amber-900">Los filtros actuales no dejan cartera visible.</p>
+          <p className="mt-1 text-xs font-semibold text-amber-700">Limpia algún slicer para volver a ver métricas, gráficas y tablas.</p>
+        </div>
+      )}
+
       {/* KPI strip (focus) */}
-      {!compare && (
+      {!compare && data.periods.length > 0 && (
         <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
           {[
             { k: 'Saldo', v: moneyM(focusPoint.saldo), d: kpiDelta(focusPoint.saldo, prevPoint?.saldo ?? null, false, n => moneyM(n)) },
@@ -191,15 +340,15 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
       )}
 
       {/* Narrative */}
-      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+      {data.periods.length > 0 && <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
         <p className="text-xs font-black text-slate-700 uppercase tracking-widest mb-2">Lectura cuantitativa</p>
         <ul className="space-y-1">
           {narrative.map((line, i) => <li key={i} className="text-sm text-slate-700 leading-relaxed flex gap-2"><span className="text-indigo-400">·</span>{line}</li>)}
         </ul>
-      </div>
+      </div>}
 
       {/* Evolution */}
-      <ChartCard title="Evolución de saldo & cartera vencida (>90d)" subtitle="Barras = saldo · línea = % vencida" fileName={`Evolucion_${clientName}`} captureId="evo" registerNode={registerNode} legend={[{ label: 'Saldo', color: C.indigo }, { label: 'Vencida %', color: C.red }]}>
+      {data.periods.length > 0 && <ChartCard title="Evolución de saldo & cartera vencida (>90d)" subtitle="Barras = saldo · línea = % vencida" fileName={`Evolucion_${clientName}`} captureId="evo" registerNode={registerNode} legend={[{ label: 'Saldo', color: C.indigo }, { label: 'Vencida %', color: C.red }]}>
         <div style={{ height: 260 }}>
           <ResponsiveContainer>
             <ComposedChart data={evoData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
@@ -213,9 +362,9 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
             </ComposedChart>
           </ResponsiveContainer>
         </div>
-      </ChartCard>
+      </ChartCard>}
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      {data.periods.length > 0 && <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         {/* Quality migration */}
         <ChartCard title="Migración de calidad de cartera" subtitle="% del saldo por estatus, por corte" fileName={`Calidad_${clientName}`} captureId="calidad" registerNode={registerNode} legend={[{ label: 'Vigente', color: C.green }, { label: 'Atrasada', color: C.amber }, { label: 'Vencida', color: C.red }]}>
           <div style={{ height: 240 }}>
@@ -321,10 +470,10 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
             </ResponsiveContainer>
           </div>
         </ChartCard>
-      </div>
+      </div>}
 
       {/* Vintage */}
-      <ChartCard title={`Cosecha por año de originación — ${focusPoint.label}`} subtitle="Saldo (MXN M) por cohorte, coloreado por calidad" fileName={`Cosecha_${clientName}`} captureId="cosecha" registerNode={registerNode} legend={[{ label: 'Vigente', color: C.green }, { label: 'Atrasada', color: C.amber }, { label: 'Vencida', color: C.red }]}>
+      {data.periods.length > 0 && <ChartCard title={`Cosecha por año de originación — ${focusPoint.label}`} subtitle="Saldo (MXN M) por cohorte, coloreado por calidad" fileName={`Cosecha_${clientName}`} captureId="cosecha" registerNode={registerNode} legend={[{ label: 'Vigente', color: C.green }, { label: 'Atrasada', color: C.amber }, { label: 'Vencida', color: C.red }]}>
         <div style={{ height: 260 }}>
           <ResponsiveContainer>
             <BarChart data={vintData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
@@ -339,10 +488,10 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
             </BarChart>
           </ResponsiveContainer>
         </div>
-      </ChartCard>
+      </ChartCard>}
 
       {/* Watchlist */}
-      <ChartCard title="⚠ Watchlist — vencidos crónicos" subtitle="Créditos con >90 días de atraso en 2+ cortes" fileName={`Watchlist_${clientName}`} captureId="watchlist" registerNode={registerNode}>
+      {data.periods.length > 0 && <ChartCard title="Watchlist — vencidos crónicos" subtitle="Créditos con >90 días de atraso en 2+ cortes" fileName={`Watchlist_${clientName}`} captureId="watchlist" registerNode={registerNode}>
         <div className="overflow-x-auto">
           <table className="w-full text-xs">
             <thead><tr className="bg-slate-50 text-left">
@@ -362,18 +511,34 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
             </tbody>
           </table>
         </div>
-      </ChartCard>
+      </ChartCard>}
 
       {/* Snapshot skill tables */}
-      {compare ? (
+      {data.periods.length > 0 && (compare ? (
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
           <SnapshotColumn label={periodLabel(cmpA)} snap={snapA} quality={cmpA ? periodQuality(data, cmpA) : null} />
           <SnapshotColumn label={periodLabel(cmpB)} snap={snapB} quality={cmpB ? periodQuality(data, cmpB) : null} />
         </div>
       ) : (
         <SnapshotColumn label={focusPoint.label} snap={snapFocus} quality={periodQuality(data, focusPoint.period)} />
-      )}
+      ))}
     </div>
+  );
+}
+
+function Slicer({ label, value, options, onChange }: { label: string; value: string; options: Array<{ value: string; label: string; meta?: { balance: number; count: number } }>; onChange: (value: string) => void }) {
+  return (
+    <label className="min-w-0">
+      <span className="mb-1 block text-[10px] font-black uppercase tracking-wider text-slate-400">{label}</span>
+      <select value={value} onChange={e => onChange(e.target.value)} className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs font-bold text-slate-700 outline-none focus:border-indigo-300">
+        <option value="">Todo</option>
+        {options.map(option => (
+          <option key={option.value} value={option.value}>
+            {option.label}{option.meta ? ` · ${option.meta.count}` : ''}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
