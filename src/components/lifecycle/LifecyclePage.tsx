@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { isClientMonitored } from '../../lib/clientStatus';
 import {
   Activity,
   AlertTriangle,
@@ -21,6 +22,7 @@ import { ALL_FACILITIES, facilityDisplayName, matchesFacilityFilter } from '../.
 import { evaluateCovenantAuto } from '../../lib/financialMetrics';
 import { loanTapePeriodDate } from '../../lib/loanTapeAnalytics';
 import { parseFinancialNumber } from '../../lib/numberParsing';
+import { classifyDpd } from '../../lib/portfolioRules';
 
 type Disposition = {
   id: string;
@@ -179,7 +181,7 @@ function tapeStats(tape: LoanTape_DB) {
   const rows = loanRows(tape);
   const total = rows.reduce((sum: number, row: any) => sum + Number(row.outstanding_balance || row.balance || row.amount || 0), 0);
   const overdue = rows.filter((row: any) => Number(row.days_overdue || row.dpd || 0) > 0);
-  const severe = rows.filter((row: any) => Number(row.days_overdue || row.dpd || 0) > 90);
+  const severe = rows.filter((row: any) => classifyDpd(Number(row.days_overdue ?? row.dpd ?? 0)) === 'vencida');
   return {
     count: rows.length || analysis?.summary?.loan_count || 0,
     total: total || analysis?.summary?.total_balance || 0,
@@ -319,12 +321,12 @@ function buildEvents(row: LifeRow, selectedTransactionId: string): TimelineEvent
   covenants
     .filter(covenant => matchesFacilityFilter(covenant, selectedTransactionId, transactions.length))
     .forEach(covenant => {
-      const status = evaluateCovenantAuto(covenant, statements).status;
+      const status = isClientMonitored(row.client) ? evaluateCovenantAuto(covenant, statements).status : 'pausado';
       events.push({
         id: `covenant-${covenant.id}`,
         date: covenant.createdAt,
         periodLabel: fmtDate(covenant.createdAt),
-        title: covenant.type === 'financial' ? `Covenant financiero: ${covenant.name}` : `Covenant ${covenant.type}: ${covenant.name}`,
+        title: covenant.type === 'financial' ? `Indicador financiero: ${covenant.name}` : `Covenant ${covenant.type}: ${covenant.name}`,
         detail: covenant.description || `Umbral ${covenant.operator} ${covenant.threshold || 'N/D'}.`,
         type: 'covenant',
         severity: covenantSeverity(status),

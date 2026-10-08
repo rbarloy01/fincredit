@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Building2, CheckCircle2, Columns3, ExternalLink, FileText, KanbanSquare, ListChecks, Search, Table2, TrendingUp } from 'lucide-react';
-import { Client, ContractFile, Covenant_DB, CrmActivity, db, FinancialStatement_DB, LoanTape_DB, Transaction } from '../../db/index';
+import { Client, ContractFile, Covenant_DB, CrmActivity, db, FinancialStatement_DB, Transaction } from '../../db/index';
 import { computeClientSignal, ClientSignal } from '../../lib/portfolioAnalytics';
 import { CRM_STAGES, CrmStage, collectOpenReminders, currentStage } from '../../lib/crmPipeline';
 import KanbanBoard from './KanbanBoard';
@@ -102,9 +102,9 @@ function urgencyRank(activities: CrmActivity[] = []) {
   return dateTime(urgent.dueAt) + overduePenalty + priorityPenalty;
 }
 
-function monitoringStatus(statements: FinancialStatement_DB[] = [], loanTapes: LoanTape_DB[] = []) {
-  if (statements.length && loanTapes.length) return 'Listo';
-  if (statements.length || loanTapes.length) return 'Parcial';
+function monitoringStatus(statements: FinancialStatement_DB[] = [], loanTapeCount = 0) {
+  if (statements.length && loanTapeCount) return 'Listo';
+  if (statements.length || loanTapeCount) return 'Parcial';
   return 'Pendiente';
 }
 
@@ -114,7 +114,7 @@ const CrmDashboardPage: React.FC<Props> = ({ onSelectClient, session }) => {
   const [activitiesByClient, setActivitiesByClient] = useState<Record<string, CrmActivity[]>>({});
   const [contractFilesByTransaction, setContractFilesByTransaction] = useState<Record<string, ContractFile[]>>({});
   const [statementsByClient, setStatementsByClient] = useState<Record<string, FinancialStatement_DB[]>>({});
-  const [loanTapesByClient, setLoanTapesByClient] = useState<Record<string, LoanTape_DB[]>>({});
+  const [loanTapesByClient, setLoanTapesByClient] = useState<Record<string, number>>({});
   const [covenantsByClient, setCovenantsByClient] = useState<Record<string, Covenant_DB[]>>({});
   const [openingFileId, setOpeningFileId] = useState('');
   const [search, setSearch] = useState('');
@@ -130,17 +130,17 @@ const CrmDashboardPage: React.FC<Props> = ({ onSelectClient, session }) => {
       setLoading(true);
       setError('');
       try {
-        const nextClients = await db.getClients();
+        const nextClients = await db.getClientsLight();
         const clientIds = nextClients.map(client => client.id);
         const [nextTransactions, nextActivities, nextStatements, nextLoanTapes, nextCovenants] = await Promise.all([
           db.getTransactionsForClients(clientIds),
           db.getCrmActivitiesForClients(clientIds),
-          db.getStatementsForClients(clientIds),
-          db.getLoanTapesForClients(clientIds),
+          db.getDashboardStatementsForClients(clientIds),
+          db.getLoanTapeCountsForClients(clientIds),
           db.getCovenantsForClients(clientIds),
         ]);
         const transactionIds = Object.values(nextTransactions).flat().map(tx => tx.id);
-        const nextContractFiles = await db.getContractFilesForTransactions(transactionIds);
+        const nextContractFiles = await db.getContractFilesMetaForTransactions(transactionIds);
         if (!active) return;
         setClients(nextClients);
         setTransactionsByClient(nextTransactions);
@@ -247,8 +247,8 @@ const CrmDashboardPage: React.FC<Props> = ({ onSelectClient, session }) => {
       const urgent = urgentActivity(activities);
       const status = rowActivityStatus(activities);
       const statements = statementsByClient[client.id] || [];
-      const loanTapes = loanTapesByClient[client.id] || [];
-      const monitor = monitoringStatus(statements, loanTapes);
+      const loanTapeCount = loanTapesByClient[client.id] || 0;
+      const monitor = monitoringStatus(statements, loanTapeCount);
       const baseRows = transactions.length ? transactions : [{
         id: `${client.id}-portfolio`,
         clientId: client.id,
@@ -280,7 +280,7 @@ const CrmDashboardPage: React.FC<Props> = ({ onSelectClient, session }) => {
           utilization: amount ? (balance / amount) * 100 : 0,
           status,
           monitor,
-          monitorDetail: `${statements.length} EEFF · ${loanTapes.length} loan tape${loanTapes.length === 1 ? '' : 's'}`,
+          monitorDetail: `${statements.length} EEFF · ${loanTapeCount} loan tape${loanTapeCount === 1 ? '' : 's'}`,
           sortKey: urgencyRank(activities),
         };
       });
@@ -311,12 +311,12 @@ const CrmDashboardPage: React.FC<Props> = ({ onSelectClient, session }) => {
       let url = '';
       if (file.sourceDocumentId) {
         url = await db.createSignedDocumentUrl(file.sourceDocumentId, 180);
-      } else if (file.base64Data) {
-        url = file.base64Data.startsWith('data:')
-          ? file.base64Data
-          : `data:${file.mimeType || 'application/octet-stream'};base64,${file.base64Data}`;
       } else {
-        throw new Error('El contrato no tiene archivo asociado para abrir.');
+        const data = file.base64Data || (await db.getContractFileData(file.id));
+        if (!data) throw new Error('El contrato no tiene archivo asociado para abrir.');
+        url = data.startsWith('data:')
+          ? data
+          : `data:${file.mimeType || 'application/octet-stream'};base64,${data}`;
       }
       if (target) target.location.href = url;
       else window.open(url, '_blank', 'noopener,noreferrer');

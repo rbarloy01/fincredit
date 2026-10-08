@@ -167,10 +167,27 @@ async function insertReviewItems(admin: any, doc: any, tableRows: any[], tableRe
   return reviewRows.length;
 }
 
+// Same guard as src/lib/sheetRows.ts: ERP exports declare ranges like A1:BP1048576 and sheet_to_json walks every row.
+function trimSheetRange(worksheet: XLSX.WorkSheet) {
+  const ref = worksheet['!ref'];
+  if (!ref || XLSX.utils.decode_range(ref).e.r < 5000) return;
+  let maxR = -1, maxC = -1;
+  for (const key of Object.keys(worksheet)) {
+    if (key.charCodeAt(0) === 33) continue;
+    const cell = (worksheet as any)[key];
+    if (!cell || cell.v === undefined || cell.v === null || cell.v === '') continue;
+    const { r, c } = XLSX.utils.decode_cell(key);
+    if (r > maxR) maxR = r;
+    if (c > maxC) maxC = c;
+  }
+  worksheet['!ref'] = maxR < 0 ? 'A1' : XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: maxR, c: maxC } });
+}
+
 function workbookTables(buffer: Buffer) {
   const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: false });
   return workbook.SheetNames.map((sheetName, index) => {
     const worksheet = workbook.Sheets[sheetName];
+    trimSheetRange(worksheet);
     const rows = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1, raw: false, defval: '' });
     return {
       sheetName,

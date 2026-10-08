@@ -48,9 +48,11 @@ Usa `days_overdue` para clasificar CADA crédito:
 
 | Clasificación         | Criterio DPD           |
 |-----------------------|------------------------|
-| **Cartera Vigente**   | days_overdue = 0       |
-| **Cartera Atrasada**  | 1 ≤ days_overdue ≤ 90  |
+| **Cartera Vigente**   | 0 ≤ days_overdue ≤ 30  |
+| **Cartera Atrasada**  | 31 ≤ days_overdue ≤ 90 |
 | **Cartera Vencida**   | days_overdue > 90      |
+
+Nota: "al corriente" (days_overdue = 0) es solo un bucket de antigüedad dentro de Cartera Vigente; nunca lo reportes como otra definición de Vigente.
 
 Reporta para cada bucket: número de créditos, saldo total, % del portafolio.
 

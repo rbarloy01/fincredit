@@ -1,8 +1,10 @@
 import { forwardJson, readJson, requireActiveUser, sendJson } from '../server/apiHelpers.js';
+import { syntageProxyHandler } from '../server/syntageProxy.js';
 
 export const maxDuration = 60;
 
 export default async function handler(req: any, res: any) {
+  if (req.query?.route === 'syntage') return syntageProxyHandler(req, res);
   if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' });
   try {
     const incoming = await readJson(req);

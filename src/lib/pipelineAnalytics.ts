@@ -2,6 +2,8 @@
 // natively in FinMonitor, computed from real client + CRM activity data instead of
 // a manually maintained spreadsheet snapshot.
 import { Client, CrmActivity } from '../db/index';
+import { LineMovement, computeLineBalance } from './lineLedger';
+import { isClientMonitored } from './clientStatus';
 import { CRM_STAGES, CrmStage, currentStage } from './crmPipeline';
 
 // Probability of close per stage, as configured by the team (Configuración!L:M).
@@ -42,6 +44,7 @@ export interface MonitoringLineMeta {
   estatus: string;
   analista: string;
   ultimaActualizacion: string;
+  movimientos?: LineMovement[];
 }
 
 export interface HistorialMeta {
@@ -121,6 +124,15 @@ function quarterStart(now: Date): number {
   return new Date(now.getFullYear(), q * 3, 1).getTime();
 }
 
+const MAX_REASONABLE_CYCLE_DAYS = 3650;
+
+function usableDurationDays(value: number | null | undefined): value is number {
+  return typeof value === 'number'
+    && Number.isFinite(value)
+    && value >= 0
+    && value <= MAX_REASONABLE_CYCLE_DAYS;
+}
+
 // KNOWN LIMITATION: a client mid-renewal can have an active Underwriting deal for a
 // new facility while an older facility from the same client is still being logged
 // under `phase: 'Monitoring'`. currentStage() tracks one stage per client (from its
@@ -140,7 +152,7 @@ export function computeStageCycleTimes(activitiesByClient: Record<string, CrmAct
     for (let i = 1; i < staged.length; i++) {
       const prevStage = staged[i - 1].stage;
       const days = (staged[i].at - staged[i - 1].at) / 86_400_000;
-      if (days >= 0) (durations.get(prevStage) || durations.set(prevStage, []).get(prevStage)!).push(days);
+      if (usableDurationDays(days)) (durations.get(prevStage) || durations.set(prevStage, []).get(prevStage)!).push(days);
     }
   }
   return CRM_STAGES.filter(s => s !== 'Monitoring')
@@ -219,9 +231,10 @@ export function buildPipelineSummary(
       nuevosProspectosTrimestre += 1;
     }
 
-    for (const line of meta?.monitoring || []) {
+    // Dormant / closed clients don't count as active credits and can't carry an "incumplimiento" status.
+    for (const line of isClientMonitored(client) ? meta?.monitoring || [] : []) {
       creditosActivos += 1;
-      saldoVigente += line.saldoActual || 0;
+      saldoVigente += computeLineBalance(line).saldo;
       montoOriginal += line.monto || 0;
       const est = line.estatus || 'Sin estatus';
       monByEstatus.set(est, (monByEstatus.get(est) || 0) + 1);
@@ -238,7 +251,7 @@ export function buildPipelineSummary(
         // aproximamos con la fecha de alta del cliente en FinMonitor.
         if (client.createdAt && new Date(client.createdAt).getTime() >= qStart) dormantTrimestre += 1;
       }
-      if (h.dealVelocityDias != null) dealVelocities.push(h.dealVelocityDias);
+      if (usableDurationDays(h.dealVelocityDias)) dealVelocities.push(h.dealVelocityDias);
       if (h.motivo) motivos.set(h.motivo, (motivos.get(h.motivo) || 0) + 1);
     }
   }

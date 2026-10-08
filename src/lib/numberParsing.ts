@@ -23,13 +23,15 @@ export function parseFinancialNumber(value: unknown, fallback = 0): number {
   } else if (lastComma >= 0) {
     const parts = raw.split(',');
     const last = parts.at(-1) || '';
-    normalized = parts.length === 2 && last.length > 0 && last.length <= 2
+    // A thousands separator always groups exactly 3 digits: any other group length means decimals ("30,00000").
+    normalized = parts.length === 2 && last.length > 0 && last.length !== 3
       ? `${parts[0]}.${last}`
       : parts.join('');
   } else if (lastDot >= 0) {
     const parts = raw.split('.');
     const last = parts.at(-1) || '';
-    normalized = parts.length === 2 && last.length > 0 && last.length <= 2
+    // "30.00000%" or "0.125" are decimals; only "1.234" / "12.345.678" read as thousands.
+    normalized = parts.length === 2 && last.length > 0 && (last.length !== 3 || parts[0] === '0')
       ? raw
       : parts.join('');
   }

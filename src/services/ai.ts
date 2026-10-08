@@ -7,7 +7,7 @@ import { parseFinancialNumber } from '../lib/numberParsing';
 import { supabase } from '../lib/supabase';
 
 export type AIProvider = 'gemini' | 'claude' | 'openai' | 'openrouter' | 'bytez' | 'nvidia_nim';
-export type AITask = 'financials' | 'contracts' | 'loan_tape' | 'liabilities' | 'opinion' | 'account_consolidation';
+export type AITask = 'financials' | 'contracts' | 'loan_tape' | 'liabilities' | 'opinion' | 'account_consolidation' | 'assistant';
 
 export interface AIProviderConfig {
   provider: AIProvider;
@@ -27,11 +27,24 @@ export interface AISettings {
 }
 
 const SETTINGS_KEY = 'finmonitor_ai_settings';
-const GEMINI_MODEL = 'gemini-flash-latest';
-const OPENROUTER_MODEL = 'stealth/ox-alpha';
-const OPENROUTER_FALLBACK_MODELS = ['openrouter/free'];
+// Free-tier Gemini: Flash models give only ~20 requests/day, Flash-Lite ~500/day (Sept 2026), and a statement extraction makes 2 calls.
+// New setups default to Flash-Lite; on a quota error any Gemini model falls back to it automatically.
+const GEMINI_MODEL = 'gemini-flash-lite-latest';
+const GEMINI_QUOTA_FALLBACK = 'gemini-flash-lite-latest';
+// Free, JSON-capable models with a large context (checked against OpenRouter's public catalog). OpenRouter accepts at most
+// 3 models per request: primary + 2 fallbacks. Models OpenRouter retires are listed so saved settings can be migrated.
+const OPENROUTER_MODEL = 'google/gemma-4-31b-it:free';
+const OPENROUTER_FALLBACK_MODELS = ['nvidia/nemotron-3-super-120b-a12b:free', 'openrouter/free'];
+const RETIRED_OPENROUTER_MODELS = new Set(['stealth/ox-alpha']);
+// Free models that can read images (checked against the public catalog); "openrouter/free" routes to whichever free model supports the request.
+const OPENROUTER_VISION_MODELS = ['google/gemma-4-31b-it:free', 'thinkingmachines/inkling:free', 'openrouter/free'];
+const VISION_CAPABLE = /gemini|gpt-4|gpt-5|claude|gemma-4|inkling|dots-3|omni|vision|-vl|qwen.*vl|pixtral|llama-4|openrouter\/free|openrouter\/auto/i;
 const BYTEZ_MODEL = 'Qwen/Qwen3-4B';
 const NVIDIA_NIM_MODEL = 'nvidia/llama-3.1-nemotron-70b-instruct';
+// NVIDIA NIM hosts free vision models (checked against its public catalog). Used automatically when the request has images.
+const NVIDIA_NIM_VISION_MODEL = 'google/gemma-4-31b-it';
+const NIM_VISION_CAPABLE = /gemma-[34]|vision|-vl|omni|neva|vila|fuyu|kosmos|cosmos|phi-.*vision/i;
+const NIM_MAX_IMAGES = 10;
 const AI_PROVIDERS: AIProvider[] = ['gemini', 'claude', 'openai', 'openrouter', 'bytez', 'nvidia_nim'];
 
 export const AI_TASK_LABELS: Record<AITask, string> = {
@@ -41,6 +54,7 @@ export const AI_TASK_LABELS: Record<AITask, string> = {
   liabilities: 'Pasivos institucionales',
   opinion: 'Opinión / comentarios',
   account_consolidation: 'Consolidación de cuentas',
+  assistant: 'Asistente del cliente (preguntas)',
 };
 
 export function defaultModelForProvider(provider: AIProvider): string {
@@ -67,14 +81,22 @@ export function defaultProviderConfig(provider: AIProvider): AIProviderConfig {
 }
 
 function normalizeProviderConfig(provider: AIProvider, config?: Partial<AIProviderConfig>): AIProviderConfig {
+  let model = config?.model || defaultModelForProvider(provider);
+  let fallbackModels = config?.fallbackModels || defaultFallbackModelsForProvider(provider);
+  if (provider === 'openrouter') {
+    // A retired model makes every extraction fail ("No endpoints found"): move saved settings to the current default.
+    if (RETIRED_OPENROUTER_MODELS.has(model)) model = defaultModelForProvider('openrouter');
+    fallbackModels = fallbackModels.filter(item => !RETIRED_OPENROUTER_MODELS.has(item));
+    if (!fallbackModels.length) fallbackModels = defaultFallbackModelsForProvider('openrouter');
+  }
   return {
     ...defaultProviderConfig(provider),
     ...config,
     provider,
     enabled: config?.enabled ?? defaultProviderConfig(provider).enabled,
     apiKey: config?.apiKey ?? '',
-    model: config?.model || defaultModelForProvider(provider),
-    fallbackModels: config?.fallbackModels || defaultFallbackModelsForProvider(provider),
+    model,
+    fallbackModels,
   };
 }
 
@@ -373,6 +395,79 @@ function mergeFinancialExtractions(primary: ExtractionResult, rescue: Extraction
   };
 }
 
+// OpenRouter chat payload. Images go as image_url parts; raw PDFs go as file parts parsed by OpenRouter's free text engine.
+// With attachments, a model that cannot see images is replaced by the free vision chain.
+export function buildOpenRouterPayload(settings: AISettings, systemPrompt: string, userPrompt: string, mediaItems: AIMedia[]): Record<string, any> {
+  const configured = settings.model || OPENROUTER_MODEL;
+  const needsVision = mediaItems.length > 0;
+  const model = needsVision && !VISION_CAPABLE.test(configured) ? OPENROUTER_VISION_MODELS[0] : configured;
+  const base = needsVision && model !== configured ? OPENROUTER_VISION_MODELS.slice(1) : (settings.fallbackModels || OPENROUTER_FALLBACK_MODELS);
+  const fallbackModels = base.filter(item => item && item !== model && (!needsVision || VISION_CAPABLE.test(item))).slice(0, 2);
+  const userContent: any = needsVision
+    ? [
+        { type: 'text', text: userPrompt },
+        ...mediaItems.map(item => item.mimeType === 'application/pdf'
+          ? { type: 'file', file: { filename: item.fileName || 'documento.pdf', file_data: `data:application/pdf;base64,${item.base64}` } }
+          : { type: 'image_url', image_url: { url: `data:${item.mimeType};base64,${item.base64}` } }),
+      ]
+    : userPrompt;
+  const payload: Record<string, any> = {
+    messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userContent }],
+    temperature: 0,
+    max_tokens: 8192,
+    provider: { sort: { by: 'price', partition: 'none' } },
+  };
+  if (mediaItems.some(item => item.mimeType === 'application/pdf')) payload.plugins = [{ id: 'file-parser', pdf: { engine: 'pdf-text' } }];
+  if (fallbackModels.length) payload.models = [model, ...fallbackModels];
+  else payload.model = model;
+  return payload;
+}
+
+// ── Automatic fallback between providers ─────────────────────────────────────────────────────────────────────────────
+// Free tiers run out or retire models without notice. When the selected provider fails for a recoverable reason (quota, rate
+// limit, retired model, outage), the same request is retried on the OTHER providers the user enabled, in this order.
+const FALLBACK_ORDER: AIProvider[] = ['nvidia_nim', 'openrouter', 'gemini', 'openai', 'claude'];
+const RECOVERABLE_AI_ERROR = /429|quota|rate.?limit|resource_exhausted|exceed|insufficient|credits|payment|402|no endpoints|not a valid model|model.*(not found|unavailable|retired)|overloaded|unavailable|timeout|timed out|demasiado|tardó|\b5\d\d\b|respuesta no json|gateway|capacity|too many/i;
+
+export function fallbackCandidates(settings: AISettings, documentText: string, media?: AIMedia | AIMedia[]): AISettings[] {
+  const normalized = normalizeAISettings(settings);
+  const out: AISettings[] = [];
+  const seen = new Set<AIProvider>([settings.provider]);
+  for (const provider of FALLBACK_ORDER) {
+    if (seen.has(provider)) continue;
+    const config = normalized.providers?.[provider];
+    if (!config?.enabled || !config.apiKey) continue;
+    const candidate: AISettings = { ...normalized, provider, apiKey: config.apiKey, model: config.model, fallbackModels: config.fallbackModels };
+    const access = resolveMediaAccess(candidate, documentText, media);
+    const hasMedia = !!access.media && (Array.isArray(access.media) ? access.media.length > 0 : true);
+    // a provider that would be handed images it cannot read (text-only, no OCR text available) is not a valid fallback
+    if (hasMedia && !providerSupportsMedia(provider) && !FREE_VISION_PROVIDERS.includes(provider)) continue;
+    seen.add(provider);
+    out.push(candidate);
+  }
+  return out;
+}
+
+async function callAIResilient(settings: AISettings, systemPrompt: string, userPrompt: string, documentText: string, media?: AIMedia | AIMedia[]): Promise<string> {
+  const attempts: Array<{ provider: AIProvider; error: string }> = [];
+  const candidates = [settings, ...fallbackCandidates(settings, documentText, media)];
+  for (const candidate of candidates) {
+    const access = resolveMediaAccess(candidate, documentText, media);
+    try {
+      return await callAI(access.settings, systemPrompt, userPrompt, access.media);
+    } catch (error: any) {
+      const message = String(error?.message || error);
+      attempts.push({ provider: candidate.provider, error: message });
+      if (!RECOVERABLE_AI_ERROR.test(message)) throw error; // a real problem with the request (bad key, bad file): do not mask it
+      console.warn(`${candidate.provider} falló (${message.slice(0, 160)}); probando el siguiente proveedor habilitado.`);
+    }
+  }
+  const detail = attempts.map(a => `${a.provider}: ${a.error.slice(0, 140)}`).join(' | ');
+  throw new Error(attempts.length > 1
+    ? `Ningún proveedor habilitado pudo procesar el documento. ${detail}. Habilita otro proveedor gratuito en Configuración → Motor de IA (por ejemplo NVIDIA NIM u OpenRouter).`
+    : attempts[0]?.error || 'No se pudo procesar el documento.');
+}
+
 async function callAI(settings: AISettings, systemPrompt: string, userPrompt: string, media?: AIMedia | AIMedia[]): Promise<string> {
   const { provider, apiKey } = settings;
   const mediaItems = media ? (Array.isArray(media) ? media : [media]).filter(item => item.base64 && item.mimeType) : [];
@@ -388,8 +483,20 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
       // (400 INVALID_ARGUMENT). 128 es el mínimo aceptado → mantiene el pensamiento al mínimo sin romper.
       generationConfig: { temperature: 0.0, maxOutputTokens: 16384, responseMimeType: 'application/json', thinkingConfig: { thinkingBudget: 128 } },
     };
-    const res = await fetchAIWithRetry('/api/gemini', { apiKey, model: settings.model || GEMINI_MODEL, payload });
-    const data = await readAIResponseJson(res, 'Gemini');
+    let res = await fetchAIWithRetry('/api/gemini', { apiKey, model: settings.model || GEMINI_MODEL, payload });
+    let data = await readAIResponseJson(res, 'Gemini');
+    // Newer Gemini models change how "thinking" is configured and answer 400 to the old field: retry without it.
+    if (!res.ok && /thinking/i.test(String(data.error?.message || data.error || ''))) {
+      const { thinkingConfig: _unused, ...generationConfig } = payload.generationConfig;
+      res = await fetchAIWithRetry('/api/gemini', { apiKey, model: settings.model || GEMINI_MODEL, payload: { ...payload, generationConfig } });
+      data = await readAIResponseJson(res, 'Gemini');
+    }
+    const geminiModel = settings.model || GEMINI_MODEL;
+    if (!res.ok && geminiModel !== GEMINI_QUOTA_FALLBACK && (res.status === 429 || /quota|resource_exhausted|rate.?limit|exceeded/i.test(String(data.error?.message || data.error || '')))) {
+      console.warn(`Gemini ${geminiModel} agotó su cuota gratuita; reintentando con ${GEMINI_QUOTA_FALLBACK}.`);
+      res = await fetchAIWithRetry('/api/gemini', { apiKey, model: GEMINI_QUOTA_FALLBACK, payload });
+      data = await readAIResponseJson(res, 'Gemini');
+    }
     if (!res.ok) throw new Error(data.error?.message || data.error || 'Gemini error');
     return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
   }
@@ -448,36 +555,46 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
   }
 
   if (provider === 'openrouter') {
-    if (mediaItems.length > 0) {
-      throw new Error('OpenRouter gratis está configurado para texto/OCR en este flujo. Para PDFs escaneados o imágenes usa Gemini/OpenAI/Claude, o extrae texto primero.');
-    }
-    const model = settings.model || OPENROUTER_MODEL;
-    const fallbackModels = (settings.fallbackModels || OPENROUTER_FALLBACK_MODELS).filter(item => item && item !== model);
-    const payload: Record<string, any> = {
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      temperature: 0,
-      max_tokens: 8192,
-      provider: {
-        sort: { by: 'price', partition: 'none' },
-      },
-    };
-    if (fallbackModels.length) {
-      payload.models = [model, ...fallbackModels];
-    } else {
-      payload.model = model;
-    }
+    const payload = buildOpenRouterPayload(settings, systemPrompt, userPrompt, mediaItems);
+    const model = String(payload.model || payload.models?.[0] || settings.model || OPENROUTER_MODEL);
     const res = await fetchAIWithRetry('/api/bytez', { provider: 'openrouter', apiKey, payload });
     const data = await readAIResponseJson(res, 'OpenRouter');
-    if (!res.ok) throw new Error(data.error?.message || data.error || 'OpenRouter error');
+    if (!res.ok) {
+      const detail = String(data.error?.message || data.error || 'OpenRouter error');
+      if (/no endpoints found|not a valid model|model.*(not found|unavailable)|no allowed providers/i.test(detail)) {
+        throw new Error(`OpenRouter no tiene disponible el modelo "${model}" (${detail}). En Configuración → Motor de IA elige un modelo vigente de OpenRouter.`);
+      }
+      if (/insufficient|credits|payment/i.test(detail) || res.status === 402) {
+        throw new Error(`OpenRouter rechazó la solicitud por falta de créditos o límite de la llave (${detail}).`);
+      }
+      throw new Error(detail);
+    }
     return data.choices?.[0]?.message?.content || '';
   }
 
   if (provider === 'bytez' || provider === 'nvidia_nim') {
-    if (mediaItems.length > 0) {
-      throw new Error(`${provider === 'bytez' ? 'Bytez' : 'NVIDIA NIM'} está configurado para texto en este flujo. Usa Gemini/OpenAI/Claude para PDFs o imágenes, o pasa texto OCR.`);
+    if (mediaItems.length > 0 && provider === 'bytez') {
+      throw new Error('Bytez está configurado para texto en este flujo. Usa Gemini, NVIDIA NIM u OpenRouter para PDFs o imágenes, o pasa texto OCR.');
+    }
+    if (provider === 'nvidia_nim' && mediaItems.length > 0) {
+      // OpenAI-compatible multimodal message: images first, then the text (NVIDIA's recommendation for document reading).
+      const configured = settings.model || NVIDIA_NIM_MODEL;
+      const model = NIM_VISION_CAPABLE.test(configured) ? configured : NVIDIA_NIM_VISION_MODEL;
+      const pages = mediaItems.filter(item => item.mimeType.startsWith('image/')).slice(0, NIM_MAX_IMAGES);
+      if (!pages.length) throw new Error('NVIDIA NIM lee imágenes (JPG/PNG o páginas de PDF). Convierte el archivo a imágenes o usa otro proveedor.');
+      const nimPayload = {
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: [...pages.map(item => ({ type: 'image_url', image_url: { url: `data:${item.mimeType};base64,${item.base64}` } })), { type: 'text', text: userPrompt }] },
+        ],
+        temperature: 0,
+        max_tokens: 8192,
+      };
+      const nimRes = await fetchAIWithRetry('/api/bytez', { provider, apiKey, payload: nimPayload });
+      const nimData = await readAIResponseJson(nimRes, 'NVIDIA NIM');
+      if (!nimRes.ok) throw new Error(nimData.error?.message || nimData.detail || nimData.error || 'NVIDIA NIM error');
+      return nimData.choices?.[0]?.message?.content || '';
     }
     const payload = {
       model: settings.model || (provider === 'bytez' ? BYTEZ_MODEL : NVIDIA_NIM_MODEL),
@@ -572,6 +689,26 @@ function normalizeLiabilityType(value: unknown): ExtractedInstitutionalLiability
 
 function providerSupportsMedia(provider: AIProvider) {
   return provider === 'gemini' || provider === 'openai' || provider === 'claude';
+}
+
+// Free providers that can read page images but do better (and faster) with OCR text when the document has it.
+const FREE_VISION_PROVIDERS: AIProvider[] = ['openrouter', 'nvidia_nim'];
+
+// When the document already has OCR/text, text-only and free providers use it and drop the images (faster, more reliable). With no
+// text (scanned), OpenRouter reads the page images with a free vision model; Bytez/NVIDIA hand off to an enabled vision provider.
+export function resolveMediaAccess(settings: AISettings, documentText: string, media?: AIMedia | AIMedia[]): { settings: AISettings; media?: AIMedia | AIMedia[]; droppedMedia: boolean } {
+  const items = media ? (Array.isArray(media) ? media : [media]).filter(item => item.base64 && item.mimeType) : [];
+  if (!items.length || providerSupportsMedia(settings.provider)) return { settings, media, droppedMedia: false };
+  // (text-only and free-vision providers: use the text when there is enough, otherwise see below)
+  if (documentText.trim().length >= 200) return { settings, media: undefined, droppedMedia: true };
+  if (FREE_VISION_PROVIDERS.includes(settings.provider)) return { settings, media, droppedMedia: false }; // free vision models read the page images
+  const normalized = normalizeAISettings(settings);
+  const visual = (['gemini', 'openai', 'claude'] as AIProvider[]).find(p => normalized.providers?.[p]?.enabled && normalized.providers?.[p]?.apiKey);
+  if (visual) {
+    const config = normalized.providers![visual];
+    return { settings: { ...normalized, provider: visual, apiKey: config.apiKey, model: config.model, fallbackModels: config.fallbackModels }, media, droppedMedia: false };
+  }
+  return { settings, media, droppedMedia: false }; // callAI explains what to do
 }
 
 function normalizeDateString(value: unknown): string | undefined {
@@ -697,11 +834,14 @@ export async function extractFinancials(
     : !Array.isArray(content) && 'text' in content
       ? String(content.text || '')
       : '';
-  const documentMedia: AIMedia | AIMedia[] | undefined = isTextContent
+  const rawMedia: AIMedia | AIMedia[] | undefined = isTextContent
     ? undefined
     : !Array.isArray(content) && 'media' in content
       ? content.media
       : content as AIMedia | AIMedia[];
+  const access = resolveMediaAccess(settings, documentText, rawMedia);
+  settings = access.settings;
+  const documentMedia = access.media;
   const prompt = documentText
     ? `Cliente esperado en la app (NO confundir con el emisor del documento): ${expectedClientName || 'no indicado'}.
 
@@ -716,7 +856,7 @@ ${documentText}`
 Lee el documento adjunto y aplica el proceso de extracción completo descrito en las instrucciones del sistema.
 Devuelve únicamente JSON minificado con la estructura indicada.`;
 
-  const text = await callAI(settings, system, prompt, documentMedia);
+  const text = await callAIResilient(settings, system, prompt, documentText, documentMedia);
   const result = normalizeFinancialExtraction(extractJSON(text));
 
   if (hasStatementType(result, 'estado_resultados')) return result;
@@ -739,7 +879,7 @@ Busca encabezados como INGRESOS, COSTOS, GASTOS, UTILIDAD, RESULTADO, MARGEN FIN
 Devuelve únicamente JSON minificado con la misma estructura indicada; todos los rawLineItems deben tener statementType "estado_resultados".`;
 
   try {
-    const rescueText = await callAI(settings, system, rescuePrompt, documentMedia);
+    const rescueText = await callAIResilient(settings, system, rescuePrompt, documentText, documentMedia);
     const rescue = normalizeFinancialExtraction(extractJSON(rescueText));
     return hasStatementType(rescue, 'estado_resultados')
       ? mergeFinancialExtractions(result, rescue)
@@ -1081,4 +1221,21 @@ Devuelve:
 export async function testConnection(settings: AISettings): Promise<string> {
   const text = await callAI(settings, 'Responde únicamente con: OK', 'Di "OK"');
   return text.trim();
+}
+
+
+// Pregunta libre sobre un cliente. El contexto (clientContext.ts) ya trae estados, ratios, indicadores y loan tape agregados;
+// la conversación previa se manda como texto para que funcione igual con cualquier proveedor (OpenRouter, Gemini, Claude…).
+export async function askClientAssistant(
+  settings: AISettings,
+  systemPrompt: string,
+  contextText: string,
+  history: Array<{ role: 'user' | 'assistant'; content: string }>,
+  question: string,
+  contextLabel = 'CONTEXTO DEL CLIENTE',
+): Promise<string> {
+  settings = settingsForTask(settings, 'assistant');
+  const previous = history.slice(-6).map(m => `${m.role === 'user' ? 'USUARIO' : 'ASISTENTE'}: ${m.content}`).join('\n\n');
+  const prompt = `${contextLabel}\n${contextText}\n\n${previous ? `CONVERSACIÓN PREVIA\n${previous}\n\n` : ''}PREGUNTA ACTUAL\n${question}`;
+  return callAI(settings, systemPrompt, prompt);
 }

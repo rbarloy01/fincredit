@@ -41,3 +41,6 @@ finmonitor-base-local.zip
 # Generated reports and spreadsheet inspection outputs
 *.inspect.ndjson
 *.tmp
+
+# Generated test bundles
+.test-build

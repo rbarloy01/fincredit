@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useClientMonitored } from '../clients/MonitoringContext';
 import { db, Transaction, ContractFile } from '../../db/index';
 import { Session } from '../../services/auth';
 import { AISettings, AIMedia, extractCovenants, ContractExtractionResult, FinancialCovenant } from '../../services/ai';
@@ -121,6 +122,7 @@ const emptyPipelineMeta = (): PipelineTransactionMeta => ({
 });
 
 const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session, aiSettings, onCovenantsExtracted }) => {
+  const monitored = useClientMonitored();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [files, setFiles] = useState<Record<string, ContractFile[]>>({});
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -453,7 +455,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
           exporting ? 'Aplicando formato...' : 'Extrayendo obligaciones...',
           exporting ? 'Preparando descarga...' : 'Preparando covenants...',
           exporting ? 'Acomodando hojas...' : 'Separando hacer y no hacer...',
-          exporting ? 'Casi queda...' : 'Revisando covenants financieros...',
+          exporting ? 'Casi queda...' : 'Revisando indicadores financieros...',
           exporting ? 'Listo en un momento...' : 'Preparando resultado...',
         ]}
       />
@@ -668,7 +670,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                         <label>
                           <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Estatus monitoring</span>
                           <select className={inputClass} value={txPipelineMeta.monitoringStatus} onChange={e => void updatePipelineMeta(tx.id, { monitoringStatus: e.target.value })}>
-                            {MONITORING_STATUSES.map(status => <option key={status} value={status}>{status}</option>)}
+                            {(monitored ? MONITORING_STATUSES : MONITORING_STATUSES.filter(st => !st.startsWith('Incumplimiento'))).map(status => <option key={status} value={status}>{status}</option>)}
                           </select>
                         </label>
                         <label>
@@ -918,7 +920,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                               </div>
                             ))}
                             {extraction.covenants.length === 0 && (
-                              <p className="text-xs text-slate-400 italic">Sin covenants financieros extraídos</p>
+                              <p className="text-xs text-slate-400 italic">Sin indicadores financieros extraídos</p>
                             )}
                           </div>
                         </div>

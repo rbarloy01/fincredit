@@ -1,4 +1,4 @@
-import React, { Suspense, useState, useEffect } from 'react';
+import React, { Suspense, useState, useEffect, useMemo } from 'react';
 import { db, Client, Transaction, FinancialStatement_DB, Covenant_DB, LoanTape_DB, InstitutionalLiability_DB, CustomField } from '../../db/index';
 import { Session } from '../../services/auth';
 import { AISettings } from '../../services/ai';
@@ -7,7 +7,6 @@ import TransactionPanel from '../transactions/TransactionPanel';
 import FinancialCovenantsPanel from '../covenants/FinancialCovenantsPanel';
 import HacerNoHacerPanel from '../covenants/HacerNoHacerPanel';
 import CreditUnderwritingPanel from '../monitoring/CreditUnderwritingPanel';
-import AuditPanel from '../audit/AuditPanel';
 import WorkingOverlay from '../common/WorkingOverlay';
 import CompanyOverviewPanel from './CompanyOverviewPanel';
 import { lazyWithChunkRetry } from '../../lib/lazyWithChunkRetry';
@@ -28,18 +27,20 @@ interface Props {
   onEdit?: (client: Client) => void;
 }
 
-type Tab = 'monitor' | 'crm' | 'company_overview' | 'transacciones' | 'estados' | 'auditoria' | 'loantape' | 'pasivos_institucionales' | 'cov_financiero' | 'hacer_no_hacer' | 'reporte';
+type Tab = 'monitor' | 'crm' | 'company_overview' | 'transacciones' | 'estados' | 'loantape' | 'pasivos_institucionales' | 'cov_financiero' | 'hacer_no_hacer' | 'reporte';
 
+import { QUALITY_SETTING_KEY, usableStatements, type StatementQualityRecord } from '../../lib/statementQuality';
+import { MonitoringProvider } from './MonitoringContext';
+import { clientStatusLabel, isClientMonitored, MONITORING_PAUSED_TEXT } from '../../lib/clientStatus';
 const TABS: { id: Tab; label: string }[] = [
   { id: 'monitor', label: 'Underwriting' },
   { id: 'crm', label: 'CRM' },
   { id: 'company_overview', label: 'Company Overview' },
   { id: 'transacciones', label: 'Transacciones' },
   { id: 'estados', label: 'Estados Financieros' },
-  { id: 'auditoria', label: 'Auditoría' },
   { id: 'loantape', label: 'Loan Tape' },
   { id: 'pasivos_institucionales', label: 'Pasivos Institucionales' },
-  { id: 'cov_financiero', label: 'Covenants Financieros' },
+  { id: 'cov_financiero', label: 'Indicadores Financieros' },
   { id: 'hacer_no_hacer', label: 'Hacer / No Hacer' },
   { id: 'reporte', label: 'Reporte' },
 ];
@@ -57,6 +58,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
   const [client, setClient] = useState<Client | null>(null);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [statements, setStatements] = useState<FinancialStatement_DB[]>([]);
+  const [qualityRecords, setQualityRecords] = useState<Record<string, StatementQualityRecord>>({});
   const [covenants, setCovenants] = useState<Covenant_DB[]>([]);
   const [loanTapes, setLoanTapes] = useState<LoanTape_DB[]>([]);
   const [institutionalLiabilities, setInstitutionalLiabilities] = useState<InstitutionalLiability_DB[]>([]);
@@ -99,6 +101,14 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
   };
 
   useEffect(() => { loadData(); }, [clientId]);
+
+  // Estados en revisión (puerta de calidad) no alimentan monitoreo, indicadores ni reporte hasta que se aprueben.
+  useEffect(() => {
+    let active = true;
+    db.getClientSetting<Record<string, StatementQualityRecord>>(clientId, QUALITY_SETTING_KEY, {}).then(records => { if (active) setQualityRecords(records || {}); });
+    return () => { active = false; };
+  }, [clientId, statements]);
+  const analysisStatements = useMemo(() => usableStatements(statements, qualityRecords), [statements, qualityRecords]);
 
   const handleClientUpdate = async (updates: Partial<Client>) => {
     if (!client) return;
@@ -209,13 +219,20 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
       </div>
 
       {/* Tab content */}
+      <MonitoringProvider value={isClientMonitored(client)}>
+      {!isClientMonitored(client) && (
+        <div className="mx-8 mt-6 rounded-xl border border-slate-300 bg-slate-100 px-4 py-3 text-sm font-semibold text-slate-700">
+          <span className="mr-2 rounded-md bg-slate-600 px-2 py-0.5 text-[10px] font-black uppercase tracking-wider text-white">{clientStatusLabel(client.status)}</span>
+          {MONITORING_PAUSED_TEXT}
+        </div>
+      )}
       <div className="p-8">
         <Suspense fallback={<TabFallback />}>
           {activeTab === 'monitor' && (
             <CreditUnderwritingPanel
               client={client}
               transactions={transactions}
-              statements={statements}
+              statements={analysisStatements}
               covenants={covenants}
               loanTapes={loanTapes}
             />
@@ -230,7 +247,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
             <CompanyOverviewPanel
               client={client}
               transactions={transactions}
-              statements={statements}
+              statements={analysisStatements}
               covenants={covenants}
               customFields={customFields}
               aiSettings={aiSettings}
@@ -270,14 +287,8 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
               clientId={clientId}
               clientName={client.name}
               aiSettings={aiSettings}
+              loanTapes={loanTapes}
               onLiabilitiesChange={setInstitutionalLiabilities}
-            />
-          )}
-          {activeTab === 'auditoria' && (
-            <AuditPanel
-              clientId={clientId}
-              statements={statements}
-              onStatementsChange={setStatements}
             />
           )}
           {activeTab === 'cov_financiero' && (
@@ -286,7 +297,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
               clientName={client.name}
               transactions={transactions}
               session={session}
-              statements={statements}
+              statements={analysisStatements}
               onCovenantsChange={setCovenants}
             />
           )}
@@ -302,7 +313,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
           {activeTab === 'reporte' && (
             <ClientReportView
               client={client}
-              statements={statements}
+              statements={analysisStatements}
               covenants={covenants}
               loanTapes={loanTapes}
               institutionalLiabilities={institutionalLiabilities}
@@ -315,6 +326,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
           )}
         </Suspense>
       </div>
+      </MonitoringProvider>
     </div>
   );
 };

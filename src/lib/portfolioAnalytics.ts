@@ -3,6 +3,7 @@
 import { Client, Covenant_DB, CrmActivity, FinancialStatement_DB, Transaction } from '../db/index';
 import { evaluateCovenantAuto, RatioStatus } from './financialMetrics';
 import { CreditRiskPrediction, predictCreditRisk } from './creditRiskModel';
+import { isClientMonitored } from './clientStatus';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -143,6 +144,38 @@ export function computeClientSignal(
   grace: { monthly: number; quarterly: number },
 ): ClientSignal {
   const financialCovenants = covenants.filter(c => c.type === 'financial');
+  // Dormant / closed clients are not monitored: no breaches, overdue reporting, risk, docs, maturities or severity.
+  if (!isClientMonitored(client)) {
+    const exposureOnly = transactions.reduce((sum, tx) => sum + (tx.originalAmount || 0), 0) || client.totalCreditValue || 0;
+    return {
+      client,
+      exposure: exposureOnly,
+      balance: client.currentDue || exposureOnly,
+      currency: client.currency,
+      financialCovenantCount: financialCovenants.length,
+      breaches: [],
+      warnings: [],
+      breachCount: 0,
+      warningCount: 0,
+      worst: null,
+      risk: null,
+      reporting: {
+        cadenceMonths: client.frequency === 'trimestral' ? 3 : 1,
+        latestPeriodDate: null,
+        latestPeriodLabel: [...statements].sort((a, b) => (a.periodDate || '').localeCompare(b.periodDate || '')).at(-1)?.period ?? null,
+        hasStatements: statements.length > 0,
+        nextDueDate: null,
+        daysOverdue: 0,
+        isOverdue: false,
+        reason: 'ok',
+      },
+      docsOutstanding: 0,
+      upcomingMaturities: [],
+      openActivities: 0,
+      overdueActivities: 0,
+      severity: 0,
+    };
+  }
   const breaches: CovenantBreach[] = [];
   const warnings: CovenantBreach[] = [];
   for (const cov of financialCovenants) {

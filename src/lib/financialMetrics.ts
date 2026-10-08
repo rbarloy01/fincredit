@@ -185,25 +185,67 @@ function charTrigrams(value: string): Map<string, number> {
   return grams;
 }
 
+// Performance: findRaw compares every line item × alias, and the same account names
+// repeat across statements, so trigram sets are built once per distinct string.
+const trigramCache = new Map<string, { grams: Map<string, number>; total: number }>();
+function cachedTrigrams(value: string) {
+  let hit = trigramCache.get(value);
+  if (!hit) {
+    const grams = charTrigrams(value);
+    let total = 0;
+    grams.forEach(count => { total += count; });
+    hit = { grams, total };
+    trigramCache.set(value, hit);
+  }
+  return hit;
+}
+
 function trigramSimilarity(a: string, b: string): number {
   if (!a || !b) return 0;
-  const gramsA = charTrigrams(a);
-  const gramsB = charTrigrams(b);
+  const A = cachedTrigrams(a);
+  const B = cachedTrigrams(b);
   let intersection = 0;
-  gramsA.forEach((count, gram) => {
-    const other = gramsB.get(gram);
+  A.grams.forEach((count, gram) => {
+    const other = B.grams.get(gram);
     if (other) intersection += Math.min(count, other);
   });
-  let totalA = 0;
-  gramsA.forEach(count => { totalA += count; });
-  let totalB = 0;
-  gramsB.forEach(count => { totalB += count; });
-  const total = totalA + totalB;
+  const total = A.total + B.total;
   return total === 0 ? 0 : (2 * intersection) / total;
+}
+
+// Normalized views of a statement's line items, computed once per rawLineItems array
+// (WeakMap: released with the statement). Alias lists are likewise prepared once.
+interface PreparedItem { value: number; n: string; words: Set<string>; section: string; type: string; misc: boolean; digits: string }
+const preparedItemsCache = new WeakMap<object, PreparedItem[]>();
+function preparedItems(stmt: FinancialStatement_DB): PreparedItem[] {
+  const items = rawLineItems(stmt);
+  const cached = preparedItemsCache.get(items);
+  if (cached) return cached;
+  const prepared = items.map(item => {
+    const n = norm(item.name);
+    return { value: item.value, n, words: wordSet(item.name), section: norm(item.sectionPath || ''), type: item.statementType || 'otro', misc: hasMiscellaneousPrefix(n), digits: n.replace(/\D/g, '') };
+  });
+  preparedItemsCache.set(items, prepared);
+  return prepared;
+}
+
+interface PreparedAlias { value: string; words: Set<string>; index: number; digits: string; misc: boolean }
+const preparedAliasCache = new Map<string, PreparedAlias[]>();
+function preparedAliases(names: string[]): PreparedAlias[] {
+  const key = names.join('\u0001');
+  let hit = preparedAliasCache.get(key);
+  if (!hit) {
+    hit = names
+      .map((name, index) => { const value = norm(name); return { value, words: wordSet(name), index, digits: value.replace(/\D/g, ''), misc: hasMiscellaneousPrefix(value) }; })
+      .filter(alias => alias.value);
+    preparedAliasCache.set(key, hit);
+  }
+  return hit;
 }
 
 const FUZZY_MATCH_MIN_LENGTH = 6;
 const FUZZY_MATCH_THRESHOLD = 0.55;
+const FUZZY_MAX_SCORE = 485;
 
 // Spanish accounting convention: an "otros/otras"-prefixed line ("Otros
 // ingresos de la operación") is explicitly a residual/miscellaneous account,
@@ -216,20 +258,33 @@ function hasMiscellaneousPrefix(value: string): boolean {
   return value.startsWith('otros') || value.startsWith('otras');
 }
 
+// findRaw depends only on the line items + alias list + types, so its result is cached
+// per rawLineItems array (getMetric re-asks the same lookups via recursive metrics).
+const findRawCache = new WeakMap<object, Map<string, number | null>>();
 function findRaw(stmt: FinancialStatement_DB, names: string[], types?: string[]): number | null {
-  const aliases = names
-    .map((name, index) => ({ value: norm(name), words: wordSet(name), index }))
-    .filter(alias => alias.value);
+  const items = rawLineItems(stmt);
+  let perStmt = findRawCache.get(items);
+  if (!perStmt) { perStmt = new Map(); findRawCache.set(items, perStmt); }
+  const key = `${names.join('\u0001')}\u0002${types ? types.join(',') : '*'}`;
+  if (perStmt.has(key)) return perStmt.get(key) as number | null;
+  const result = findRawUncached(stmt, names, types);
+  perStmt.set(key, result);
+  return result;
+}
+
+function findRawUncached(stmt: FinancialStatement_DB, names: string[], types?: string[]): number | null {
+  const aliases = preparedAliases(names);
   let best: { value: number; score: number } | null = null;
-  rawLineItems(stmt).forEach((item, itemIndex) => {
-    const n = norm(item.name);
-    const itemWords = wordSet(item.name);
-    const section = norm(item.sectionPath || '');
-    const typeOk = !types || types.includes(item.statementType || 'otro');
+  preparedItems(stmt).forEach((item, itemIndex) => {
+    const { n, words: itemWords, section } = item;
+    const typeOk = !types || types.includes(item.type);
     if (!typeOk) return;
-    const itemIsMiscellaneous = hasMiscellaneousPrefix(n);
+    const itemIsMiscellaneous = item.misc;
+    const itemDigits = item.digits;
     aliases.forEach(alias => {
-      const aliasIsMiscellaneous = hasMiscellaneousPrefix(alias.value);
+      // Un alias con número ("etapa 3") nunca debe emparejar con otro número ("etapa 1"): el match aproximado los confunde.
+      if (alias.digits && alias.digits !== itemDigits) return;
+      const aliasIsMiscellaneous = alias.misc;
       const blockMiscellaneous = itemIsMiscellaneous && !aliasIsMiscellaneous;
       const exact = n === alias.value;
       const contains = !blockMiscellaneous && n.includes(alias.value);
@@ -247,7 +302,10 @@ function findRaw(stmt: FinancialStatement_DB, names: string[], types?: string[])
         (!blockMiscellaneous && [...alias.words].every(w => itemWords.has(w))) ||
         ([...itemWords].every(w => alias.words.has(w)) && itemWords.size >= alias.words.size * 0.6)
       );
+      // A fuzzy hit scores at most 150+100+120+80+35 = 485, so once a match above that
+      // exists it can never win — skip the (expensive) trigram comparison.
       const fuzzySimilarity = !exact && !contains && !reverseContains && !wordMatch && !blockMiscellaneous
+        && (!best || best.score <= FUZZY_MAX_SCORE)
         && alias.value.length >= FUZZY_MATCH_MIN_LENGTH && n.length >= FUZZY_MATCH_MIN_LENGTH
         ? trigramSimilarity(alias.value, n)
         : 0;
@@ -311,6 +369,38 @@ function absoluteValue(value: number | null): number | null {
   return value === null ? null : Math.abs(value);
 }
 
+// Línea de cartera vencida literal ("Cartera vencida", "Total de cartera vencida", "Créditos vencidos"): prefiere el
+// total sobre los tramos por días y descarta líneas que mezclan vigente ("Cartera total (Vigente y Vencida)").
+function overduePortfolio(stmt: FinancialStatement_DB): number | null {
+  const items = rawLineItems(stmt).filter(item => {
+    if ((item.statementType || 'otro') !== 'balance_general' || typeof item.value !== 'number') return false;
+    const n = norm(item.name);
+    return n.includes('vencid') && !/(vigente|estimacion|reserva|interes|dias)/.test(n);
+  });
+  if (!items.length) return null;
+  const total = items.find(item => norm(item.name).includes('total')) || items.find(item => /^(cartera|creditos?|saldo)vencid/.test(norm(item.name)));
+  return (total || items[0]).value as number;
+}
+
+function stagedPortfolioItems(stmt: FinancialStatement_DB, stage: '1' | '2' | '3') {
+  return rawLineItems(stmt).filter(item =>
+    (item.statementType || 'otro') === 'balance_general'
+    && typeof item.value === 'number'
+    && norm(item.name).includes(`etapa${stage}`),
+  );
+}
+
+function stage3Portfolio(stmt: FinancialStatement_DB): number | null {
+  const items = stagedPortfolioItems(stmt, '3');
+  if (!items.length) return null;
+  const total = items.find(item => norm(item.name).includes('total'));
+  return total ? (total.value as number) : items.reduce((sum, item) => sum + (item.value as number), 0);
+}
+
+function hasStagedPortfolio(stmt: FinancialStatement_DB): boolean {
+  return stagedPortfolioItems(stmt, '1').length > 0 || stagedPortfolioItems(stmt, '2').length > 0;
+}
+
 export function getMetric(stmt: FinancialStatement_DB, key: string): number | null {
   const m = asObject<FinancialStatement_DB['mappedData']>((stmt as any).mappedData);
   const raw = (names: string[], types?: string[]) => findRaw(stmt, names, types);
@@ -318,7 +408,8 @@ export function getMetric(stmt: FinancialStatement_DB, key: string): number | nu
     case 'revenue': return firstValue(m.revenue, findConsolidatedMetricValue(stmt, 'revenue'), raw(['ingresos', 'ventas', ...metricAliases('revenue')], ['estado_resultados']));
     case 'interestIncome': return firstValue(findConsolidatedMetricValue(stmt, 'interestIncome'), raw(['ingresos por intereses', 'intereses cobrados', 'ingreso por interes', ...metricAliases('interestIncome')], ['estado_resultados']));
     case 'feeIncome': return firstValue(findConsolidatedMetricValue(stmt, 'feeIncome'), raw(['ingresos por comisiones', 'comisiones cobradas', 'ingreso por comision', ...metricAliases('feeIncome')], ['estado_resultados']));
-    case 'coreBusinessIncome': return firstValue(findConsolidatedMetricValue(stmt, 'coreBusinessIncome'), addValues(getMetric(stmt, 'interestIncome'), getMetric(stmt, 'feeIncome')), getMetric(stmt, 'revenue'));
+    // Arrendadoras: el ingreso principal es la renta, no los intereses; sin sumarla, los márgenes salen en cientos de %.
+    case 'coreBusinessIncome': return firstValue(findConsolidatedMetricValue(stmt, 'coreBusinessIncome'), addValues(getMetric(stmt, 'interestIncome'), getMetric(stmt, 'feeIncome'), findRawRequiringSubstring(stmt, ['ingresos por renta', 'ingresos por arrendamiento'], ['estado_resultados'])), getMetric(stmt, 'revenue'));
     // Even the full alias "margen financiero ajustado" fuzzy-matches a plain
     // "Margen Financiero" line via findRaw's reverseContains/wordMatch tiers
     // (dropping just the word "ajustado" still clears their ~60% coverage
@@ -331,7 +422,8 @@ export function getMetric(stmt: FinancialStatement_DB, key: string): number | nu
     case 'ebitda': return firstValue(nz(m.ebitda), findConsolidatedMetricValue(stmt, 'ebitda'), raw(['ebitda', ...metricAliases('ebitda')], ['estado_resultados']), raw(['utilidad operacion', 'utilidad de operacion', 'resultado de operacion', 'utilidad antes de intereses'], ['estado_resultados']));
     case 'interestExpense': return absoluteValue(firstValue(m.interestExpense, raw(['gastos por intereses', 'gasto por intereses', 'gasto financiero', 'intereses pagados', 'intereses devengados', 'resultado integral de financiamiento', ...metricAliases('interestExpense')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'interestExpense')));
     case 'netIncome': return firstValue(m.netIncome, findConsolidatedMetricValue(stmt, 'netIncome'), raw(['utilidad neta', 'resultado neto', 'utilidad o perdida', 'utilidad (o perdida)', 'perdida del ejercicio', ...metricAliases('netIncome')], ['estado_resultados']));
-    case 'currentAssets': return firstValue(m.currentAssets, findConsolidatedMetricValue(stmt, 'currentAssets'), raw(['activo circulante', 'activo corriente', 'total activo a corto plazo', 'activo a corto plazo', ...metricAliases('currentAssets')], ['balance_general']));
+    // Literal: el match aproximado confundía "activo a corto plazo" con "total activo" (razón corriente = 15x en arrendadoras sin clasificación).
+    case 'currentAssets': return firstValue(nz(m.currentAssets), findConsolidatedMetricValue(stmt, 'currentAssets'), findRawRequiringSubstring(stmt, ['activo circulante', 'activo corriente', 'total activo a corto plazo', 'activo a corto plazo', 'activo corto plazo'], ['balance_general']), raw(metricAliases('currentAssets'), ['balance_general']));
     case 'currentLiabilities': return firstValue(m.currentLiabilities, findConsolidatedMetricValue(stmt, 'currentLiabilities'), raw(['pasivo circulante', 'pasivo corriente', 'total pasivo a corto plazo', 'pasivo a corto plazo', ...metricAliases('currentLiabilities')], ['balance_general']));
     case 'totalDebt': return firstValue(m.totalDebt, addValues(getMetric(stmt, 'banksFundsShortTerm'), getMetric(stmt, 'banksFundsLongTerm')), raw(['deuda total', 'prestamos total', 'préstamos total', 'pasivo con costo', 'deuda', ...metricAliases('totalDebt')], ['balance_general']), findConsolidatedMetricValue(stmt, 'totalDebt'));
     case 'banksFundsShortTerm': return firstValue(raw(['prestamos total corto plazo', 'préstamos total corto plazo', 'prestamos (total corto plazo)', 'prestamos corto plazo', 'préstamos corto plazo', 'bancos y fondos corto plazo', 'bancos y fondos cp', 'fondeo corto plazo', 'prestamos bancarios y de otros organismos de corto plazo', 'prestamos interbancarios y de otros organismos de corto plazo', ...metricAliases('banksFundsShortTerm')], ['balance_general']), findConsolidatedMetricValue(stmt, 'banksFundsShortTerm'));
@@ -344,9 +436,12 @@ export function getMetric(stmt: FinancialStatement_DB, key: string): number | nu
     case 'loanPortfolio': return firstValue(raw(['cartera de credito subtotal', 'cartera de credito (subtotal)', 'cartera de credito total', 'cartera de credito', 'cartera vigente', 'creditos vigentes', ...metricAliases('loanPortfolio')], ['balance_general']), findConsolidatedMetricValue(stmt, 'loanPortfolio'));
     case 'netPortfolio': return firstValue(raw(['cartera de credito neto', 'cartera de credito, neto', 'cartera neta', 'cartera de credito neta', ...metricAliases('netPortfolio')], ['balance_general']), findConsolidatedMetricValue(stmt, 'netPortfolio'), subtractValues(getMetric(stmt, 'managedPortfolio'), getMetric(stmt, 'loanLossReserves')));
     case 'managedPortfolio': return firstValue(raw(['cartera administrada', 'cartera total administrada', 'portafolio administrado', 'total cartera de credito', 'total, cartera de credito', ...metricAliases('managedPortfolio')], ['balance_general']), getMetric(stmt, 'loanPortfolio'), findConsolidatedMetricValue(stmt, 'managedPortfolio'));
-    case 'pastDuePortfolio': return firstValue(raw(['cartera de credito etapa 3', 'cartera etapa 3', 'creditos etapa 3', 'cartera vencida', 'creditos vencidos', 'saldo vencido', ...metricAliases('pastDuePortfolio')], ['balance_general']), findConsolidatedMetricValue(stmt, 'pastDuePortfolio'));
+    // "Etapa 3" se busca literal: el match aproximado de findRaw confunde "etapa 3" con "etapa 1" y tomaba la cartera
+    // vigente completa como vencida (100%). Si el estado trae etapas pero ninguna 3, la cartera vencida es 0.
+    case 'pastDuePortfolio': return firstValue(stage3Portfolio(stmt), overduePortfolio(stmt), findConsolidatedMetricValue(stmt, 'pastDuePortfolio'), hasStagedPortfolio(stmt) ? 0 : null);
     case 'loanLossReserves': return absoluteValue(firstValue(raw(['estimacion de cuentas incobrables', 'estimacion preventiva para riesgos crediticios', 'estimacion preventiva', 'reservas crediticias', 'reserva para perdidas crediticias', ...metricAliases('loanLossReserves')], ['balance_general']), findConsolidatedMetricValue(stmt, 'loanLossReserves')));
-    case 'productiveAssets': return firstValue(findConsolidatedMetricValue(stmt, 'productiveAssets'), addValues(getMetric(stmt, 'cash'), getMetric(stmt, 'availableInvestments'), getMetric(stmt, 'loanPortfolio')));
+    // Arrendadoras: los bienes en arrendamiento son activo productivo (generan la renta), igual que la cartera.
+    case 'productiveAssets': return firstValue(findConsolidatedMetricValue(stmt, 'productiveAssets'), addValues(getMetric(stmt, 'cash'), getMetric(stmt, 'availableInvestments'), getMetric(stmt, 'loanPortfolio'), findRawRequiringSubstring(stmt, ['bienes en arrendamiento', 'activos en arrendamiento', 'equipo en arrendamiento'], ['balance_general'])));
     default: {
       if (key.startsWith('concept:')) {
         const concept = localConcepts(stmt.clientId).find(c => c.id === key.slice('concept:'.length));
@@ -372,7 +467,38 @@ function metricValueOrZero(stmt: FinancialStatement_DB, key: string): number {
   return getMetric(stmt, key) ?? 0;
 }
 
-export function standardRatios(stmt: FinancialStatement_DB): RatioResult[] {
+// ── Anualización de ratios de resultados ─────────────────────────────────────
+// ROA, ROE, rendimiento, costo de fondeo y Deuda/EBITDA mezclan un flujo del estado de resultados con un saldo. Los EEFF
+// mensuales mexicanos suelen venir ACUMULADOS enero→mes (abril = 4 meses), así que sin anualizar abril parece "deterioro"
+// frente a diciembre (12 meses). Regla: se anualiza el flujo con 12 / meses del periodo.
+//   1) la etiqueta lo dice (mensual / acumulado / trimestre); 2) si hay otros periodos del mismo año, se infiere por la serie
+//   (ingresos que solo crecen = acumulado; que suben y bajan = mensual); 3) diciembre = 12 meses; 4) si no hay evidencia
+//   se asume acumulado enero→mes (así viene el 77% de las series reales) y se dice en la fórmula.
+export function incomeSpan(stmt: FinancialStatement_DB, siblings: FinancialStatement_DB[] = []): { months: number; basis: string } {
+  const month = Math.min(12, Math.max(1, parseInt(String(stmt.periodDate || '').slice(5, 7), 10) || 12));
+  const text = `${stmt.period || ''} ${stmt.fileName || ''}`.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (/mensual|monthly|del mes\b/.test(text)) return { months: 1, basis: 'mensual' };
+  if (/acumul|ytd|ene[\s.-]*(a|-)|enero\s*(a|-)/.test(text)) return { months: month, basis: 'acumulado' };
+  const year = String(stmt.periodDate || '').slice(0, 4);
+  const sameYear = [...siblings, stmt]
+    .filter((s, i, arr) => s.periodDate?.startsWith(year) && arr.findIndex(o => o.id === s.id) === i)
+    .map(s => ({ date: s.periodDate, revenue: getMetric(s, 'revenue') }))
+    .filter((r): r is { date: string; revenue: number } => r.revenue !== null && r.revenue > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  if (sameYear.length >= 3) {
+    const rising = sameYear.every((r, i) => i === 0 || r.revenue >= sameYear[i - 1].revenue * 0.98) && sameYear[sameYear.length - 1].revenue > sameYear[0].revenue * 1.3;
+    if (rising) return { months: month, basis: 'acumulado (inferido por la serie)' };
+    return { months: 1, basis: 'mensual (inferido por la serie)' };
+  }
+  if (month === 12) return { months: 12, basis: 'anual' };
+  return { months: month, basis: 'acumulado ene→mes (supuesto)' };
+}
+
+export function standardRatios(stmt: FinancialStatement_DB, siblings: FinancialStatement_DB[] = []): RatioResult[] {
+  const span = incomeSpan(stmt, siblings);
+  const f = 12 / span.months; // factor de anualización de flujos
+  const annualNote = f === 1 ? '' : ` · flujo anualizado ×${f.toFixed(2)} (${span.basis}, ${span.months} meses)`;
+  const scale = (v: number | null) => (v === null ? null : v * f);
   const adjustedFinancialMargin = getMetric(stmt, 'adjustedFinancialMargin');
   const adjustedOperatingIncome = getMetric(stmt, 'adjustedOperatingIncome');
   const adminSellingOperatingExpenses = getMetric(stmt, 'adminSellingOperatingExpenses');
@@ -396,8 +522,8 @@ export function standardRatios(stmt: FinancialStatement_DB): RatioResult[] {
   const netPortfolio = getMetric(stmt, 'netPortfolio');
   const productiveAssets = getMetric(stmt, 'productiveAssets');
   const fundingDebt = addValues(banksFundsShortTerm, banksFundsLongTerm) ?? totalDebt;
-  const costOfFunding = div(interest, fundingDebt);
-  const portfolioYield = div(interestIncome, managedPortfolio);
+  const costOfFunding = div(scale(interest), fundingDebt);
+  const portfolioYield = div(scale(interestIncome), managedPortfolio);
   const miss = (items: Array<[string, number | null]>) => items.filter(([, value]) => value === null).map(([label]) => label);
   return [
     { key: 'revenue', label: 'Ingresos', value: revenue, formula: 'Cuenta extraída: ingresos/ventas', missing: miss([['Ingresos', revenue]]) },
@@ -406,22 +532,22 @@ export function standardRatios(stmt: FinancialStatement_DB): RatioResult[] {
     { key: 'ifnb_operating_profitability', label: 'Rentabilidad Operativa', value: div(adjustedOperatingIncome, coreBusinessIncome), formula: 'Utilidad operativa ajustada / ingresos core del negocio', missing: miss([['Utilidad operativa ajustada', adjustedOperatingIncome], ['Ingresos core', coreBusinessIncome]]) },
     { key: 'ifnb_net_margin', label: 'Margen Neto', value: div(netIncome, coreBusinessIncome), formula: 'Utilidad neta / ingresos core del negocio', missing: miss([['Utilidad neta', netIncome], ['Ingresos core', coreBusinessIncome]]) },
     { key: 'ifnb_operating_efficiency', label: 'Eficiencia Operativa', value: div(adminSellingOperatingExpenses, coreBusinessIncome), formula: 'Gastos de administración, venta y operación / ingresos core del negocio', missing: miss([['Gastos adm., venta y operación', adminSellingOperatingExpenses], ['Ingresos core', coreBusinessIncome]]) },
-    { key: 'debt_ebitda', label: 'Deuda / EBITDA', value: div(totalDebt, ebitda), formula: 'Deuda total / EBITDA', missing: miss([['Deuda total', totalDebt], ['EBITDA', ebitda]]) },
+    { key: 'debt_ebitda', label: 'Deuda / EBITDA', value: div(totalDebt, scale(ebitda)), formula: `Deuda total / EBITDA${annualNote}`, missing: miss([['Deuda total', totalDebt], ['EBITDA', ebitda]]) },
     { key: 'dscr', label: 'DSCR', value: div(ebitda, interest), formula: 'EBITDA / gasto financiero', missing: miss([['EBITDA', ebitda], ['Gasto financiero', interest]]) },
     { key: 'current_ratio', label: 'Razón Corriente', value: div(currentAssets, currentLiabilities), formula: 'Activo corriente / Pasivo corriente', missing: miss([['Activo corriente', currentAssets], ['Pasivo corriente', currentLiabilities]]) },
     { key: 'leverage', label: 'Apalancamiento', value: div(fundingDebt, totalAssets), formula: '(Bancos y fondos CP + LP) / total activo', missing: miss([['Bancos y fondos CP + LP', fundingDebt], ['Activos totales', totalAssets]]) },
     { key: 'debt_equity', label: 'Deuda / Capital', value: div(totalDebt, equity), formula: 'Deuda total / capital contable', missing: miss([['Deuda total', totalDebt], ['Capital contable', equity]]) },
     { key: 'capitalization', label: 'ICAP', value: div(equity, totalAssets), formula: 'Capital contable / activos totales', missing: miss([['Capital contable', equity], ['Activos totales', totalAssets]]) },
     { key: 'adjusted_capitalization', label: 'ICAP Ajustado', value: div(equity, netPortfolio), formula: 'Capital contable / cartera neta', missing: miss([['Capital contable', equity], ['Cartera neta', netPortfolio]]) },
-    { key: 'roa', label: 'ROA', value: div(netIncome, totalAssets), formula: 'Utilidad neta / activos totales', missing: miss([['Utilidad neta', netIncome], ['Activos totales', totalAssets]]) },
-    { key: 'roe', label: 'ROE', value: div(netIncome, equity), formula: 'Utilidad neta / capital contable', missing: miss([['Utilidad neta', netIncome], ['Capital contable', equity]]) },
+    { key: 'roa', label: 'ROA', value: div(scale(netIncome), totalAssets), formula: `Utilidad neta / activos totales${annualNote}`, missing: miss([['Utilidad neta', netIncome], ['Activos totales', totalAssets]]) },
+    { key: 'roe', label: 'ROE', value: div(scale(netIncome), equity), formula: `Utilidad neta / capital contable${annualNote}`, missing: miss([['Utilidad neta', netIncome], ['Capital contable', equity]]) },
     { key: 'past_due_portfolio', label: 'Cartera Vencida', value: div(pastDuePortfolio, managedPortfolio), formula: 'Cartera vencida / cartera administrada', missing: miss([['Cartera vencida', pastDuePortfolio], ['Cartera administrada', managedPortfolio]]) },
     { key: 'net_past_due_portfolio', label: 'Cartera Vencida Neta', value: div(subtractValues(pastDuePortfolio, loanLossReserves), managedPortfolio), formula: '(Cartera vencida - estimación preventiva) / cartera administrada', missing: miss([['Cartera vencida', pastDuePortfolio], ['Estimación preventiva', loanLossReserves], ['Cartera administrada', managedPortfolio]]) },
     { key: 'past_due_coverage', label: 'Índice de Cobertura de Cartera Vencida', value: div(loanLossReserves, pastDuePortfolio), formula: 'Estimación preventiva / cartera vencida', missing: miss([['Estimación preventiva', loanLossReserves], ['Cartera vencida', pastDuePortfolio]]) },
     { key: 'debt_coverage_productive_assets', label: 'Cobertura de Deuda', value: div(productiveAssets, totalLiabilities), formula: 'Activos productivos / total pasivo', missing: miss([['Activos productivos', productiveAssets], ['Total pasivo', totalLiabilities]]) },
-    { key: 'funding_cost', label: 'Costo de Fondeo Aproximado', value: costOfFunding, formula: 'Gasto financiero / bancos y fondos CP + LP', missing: miss([['Gasto financiero', interest], ['Bancos y fondos CP + LP', fundingDebt]]) },
-    { key: 'portfolio_yield', label: 'Rendimiento de Cartera (Yield)', value: portfolioYield, formula: 'Ingresos por intereses / cartera administrada', missing: miss([['Ingresos por intereses', interestIncome], ['Cartera administrada', managedPortfolio]]) },
-    { key: 'financial_spread', label: 'Spread Financiero Aproximado', value: portfolioYield !== null && costOfFunding !== null ? portfolioYield - costOfFunding : null, formula: 'Rendimiento de cartera - costo de fondeo aproximado', missing: miss([['Rendimiento de cartera', portfolioYield], ['Costo de fondeo', costOfFunding]]) },
+    { key: 'funding_cost', label: 'Costo de Fondeo Aproximado', value: costOfFunding, formula: `Gasto financiero / bancos y fondos CP + LP${annualNote}`, missing: miss([['Gasto financiero', interest], ['Bancos y fondos CP + LP', fundingDebt]]) },
+    { key: 'portfolio_yield', label: 'Rendimiento de Cartera (Yield)', value: portfolioYield, formula: `Ingresos por intereses / cartera administrada${annualNote}`, missing: miss([['Ingresos por intereses', interestIncome], ['Cartera administrada', managedPortfolio]]) },
+    { key: 'financial_spread', label: 'Spread Financiero Aproximado', value: portfolioYield !== null && costOfFunding !== null ? portfolioYield - costOfFunding : null, formula: `Rendimiento de cartera - costo de fondeo aproximado${annualNote}`, missing: miss([['Rendimiento de cartera', portfolioYield], ['Costo de fondeo', costOfFunding]]) },
     { key: 'immediate_liquidity', label: 'Liquidez Inmediata', value: div(addValues(getMetric(stmt, 'cash'), getMetric(stmt, 'availableInvestments')), currentLiabilities), formula: '(Bancos + inversiones disponibles no comprometidas) / pasivo corriente', missing: miss([['Bancos + inversiones disponibles', addValues(getMetric(stmt, 'cash'), getMetric(stmt, 'availableInvestments'))], ['Pasivo corriente', currentLiabilities]]) },
     { key: 'past_due_to_equity', label: 'Cartera Vencida / Capital Contable', value: div(pastDuePortfolio, equity), formula: 'Cartera vencida / capital contable', missing: miss([['Cartera vencida', pastDuePortfolio], ['Capital contable', equity]]) },
   ];
@@ -591,8 +717,23 @@ export function resolveCovenantThreshold(cov: Covenant_DB): number | null {
   return /%/.test(cov.threshold) || impliedPercentThreshold ? parsedThreshold / 100 : parsedThreshold;
 }
 
-export function evaluateCovenantForStatement(cov: Covenant_DB, stmt: FinancialStatement_DB): { value: number | null; status: RatioStatus; formula: string } {
+// Standard ratios that mix an income-statement flow with a balance. Interim statements are usually accumulated Jan→month, so
+// comparing April (4 months) with December (12) as-is reads as a fake deterioration.
+const ANNUALIZED_STANDARD_KEYS = ['debt_ebitda', 'roa', 'roe', 'funding_cost', 'portfolio_yield', 'financial_spread'];
+export function annualizedStandardKey(formula: string): string | null {
+  return ANNUALIZED_STANDARD_KEYS.find(key => standardRatioFormula(key) === formula) || null;
+}
+
+// Rule: an indicator WITH a contractual limit is measured literally (the contract defines how it is tested); an indicator
+// WITHOUT a limit is pure monitoring and is compared on an annualized basis so periods of different length are comparable.
+export function evaluateCovenantForStatement(cov: Covenant_DB, stmt: FinancialStatement_DB, siblings: FinancialStatement_DB[] = []): { value: number | null; status: RatioStatus; formula: string; annualized?: boolean } {
   const formula = cov.formulaByPeriod?.[stmt.period] || cov.formula || cov.name;
+  const hasLimit = cov.operator !== 'none' && resolveCovenantThreshold(cov) !== null;
+  const standardKey = hasLimit ? null : annualizedStandardKey(formula);
+  if (standardKey) {
+    const annual = standardRatios(stmt, siblings).find(r => r.key === standardKey)?.value ?? null;
+    return { value: annual, status: 'cumple', formula, annualized: true };
+  }
   const value = evaluateFormula(formula, stmt);
   if (value === null || cov.operator === 'none') return { value, status: 'cumple', formula };
   const threshold = resolveCovenantThreshold(cov);
@@ -617,8 +758,40 @@ export function evaluateCovenantAuto(cov: Covenant_DB, statements: FinancialStat
   if (cov.complianceStatus?.startsWith('manual:')) {
     return { value: null, status: cov.complianceStatus.replace('manual:', '') as RatioStatus, mode: 'manual' };
   }
-  const result = evaluateCovenantForStatement(cov, latest);
+  const result = evaluateCovenantForStatement(cov, latest, statements);
   return { value: result.value, status: result.status, mode: 'auto' };
+}
+
+// Which way is "better" for a covenant. With a real threshold the contract operator decides (gte/gt = higher is
+// better, lte/lt = lower is better). Without a threshold the operator is meaningless (it is just the form default),
+// so the direction comes from the ratio itself: ICAP, ROA, DSCR, márgenes… improve when they rise; apalancamiento,
+// cartera vencida, eficiencia… improve when they fall.
+const RATIO_POLARITY: Record<string, 'higher' | 'lower'> = {
+  revenue: 'higher', ebitda: 'higher', ifnb_financial_margin: 'higher', ifnb_operating_profitability: 'higher', ifnb_net_margin: 'higher',
+  dscr: 'higher', current_ratio: 'higher', capitalization: 'higher', adjusted_capitalization: 'higher', roa: 'higher', roe: 'higher',
+  past_due_coverage: 'higher', debt_coverage_productive_assets: 'higher', immediate_liquidity: 'higher', portfolio_yield: 'higher', financial_spread: 'higher',
+  ifnb_operating_efficiency: 'lower', debt_ebitda: 'lower', leverage: 'lower', debt_equity: 'lower', past_due_portfolio: 'lower',
+  net_past_due_portfolio: 'lower', funding_cost: 'lower', past_due_to_equity: 'lower',
+};
+export const ratioPolarity = (key: string): 'higher' | 'lower' | null => RATIO_POLARITY[key] ?? null;
+const plainText = (v: string) => v.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+const HIGHER_NAME = /(icap|capitaliz|solvencia|cobertura|dscr|liquidez|razon corriente|\broa\b|\broe\b|margen|rentabilidad|spread|yield)/;
+const LOWER_NAME = /(apalanc|leverage|endeud|deuda\s*\/|vencid|morosidad|\bmora\b|eficiencia|costo de fondeo|incobrab|castigo)/;
+
+export function covenantDirection(cov: Pick<Covenant_DB, 'operator' | 'threshold' | 'formula' | 'name'>): 'higher' | 'lower' | null {
+  const hasThreshold = parseNullableFinancialNumber(cov.threshold) !== null;
+  if (hasThreshold) {
+    if (cov.operator === 'gte' || cov.operator === 'gt') return 'higher';
+    if (cov.operator === 'lte' || cov.operator === 'lt') return 'lower';
+  }
+  const key = Object.keys(RATIO_POLARITY).find(k => standardRatioFormula(k) === cov.formula);
+  if (key) return RATIO_POLARITY[key];
+  const text = plainText(`${cov.name || ''} ${cov.formula || ''}`);
+  if (HIGHER_NAME.test(text)) return 'higher';
+  if (LOWER_NAME.test(text)) return 'lower';
+  if (cov.operator === 'gte' || cov.operator === 'gt') return 'higher';
+  if (cov.operator === 'lte' || cov.operator === 'lt') return 'lower';
+  return null;
 }
 
 function movementFor(
@@ -635,8 +808,9 @@ function movementFor(
   if (previousStatus && rank[status] < rank[previousStatus]) return 'betterment';
   const delta = value - previousValue;
   if (Math.abs(delta) < 0.000001) return 'stable';
-  if (cov.operator === 'lte' || cov.operator === 'lt') return delta < 0 ? 'betterment' : 'deterioration';
-  if (cov.operator === 'gte' || cov.operator === 'gt') return delta > 0 ? 'betterment' : 'deterioration';
+  const direction = covenantDirection(cov);
+  if (direction === 'lower') return delta < 0 ? 'betterment' : 'deterioration';
+  if (direction === 'higher') return delta > 0 ? 'betterment' : 'deterioration';
   return 'stable';
 }
 
@@ -654,7 +828,7 @@ export function covenantPerformanceHistory(cov: Covenant_DB, statements: Financi
   let previousValue: number | null = null;
   let previousStatus: RatioStatus | null = null;
   return ordered.map(stmt => {
-    const result = evaluateCovenantForStatement(cov, stmt);
+    const result = evaluateCovenantForStatement(cov, stmt, ordered);
     const delta = result.value !== null && previousValue !== null ? result.value - previousValue : null;
     const deltaPct = delta !== null && previousValue !== null && previousValue !== 0 ? delta / Math.abs(previousValue) : null;
     const movement = movementFor(cov, result.value, previousValue, result.status, previousStatus);
@@ -729,7 +903,7 @@ export function buildCovenantAnalystInsight(performance: PrioritizedCovenantPerf
   if (performance.length === 0) {
     return {
       headline: 'No hay información suficiente para elaborar el análisis de tendencia de covenants.',
-      bullets: ['Cargar al menos un estado financiero y configurar los covenants financieros aplicables.'],
+      bullets: ['Cargar al menos un estado financiero y configurar los indicadores financieros aplicables.'],
     };
   }
 
@@ -780,7 +954,7 @@ export function buildCovenantInsightPrompt(clientName: string, performance: Cove
     threshold: row.operator === 'none' ? 'N/A' : `${row.operator} ${row.threshold}`,
     formula: row.formula,
   }));
-  return `Actúa como analista senior de crédito. Analiza el desempeño periodo contra periodo de los covenants financieros de ${clientName || 'este cliente'}.
+  return `Actúa como analista senior de crédito. Analiza el desempeño periodo contra periodo de los indicadores financieros de ${clientName || 'este cliente'}.
 
 Datos:
 ${JSON.stringify(rows, null, 2)}

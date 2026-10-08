@@ -43,7 +43,7 @@ export default function ChartCard({ title, subtitle, fileName, captureId, regist
   };
 
   return (
-    <div className={`relative bg-white border border-slate-200 rounded-2xl p-5 ${className || ''}`}>
+    <div className={`relative min-w-0 overflow-hidden bg-white border border-slate-200 rounded-2xl p-5 ${className || ''}`}>
       <div className="absolute top-3 right-3 flex items-center gap-2 z-10">
         {right}
         <button

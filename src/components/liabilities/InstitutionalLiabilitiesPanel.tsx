@@ -1,29 +1,32 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Upload, Trash2, Plus, Landmark, Pencil, X, Download, AlertTriangle, Sparkles, Check,
+  Upload, Trash2, Plus, Landmark, Pencil, X, Download, AlertTriangle, Check,
 } from 'lucide-react';
+import { db, InstitutionalLiability_DB, LoanTape_DB } from '../../db/index';
 import {
-  Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
-} from 'recharts';
-import { db, InstitutionalLiability_DB } from '../../db/index';
-import {
-  buildLiabilitiesSummary, buildLenderConcentration, buildMaturityLadder,
+  analyzeLiabilities,
   formatMoney, formatPercent, parseLiabilitiesRows, LIABILITY_TYPE_LABELS, buildLiabilitiesInsights,
   type ParsedLiabilityRow,
 } from '../../lib/institutionalLiabilitiesAnalytics';
+import { analyzeAssetLiability } from '../../lib/assetLiabilityAnalysis';
+import { buildCockpitData } from '../../lib/loanTapeCockpit';
+import { analyzePortfolio } from '../../lib/loanTapeReport';
+import { reserveDownloadTarget } from '../../lib/browserDownload';
+import LiabilitiesCockpit from './LiabilitiesCockpit';
 import { loadExportModule } from '../../lib/exportLoader';
 import WorkingOverlay from '../common/WorkingOverlay';
 import { type AISettings, extractInstitutionalLiabilities } from '../../services/ai';
 import { extractPdfText, isUsefulExtractedText, renderPdfPreviewImages } from '../../lib/documentParsing';
+import { sheetToRows } from '../../lib/sheetRows';
 
 interface Props {
   clientId: string;
   clientName?: string;
   aiSettings: AISettings;
+  loanTapes?: LoanTape_DB[];
   onLiabilitiesChange?: (liabilities: InstitutionalLiability_DB[]) => void;
 }
 
-const CHART_COLORS = ['#4f46e5', '#06b6d4', '#10b981', '#f59e0b', '#f43f5e', '#64748b', '#8b5cf6', '#14b8a6'];
 
 type FormState = {
   lenderName: string;
@@ -143,7 +146,7 @@ function fromForm(clientId: string, form: FormState): Omit<InstitutionalLiabilit
   };
 }
 
-const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, aiSettings, onLiabilitiesChange }) => {
+const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, aiSettings, loanTapes = [], onLiabilitiesChange }) => {
   const [liabilities, setLiabilities] = useState<InstitutionalLiability_DB[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -171,10 +174,20 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
 
   useEffect(() => { load(); }, [clientId]);
 
-  const summary = useMemo(() => buildLiabilitiesSummary(liabilities), [liabilities]);
-  const lenderConcentration = useMemo(() => buildLenderConcentration(liabilities).slice(0, 8), [liabilities]);
-  const maturityLadder = useMemo(() => buildMaturityLadder(liabilities), [liabilities]);
+  const analysis = useMemo(() => analyzeLiabilities(liabilities), [liabilities]);
   const insights = useMemo(() => buildLiabilitiesInsights(liabilities), [liabilities]);
+  // Activo vs. pasivo: último corte del loan tape contra el fondeo institucional.
+  const assetLiability = useMemo(() => {
+    const tapes = loanTapes.filter(t => t.extractedData);
+    if (!tapes.length || !liabilities.length) return null;
+    try {
+      const data = buildCockpitData(tapes);
+      const portfolio = data.periods.length ? analyzePortfolio(data, data.periods[data.periods.length - 1]) : null;
+      return analyzeAssetLiability(portfolio, analysis);
+    } catch {
+      return null;
+    }
+  }, [loanTapes, liabilities, analysis]);
 
   const openNew = () => { setEditingId(null); setForm(EMPTY_FORM); setModalOpen(true); };
   const openEdit = (l: InstitutionalLiability_DB) => { setEditingId(l.id); setForm(toForm(l)); setModalOpen(true); };
@@ -217,7 +230,7 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
     const unmatched = new Set<string>();
     for (const sheetName of workbook.SheetNames) {
       const sheet = workbook.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json(sheet, { defval: null }) as Record<string, unknown>[];
+      const rows = sheetToRows<Record<string, unknown>>(XLSX, sheet, { defval: null });
       const result = parseLiabilitiesRows(rows);
       result.parsed.forEach(row => parsed.push({
         ...row,
@@ -338,10 +351,11 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
   };
 
   const handleExport = async () => {
-    setBusy('Generando Excel...');
+    setBusy('Generando reporte Excel...');
+    const target = reserveDownloadTarget();
     try {
       const mod = await loadExportModule();
-      await mod.exportInstitutionalLiabilities(liabilities, clientName || 'Cliente');
+      await mod.exportInstitutionalLiabilities(liabilities, clientName || 'Cliente', assetLiability, target);
     } catch (e: any) {
       alert(`Error al exportar: ${e?.message || e}`);
     } finally {
@@ -368,7 +382,7 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
             <Plus className="w-3.5 h-3.5" /> Agregar
           </button>
           <button onClick={handleExport} disabled={!liabilities.length} className="flex items-center gap-1.5 text-xs font-black text-slate-700 bg-white border border-slate-200 hover:border-indigo-300 disabled:opacity-40 px-3 py-2 rounded-xl transition-colors">
-            <Download className="w-3.5 h-3.5" /> Excel
+            <Download className="w-3.5 h-3.5" /> Reporte Excel
           </button>
         </div>
       </div>
@@ -407,63 +421,13 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <SummaryCard label="Saldo Total" value={formatMoney(summary.totalCurrentBalance)} />
-            <SummaryCard label="Tasa Prom. Ponderada" value={formatPercent(summary.weightedAverageRate)} />
-            <SummaryCard label="Acreedores" value={String(summary.lenderCount)} />
-            <SummaryCard
-              label="Próximo Vencimiento"
-              value={summary.nextMaturity ? summary.nextMaturity.maturityDate : 'N/A'}
-              sub={summary.nextMaturity ? summary.nextMaturity.lenderName : undefined}
-            />
-          </div>
-
-          <div className="bg-white rounded-2xl border border-slate-200 p-4">
-            <h3 className="text-xs font-black text-slate-500 uppercase mb-3 flex items-center gap-2">
-              <Sparkles className="w-3.5 h-3.5 text-indigo-600" /> Insights
-            </h3>
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-              {insights.map((item, index) => (
-                <div key={`${item.title}-${index}`} className={`rounded-xl border px-3 py-2.5 text-xs ${
-                  item.severity === 'critical'
-                    ? 'bg-rose-50 border-rose-200 text-rose-900'
-                    : item.severity === 'warning'
-                      ? 'bg-amber-50 border-amber-200 text-amber-900'
-                      : 'bg-slate-50 border-slate-200 text-slate-700'
-                }`}>
-                  <p className="font-black">{item.title}</p>
-                  <p className="mt-1 font-semibold leading-5">{item.detail}</p>
-                  <p className="mt-1 text-slate-500 leading-5">{item.recommendation}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div className="bg-white rounded-2xl border border-slate-200 p-4">
-              <h3 className="text-xs font-black text-slate-500 uppercase mb-3">Concentración por Acreedor</h3>
-              <ResponsiveContainer width="100%" height={220}>
-                <PieChart>
-                  <Pie data={lenderConcentration} dataKey="currentBalance" nameKey="key" cx="50%" cy="50%" outerRadius={80} label={({ pctOfTotal }: any) => `${(pctOfTotal * 100).toFixed(0)}%`}>
-                    {lenderConcentration.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
-                  </Pie>
-                  <Tooltip formatter={(v: number) => formatMoney(v)} />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-            <div className="bg-white rounded-2xl border border-slate-200 p-4">
-              <h3 className="text-xs font-black text-slate-500 uppercase mb-3">Calendario de Vencimientos</h3>
-              <ResponsiveContainer width="100%" height={220}>
-                <BarChart data={maturityLadder.map(b => ({ ...b, label: b.year === 0 ? 'Sin fecha' : String(b.year) }))}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="label" fontSize={11} />
-                  <YAxis fontSize={11} tickFormatter={(v: number) => formatMoney(v)} width={70} />
-                  <Tooltip formatter={(v: number) => formatMoney(v)} />
-                  <Bar dataKey="currentBalance" fill="#4f46e5" radius={[6, 6, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
+          <LiabilitiesCockpit
+            liabilities={liabilities}
+            analysis={analysis}
+            insights={insights}
+            assetLiability={assetLiability}
+            clientName={clientName || 'Cliente'}
+          />
 
           <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto">
             <table className="w-full text-sm">
@@ -541,16 +505,6 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
     </div>
   );
 };
-
-function SummaryCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
-  return (
-    <div className="bg-white rounded-2xl border border-slate-200 p-4">
-      <p className="text-[11px] font-black text-slate-400 uppercase">{label}</p>
-      <p className="text-xl font-black text-slate-900 mt-1">{value}</p>
-      {sub && <p className="text-xs text-slate-500 mt-0.5">{sub}</p>}
-    </div>
-  );
-}
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (

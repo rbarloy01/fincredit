@@ -81,6 +81,9 @@ const client = {
   reportDate: '',
   frequency: 'mensual',
   lastPeriod: '',
+  eligibilityCriteria: [],
+  fiscalBuroStatus: {},
+  operationsNotes: '',
 } satisfies Client;
 
 const covenant = {

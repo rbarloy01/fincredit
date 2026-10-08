@@ -20,21 +20,19 @@ import {
 } from './financialMetrics';
 import { buildLoanTapeExportContexts, type LoanTapeExportContext } from './loanTapeAnalytics';
 import {
-  buildCurrencyConcentration,
-  buildLiabilitiesInsights,
-  buildLiabilitiesSummary,
-  buildLenderConcentration,
-  buildMaturityLadder,
-  buildTypeConcentration,
-  LIABILITY_TYPE_LABELS,
-} from './institutionalLiabilitiesAnalytics';
-import {
   normalizeLoanTapeAnalystState,
   type LoanTapeWorkspaceBlock,
 } from './loanTapeWorkspace';
 import { parseFinancialNumber, parseNullableFinancialNumber } from './numberParsing';
 import { deliverDownloadToReservedTarget, type ReservedDownloadTarget } from './browserDownload';
 import { classifyBalanceSection, childrenTie, type BalanceLine } from './balanceHierarchy';
+import { injectNativeCharts, type ChartSpec } from './xlsxCharts';
+import { buildLoanTapeReportSheets } from './loanTapeReport';
+import { buildLiabilitiesReportSheets } from './liabilitiesReport';
+import { type ComplianceLog, monthsEndingAt, monthLabel as complianceMonthLabel } from './covenantCompliance';
+import type { AssetLiabilityAnalysis } from './assetLiabilityAnalysis';
+import { classifyAccount } from './accountClassification';
+import type { CockpitData } from './loanTapeCockpit';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -54,6 +52,17 @@ export interface SheetDef {
   // col/row are 0-indexed anchor coordinates (ExcelJS image-anchor convention,
   // unlike the 1-indexed cell references used everywhere else in this file).
   images?: Array<{ base64: string; col: number; row: number; width: number; height: number }>;
+  // Native (editable) Excel charts, injected after ExcelJS writes the file — see xlsxCharts.ts.
+  charts?: ChartSpec[];
+  // Explicit row styles (index = 0-based row) — overrides the title/header/data heuristics.
+  rowKinds?: Array<'title' | 'subheading' | 'headers' | 'data' | 'total' | 'blank' | 'pad' | undefined>;
+  hideGridlines?: boolean;
+  // Explicit per-cell fill/font (1-indexed row/col), e.g. status pills (ALERTA / ATENCIÓN / BIEN).
+  cellStyles?: Array<{ row: number; col: number; fill: string; font: string }>;
+  // Native heat-map shading: white → colour as the value grows.
+  colorScales?: Array<{ ref: string; color: string }>;
+  tabColor?: string;
+  freezeRows?: number;
 }
 
 export type VerticalBaseConfig = Record<string, string>;
@@ -372,7 +381,7 @@ export async function exportToPdf(pages: HTMLElement[], filename: string, target
 
 // ── Excel writer (ExcelJS) ────────────────────────────────────────────────────
 
-type RowKind = 'title' | 'subheading' | 'headers' | 'data' | 'total' | 'blank';
+type RowKind = 'title' | 'subheading' | 'headers' | 'data' | 'total' | 'blank' | 'pad';
 
 // Axcess brand palette (matches the Axcess Portal app — ax-deep/ax-blue/ax-cyan
 // gradient, ink/muted text, ok green for totals).
@@ -397,6 +406,7 @@ const XL = {
   data:       { bg: 'FFFFFF', fg: AX.ink,  bold: false, sz: 9,  h: 15 },
   total:      { bg: AX.okFill, fg: AX.ink, bold: true,  sz: 9,  h: 16 },
   blank:      { bg: 'FFFFFF', fg: AX.ink,  bold: false, sz: 9,  h: 5  },
+  pad:        { bg: 'FFFFFF', fg: AX.ink,  bold: false, sz: 9,  h: 20 },
 };
 
 function rowKind(row: SheetDef['rows'][number], ri: number, prev: RowKind): RowKind {
@@ -418,6 +428,15 @@ function rowKind(row: SheetDef['rows'][number], ri: number, prev: RowKind): RowK
 }
 
 export async function exportToExcel(sheets: SheetDef[], filename: string, target?: ReservedDownloadTarget): Promise<void> {
+  const buf = await buildWorkbookBuffer(sheets);
+  downloadBlob(
+    new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+    `${todayStamp()} - ${safeFilePart(filename)}.xlsx`,
+    target,
+  );
+}
+
+export async function buildWorkbookBuffer(sheets: SheetDef[]): Promise<ArrayBuffer> {
   const ExcelJS = await loadExcelJS();
   const wb = new ExcelJS.Workbook();
   wb.creator = 'FinMonitor';
@@ -426,14 +445,17 @@ export async function exportToExcel(sheets: SheetDef[], filename: string, target
 
   for (const sheet of sheets) {
     const ws = wb.addWorksheet(sheet.name.slice(0, 31));
-    ws.properties.tabColor = { argb: sheet.name.includes('Dashboard') ? 'FF' + AX.deep : 'FF' + AX.muted };
+    ws.properties.tabColor = { argb: 'FF' + (sheet.tabColor || (sheet.name.includes('Dashboard') ? AX.deep : AX.muted)) };
     const maxCols = Math.max(1, ...sheet.rows.map(r => r.length));
     const nCols = Math.max(maxCols, sheet.colWidths?.length ?? 0);
 
     ws.columns = Array.from({ length: nCols }, (_, i) => ({
       width: sheet.colWidths?.[i] ?? (i === 0 ? 34 : 14),
     }));
-    ws.properties.outlineProperties = { summaryBelow: false, summaryRight: false };
+    // ExcelJS writes <pageSetUpPr> before <outlinePr> inside <sheetPr>; the schema requires the opposite order and Excel
+    // reports the file as corrupt. Report sheets (fit-to-page) don't use outline groups, so they skip outlinePr.
+    if (!sheet.hideGridlines) ws.properties.outlineProperties = { summaryBelow: false, summaryRight: false };
+    if (sheet.hideGridlines) ws.pageSetup = { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 };
     (sheet.outlineColumns || []).forEach(col => {
       if (col >= 1 && col <= nCols) ws.getColumn(col).outlineLevel = 1;
     });
@@ -444,7 +466,7 @@ export async function exportToExcel(sheets: SheetDef[], filename: string, target
 
     for (let ri = 0; ri < sheet.rows.length; ri++) {
       const raw = sheet.rows[ri];
-      const kind = rowKind(raw, ri, prev);
+      const kind = sheet.rowKinds?.[ri] ?? rowKind(raw, ri, prev);
       const { bg, fg, bold, sz, h } = XL[kind];
 
       if (kind === 'headers') {
@@ -514,10 +536,28 @@ export async function exportToExcel(sheets: SheetDef[], filename: string, target
       prev = kind;
     }
 
-    if (firstHeaderRow > 0) {
-      ws.views = [{ state: 'frozen', ySplit: firstHeaderRow, xSplit: sheet.name.includes('Balance') || sheet.name.includes('Estado') ? 2 : 0 }];
+    if (sheet.freezeRows !== undefined) {
+      ws.views = [{ state: sheet.freezeRows > 0 ? 'frozen' : 'normal', ySplit: sheet.freezeRows, showGridLines: !sheet.hideGridlines }];
+    } else if (firstHeaderRow > 0) {
+      ws.views = [{ state: 'frozen', ySplit: firstHeaderRow, xSplit: sheet.name.includes('Balance') || sheet.name.includes('Estado') ? 2 : 0, showGridLines: !sheet.hideGridlines }];
       ws.autoFilter = { from: { row: firstHeaderRow, column: 1 }, to: { row: firstHeaderRow, column: nCols } };
+    } else if (sheet.hideGridlines) {
+      ws.views = [{ showGridLines: false }];
     }
+
+    (sheet.colorScales || []).forEach(({ ref, color }, i) => {
+      ws.addConditionalFormatting({
+        ref,
+        rules: [{ type: 'colorScale', priority: 200 + i, cfvo: [{ type: 'num', value: 0 }, { type: 'max' }], color: [{ argb: 'FFFFFFFF' }, { argb: 'FF' + color }] } as any],
+      });
+    });
+
+    (sheet.cellStyles || []).forEach(({ row, col, fill, font }) => {
+      const cell = ws.getCell(row, col);
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + fill } };
+      cell.font = { name: 'Arial', size: 9, bold: true, color: { argb: 'FF' + font } };
+      cell.alignment = { vertical: 'middle', horizontal: 'center' };
+    });
 
     (sheet.conditionalFormats || []).forEach(({ ref, tolerance }) => {
       // ExcelJS's CellIsOperators type only covers 'equal'/'greaterThan'/'lessThan'/'between',
@@ -538,12 +578,10 @@ export async function exportToExcel(sheets: SheetDef[], filename: string, target
     });
   }
 
-  const buf = await wb.xlsx.writeBuffer();
-  downloadBlob(
-    new Blob([buf as ArrayBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
-    `${todayStamp()} - ${safeFilePart(filename)}.xlsx`,
-    target,
-  );
+  let buf = (await wb.xlsx.writeBuffer()) as ArrayBuffer;
+  const chartedSheets = sheets.filter(sh => sh.charts?.length).map(sh => ({ sheet: sh.name.slice(0, 31), charts: sh.charts! }));
+  if (chartedSheets.length) buf = await injectNativeCharts(buf, chartedSheets);
+  return buf;
 }
 
 // ── Sheet builders ────────────────────────────────────────────────────────────
@@ -573,7 +611,7 @@ export function buildFichaContractual(
     ['Nombre', 'Tipo', 'Monto', 'Moneda', 'Fecha Firma', 'Vencimiento'],
     ...transactions.map(t => [t.name, t.creditType, parseFinancialNumber(t.originalAmount), t.currency, fmtDate(t.signedAt), fmtDate(t.maturityAt)]),
     [],
-    ['C. COVENANTS FINANCIEROS'],
+    ['C. INDICADORES FINANCIEROS'],
     ['Covenant', 'Fórmula legible', 'Operador', 'Umbral'],
     ...financial.map(c => {
       const threshold = resolveCovenantThreshold(c);
@@ -851,49 +889,7 @@ function mappedFieldFor(statements: FinancialStatement_DB[], key: string): strin
 }
 
 function exportSegment(item: FinancialStatement_DB['rawLineItems'][number]) {
-  const type = item.statementType || 'otro';
-  const path = nkey(item.sectionPath || '');
-  const name = nkey(item.name || '');
-  const isCapitalName = /(capitalsocial|capitalcontable|patrimonio|resultadoacumulado|utilidadretenida|resultadodelejercicio)/.test(name);
-  const isPasivoName = /(pasivo|proveedor|acreedor|deuda|obligacion|prestamo|impuesto|seguro|social|imss|isr|iva|ptu|provision|cuentas?porpagar|cxp)/.test(name);
-  if (type === 'estado_resultados' || path.includes('estadoresultado')) return 'Estado de Resultados';
-  if (type === 'flujo_efectivo' || path.includes('flujoefectivo')) return 'Flujo de Efectivo';
-  if (path.includes('manual') || path.includes('auditoria')) {
-    if (path.includes('activo')) return 'ACTIVO';
-    if (path.includes('pasivo') && !isCapitalName) return 'PASIVO';
-    if (path.includes('capital') || path.includes('patrimonio')) return isPasivoName && !isCapitalName ? 'PASIVO' : 'CAPITAL';
-    if (path.includes('estadoresultado')) return 'Estado de Resultados';
-    if (path.includes('flujoefectivo')) return 'Flujo de Efectivo';
-    if (path.includes('otros')) return 'Otros';
-  }
-  // The source's own explicit ACTIVO / PASIVO / CAPITAL section heading is
-  // authoritative — honor it before falling back to the name heuristics below,
-  // which otherwise misfile lines by wording alone: "ISR/IVA acreditable" (an
-  // asset) lands in PASIVO because the regex catches "isr"/"iva", and "Cuentas
-  // por cobrar capital" (a receivable) lands in CAPITAL because the name
-  // contains "capital" — inflating equity and breaking the balance check. A
-  // combined "Pasivo y Capital" heading names two segments at once, so it stays
-  // ambiguous and drops through to the heuristics instead of guessing.
-  const pathActivo = path.includes('activo');
-  const pathPasivo = path.includes('pasivo');
-  const pathCapital = path.includes('capital') || path.includes('patrimonio');
-  const explicitSegments = (pathActivo ? 1 : 0) + (pathPasivo ? 1 : 0) + (pathCapital ? 1 : 0);
-  if (explicitSegments === 1) {
-    if (pathActivo) return 'ACTIVO';
-    if (pathPasivo) return 'PASIVO';
-    return 'CAPITAL';
-  }
-
-  // Liability wording takes precedence over a generic "capital" mention, as in
-  // "Pasivo y capital". Only explicit equity account names belong in CAPITAL.
-  if (isPasivoName && !isCapitalName) return 'PASIVO';
-  if (isCapitalName || name.includes('capital')) return 'CAPITAL';
-  if (/(activo|caja|banco|efectivo|disponibilidad|cliente|cuentas?porcobrar|inventario|propiedad|equipo|intangible)/.test(name)) return 'ACTIVO';
-  if (path.includes('pasivo')) return 'PASIVO';
-  if (path.includes('capital') || path.includes('patrimonio')) return 'CAPITAL';
-  if (path.includes('activo')) return 'ACTIVO';
-  if (type === 'balance_general') return 'Balance General sin clasificar';
-  return 'Otros';
+  return classifyAccount(item.statementType || 'otro', item.name || '', item.sectionPath);
 }
 
 function accountSortRank(name: string, segment: string) {
@@ -1080,6 +1076,35 @@ function divergenceNote(reference: number | null, numericSum: number | null): st
 // a lone "TOTAL INVERSIONES EN VALORES" has no detail beneath it), so a naive
 // SUM double-counts some rows and drops others. Returns null when the source
 // didn't report an explicit total for the section.
+// Section grand totals (TOTAL ACTIVO / PASIVO / CAPITAL) are picked by the accounting identity, not by wording.
+// "Total Pasivo circulante" starts with "total pasivo" and "SUMA EL PASIVO" doesn't match any pattern, so wording alone
+// took a subtotal as the pasivo total (a fake gap and a fake balance mismatch). Rule: among the total-like lines of each
+// section, choose the combination where Activo = Pasivo + Capital; if none closes, fall back to the extracted mapped values
+// and then to the largest candidate.
+function pickSectionTotals(stmt: FinancialStatement_DB): { activo: number | null; pasivo: number | null; capital: number | null } {
+  const cands: Record<'ACTIVO' | 'PASIVO' | 'CAPITAL', number[]> = { ACTIVO: [], PASIVO: [], CAPITAL: [] };
+  for (const it of stmt.rawLineItems || []) {
+    if (typeof it.value !== 'number' || (it.statementType || 'balance_general') !== 'balance_general') continue;
+    const n = nkey(it.name);
+    if (!/(total|suma)/.test(n) || isCombinedGrandTotalName(it.name)) continue;
+    const seg = exportSegment(it);
+    if (seg === 'ACTIVO' || seg === 'PASIVO' || seg === 'CAPITAL') cands[seg].push(it.value);
+  }
+  const mapped = stmt.mappedData || ({} as FinancialStatement_DB['mappedData']);
+  const A = [...new Set([...(mapped.totalAssets ? [mapped.totalAssets] : []), ...cands.ACTIVO])];
+  const C = [...new Set([...(mapped.equity ? [mapped.equity] : []), ...cands.CAPITAL])];
+  const P = cands.PASIVO;
+  const close = (x: number, y: number) => Math.abs(x - y) <= Math.max(1, Math.abs(x) * 0.0001);
+  for (const a of A) for (const c of C) {
+    const p = P.find(v => close(v, a - c));
+    if (p !== undefined) return { activo: a, pasivo: p, capital: c };
+  }
+  const activo = mapped.totalAssets || (A.length ? A.reduce((m, v) => (Math.abs(v) > Math.abs(m) ? v : m), A[0]) : null);
+  const capital = mapped.equity || (C.length ? C[C.length - 1] : null);
+  const pasivo = P.length ? P.reduce((m, v) => (Math.abs(v) > Math.abs(m) ? v : m), P[0]) : (activo !== null && capital !== null ? activo - capital : null);
+  return { activo: activo || null, pasivo, capital: capital || null };
+}
+
 function reportedSectionTotal(stmt: FinancialStatement_DB, section: string): number | null {
   const match = (include: RegExp, exclude?: RegExp) => {
     for (const it of stmt.rawLineItems || []) {
@@ -1089,6 +1114,11 @@ function reportedSectionTotal(stmt: FinancialStatement_DB, section: string): num
     }
     return null;
   };
+  if (section === 'ACTIVO' || section === 'PASIVO' || section === 'CAPITAL') {
+    const picked = pickSectionTotals(stmt);
+    const value = section === 'ACTIVO' ? picked.activo : section === 'PASIVO' ? picked.pasivo : picked.capital;
+    if (value !== null) return value;
+  }
   if (section === 'ACTIVO') return match(/^(totalactivo|sumadelactivo|activostotales)/, /pasivo|capital|patrimonio/);
   if (section === 'PASIVO') return match(/^(totalpasivo|sumadelpasivo|pasivototal)/, /capital|patrimonio/);
   if (section === 'CAPITAL') return match(/(totalcapitalcontable|totalcapital|sumadelcapital|totalpatrimonio|totaldelcapital)/, /pasivo/);
@@ -1170,16 +1200,83 @@ function totalValueForSection(
   return { value: reference };
 }
 
+// Flat statement lists (CNBV, management accounts) mix leaves with subtotals that
+// don't always say "total" ("Cartera de crédito, neta", "Margen financiero",
+// "Total Ingresos" next to "Ingresos"). Summing all of them double-counts. A line
+// is treated as a subtotal when its value equals the sum of the run of lines
+// directly above it — those lines are its components, so only the components count.
+function detectSubtotalKeys(items: Array<{ name: string; statementType?: string | null; value?: number | null; sectionPath?: string }>, opts: { childrenBelow?: boolean } = {}): Set<string> {
+  const subtotals = new Set<string>();
+  // A line whose name is the heading of other lines' section path ("Efectivo" above
+  // "Efectivo > Caja", "Bancos"...) is the parent total of those lines, not a leaf.
+  const pathHeads = new Set<string>();
+  items.forEach(it => {
+    const last = (it.sectionPath || '').split('>').pop();
+    if (last) pathHeads.add(nkey(last));
+  });
+  items.forEach(item => {
+    if (typeof item.value === 'number' && Math.abs(item.value) >= 1 && pathHeads.has(nkey(item.name))) {
+      subtotals.add(`${item.statementType || 'otro'}||${item.name}`);
+    }
+  });
+  const keyOf = (it: { name: string; statementType?: string | null }) => `${it.statementType || 'otro'}||${it.name}`;
+  items.forEach((item, i) => {
+    const v = typeof item.value === 'number' ? item.value : null;
+    if (v === null || Math.abs(v) < 1 || subtotals.has(keyOf(item))) return;
+    const tolerance = Math.max(1, Math.abs(v) * 0.0001);
+    const totalish = /(total|suma|neto|neta)/.test(nkey(item.name));
+    // (1) children ABOVE the parent. First over leaves only (lines already known to be subtotals are skipped, so an
+    // intermediate subtotal inside the run is not double counted), then over everything above.
+    for (const leavesOnly of [true, false]) {
+      let run = 0; let nonZero = 0; let found = false;
+      for (let k = 1; k <= i; k++) {
+        const prev = items[i - k];
+        if (typeof prev.value !== 'number') break;
+        if (leavesOnly && subtotals.has(keyOf(prev))) continue;
+        run += prev.value;
+        if (Math.abs(prev.value) >= 1) nonZero += 1;
+        const enough = nonZero >= 2 || (nonZero === 1 && totalish);
+        if (enough && Math.abs(run - v) <= tolerance) { found = true; break; }
+      }
+      if (found) { subtotals.add(keyOf(item)); return; }
+    }
+    // (2) children BELOW the parent ("Efectivo" followed by Caja, Bancos…): the parent equals the next lines' sum. Balance sheets only:
+    // in an income statement (signed, mixed subtotals) a coincidence is far likelier than a parent listed above its children.
+    if (!opts.childrenBelow) return;
+    let run = 0; let nonZero = 0;
+    for (let k = 1; i + k < items.length && k <= 40; k++) {
+      const next = items[i + k];
+      if (typeof next.value !== 'number') break;
+      run += next.value;
+      if (Math.abs(next.value) >= 1) nonZero += 1;
+      if (nonZero >= 2 && Math.abs(run - v) <= tolerance) { subtotals.add(keyOf(item)); return; }
+    }
+  });
+  return subtotals;
+}
+
 export interface SectionReconciliationResult {
   section: 'ACTIVO' | 'PASIVO' | 'CAPITAL' | 'Estado de Resultados';
   extractedTotal: number | null;
   computedSum: number | null;
   detailCount: number;
   trustworthy: boolean;
+  // 'ok' = el detalle suma al total; 'unverifiable' = el detalle trae subtotales/niveles
+  // que no se pueden re-sumar de forma fiable; 'divergence' = lista plana que no cuadra.
+  status: 'ok' | 'unverifiable' | 'divergence';
+  excludedCount: number;
   gap: number | null;
 }
 
+export interface ReclassificationSuggestion {
+  from: SectionReconciliationResult['section'];
+  to: SectionReconciliationResult['section'];
+  amount: number;
+  accounts: Array<{ name: string; statementType: string; value: number }>;
+}
+
 export interface StatementReconciliation {
+  suggestions: ReclassificationSuggestion[];
   statementId: string;
   period: string;
   periodDate: string;
@@ -1198,44 +1295,124 @@ export function computeStatementReconciliation(
   bases: VerticalBaseConfig = {},
   concepts: DefinedConcept[] = [],
 ): StatementReconciliation {
-  const itemsBySegment = new Map<string, Array<{ name: string; statementType?: string | null }>>();
+  const itemsBySegment = new Map<string, Array<{ name: string; statementType?: string | null; value?: number | null; sectionPath?: string }>>();
   (stmt.rawLineItems || []).forEach(item => {
     const segment = exportSegment(item);
     if (!itemsBySegment.has(segment)) itemsBySegment.set(segment, []);
-    itemsBySegment.get(segment)!.push({ name: item.name, statementType: item.statementType });
+    itemsBySegment.get(segment)!.push({ name: item.name, statementType: item.statementType, value: item.value, sectionPath: item.sectionPath });
   });
 
-  const detailKeysFor = (segment: string, extraFilter?: (name: string) => boolean) =>
-    (itemsBySegment.get(segment) || [])
-      .filter(item => !isBalanceTotalAccount(item.name, segment))
-      .filter(item => !extraFilter || extraFilter(item.name))
-      .map(item => `${item.statementType || 'otro'}||${item.name}`);
+  const picked = pickSectionTotals(stmt);
+  const grandOf = (segment: string) => (segment === 'ACTIVO' ? picked.activo : segment === 'PASIVO' ? picked.pasivo : segment === 'CAPITAL' ? picked.capital : null);
+  const detailFor = (segment: string, extraFilter?: (name: string) => boolean, countLoneTotals = false) => {
+    const segmentItems = itemsBySegment.get(segment) || [];
+    const subtotals = detectSubtotalKeys(segmentItems, { childrenBelow: segment !== 'Estado de Resultados' });
+    const grand = grandOf(segment);
+    // A "Total…/Suma…" line is excluded only when it IS something already made of other lines (the section grand total, or a
+    // subtotal whose components are listed). A lone total with no components listed ("TOTAL INVERSIONES EN VALORES" with
+    // nothing beneath it) is the only figure available for that account, so it counts as a leaf.
+    const isSubtotalByName = (item: { name: string; value?: number | null }) => {
+      const n = nkey(item.name);
+      if (segment === 'Estado de Resultados') return /(total|suma)/.test(n);
+      if (/(capitalcontribuido|capitalganado)/.test(n)) return true;
+      if (!/(total|suma)/.test(n)) return false;
+      if (!countLoneTotals) return true; // default: any "Total…/Suma…" line is a subtotal
+      return grand !== null && typeof item.value === 'number' && Math.abs(item.value - grand) <= Math.max(1, Math.abs(grand) * 0.0001);
+    };
+    const keys: string[] = [];
+    let excluded = 0;
+    segmentItems.forEach(item => {
+      if (extraFilter && !extraFilter(item.name)) return;
+      const key = `${item.statementType || 'otro'}||${item.name}`;
+      if (isSubtotalByName(item) || subtotals.has(key)) { excluded += 1; return; }
+      keys.push(key);
+    });
+    return { keys, excluded };
+  };
 
   const sectionResult = (
     section: SectionReconciliationResult['section'],
-    detailKeys: string[],
+    detail: { keys: string[]; excluded: number },
     extractedTotal: number | null,
   ): SectionReconciliationResult => {
-    const numericSum = numericDetailSum(stmt, detailKeys);
+    const numericSum = numericDetailSum(stmt, detail.keys);
     const trustworthy = sumLooksTrustworthy(numericSum, extractedTotal);
     const gap = extractedTotal !== null && numericSum !== null ? extractedTotal - numericSum : null;
-    return { section, extractedTotal, computedSum: numericSum, detailCount: detailKeys.length, trustworthy, gap };
+    // Un detalle con subtotales/niveles (o el EFF pegó totales entre las cuentas) no es una
+    // partición limpia: que no sume no prueba un error de extracción.
+    // En Estado de Resultados las líneas con "ingreso" incluyen otros ingresos/productos financieros que no
+    // forman parte del renglón de ingresos extraído, así que ahí la suma nunca es una partición fiable.
+    const hasHierarchy = section === 'Estado de Resultados' || detail.excluded > 0 || (itemsBySegment.get(section) || []).some(it => (it.sectionPath || '').split('>').length > 2);
+    const status: SectionReconciliationResult['status'] = trustworthy ? 'ok' : hasHierarchy ? 'unverifiable' : 'divergence';
+    return { section, extractedTotal, computedSum: numericSum, detailCount: detail.keys.length, trustworthy, status, excludedCount: detail.excluded, gap };
   };
 
-  const totalActivo = verticalBaseValue(stmt, 'ACTIVO', bases, concepts);
-  const equity = stmt.mappedData.equity || null;
+  // Activo y Capital salen de lo ya extraído (mappedData). Pasivo: el mayor de los renglones "Total pasivo"
+  // (los subtotales como "Total pasivo a corto plazo" siempre son menores que el total del pasivo).
+  const reportedPasivo = picked.pasivo;
+  const totalActivo = picked.activo ?? verticalBaseValue(stmt, 'ACTIVO', bases, concepts);
+  const equity = picked.capital ?? (stmt.mappedData.equity || null);
   const totalRevenue = verticalBaseValue(stmt, 'Estado de Resultados', bases, concepts);
 
+  // Business rule: find a decomposition that ties. Try "every Total… line is a subtotal" first; if that doesn't reach the
+  // reported total, try counting lone totals (a "Total X" with no components listed beneath it is the only figure for X).
+  // Only when no decomposition ties is the section reported as not comparable.
+  const expectedFor = (segment: string): number | null => (segment === 'PASIVO' ? (reportedPasivo ?? (totalActivo !== null && equity !== null ? totalActivo - equity : null)) : segment === 'ACTIVO' ? totalActivo : segment === 'CAPITAL' ? equity : null);
+  const bestDetail = (segment: 'ACTIVO' | 'PASIVO' | 'CAPITAL') => {
+    const first = detailFor(segment);
+    const expected = expectedFor(segment);
+    if (expected === null || sumLooksTrustworthy(numericDetailSum(stmt, first.keys), expected)) return first;
+    const second = detailFor(segment, undefined, true);
+    return sumLooksTrustworthy(numericDetailSum(stmt, second.keys), expected) && second.keys.length > 0 ? second : first;
+  };
+  const detailBySection = {
+    ACTIVO: bestDetail('ACTIVO'),
+    PASIVO: bestDetail('PASIVO'),
+    CAPITAL: bestDetail('CAPITAL'),
+    'Estado de Resultados': detailFor('Estado de Resultados', name => isIncomeStatementRevenueLine(name) && !/^otr[oa]s/.test(nkey(name))),
+  };
   const sections: SectionReconciliationResult[] = [
-    sectionResult('ACTIVO', detailKeysFor('ACTIVO'), totalActivo),
-    sectionResult('PASIVO', detailKeysFor('PASIVO'), totalActivo !== null && equity !== null ? totalActivo - equity : null),
-    sectionResult('CAPITAL', detailKeysFor('CAPITAL'), equity),
-    sectionResult('Estado de Resultados', detailKeysFor('Estado de Resultados', isIncomeStatementRevenueLine), totalRevenue),
+    sectionResult('ACTIVO', detailBySection.ACTIVO, totalActivo),
+    sectionResult('PASIVO', detailBySection.PASIVO, reportedPasivo ?? (totalActivo !== null && equity !== null ? totalActivo - equity : null)),
+    sectionResult('CAPITAL', detailBySection.CAPITAL, equity),
+    sectionResult('Estado de Resultados', detailBySection['Estado de Resultados'], totalRevenue),
   ];
 
-  const pasivoSum = sections.find(s => s.section === 'PASIVO')?.computedSum ?? null;
-  const capitalSum = sections.find(s => s.section === 'CAPITAL')?.computedSum ?? null;
-  const totalPasivoMasCapital = pasivoSum !== null && capitalSum !== null ? pasivoSum + capitalSum : null;
+  // Business rule: a section that is over/under its reported total is first explained by a MISPLACED ACCOUNT. When the surplus
+  // of one section equals the deficit of another and a (1-3)-account subset of the surplus section adds up to that amount,
+  // propose moving those accounts instead of just reporting "no comparable".
+  const suggestions: ReclassificationSuggestion[] = [];
+  const balanceSections = sections.filter(sec => sec.section !== 'Estado de Resultados' && sec.extractedTotal !== null && sec.computedSum !== null);
+  for (const over of balanceSections) {
+    const surplus = (over.computedSum as number) - (over.extractedTotal as number);
+    for (const under of balanceSections) {
+      if (under === over) continue;
+      const deficit = (under.extractedTotal as number) - (under.computedSum as number);
+      const tol = Math.max(1, Math.abs(under.extractedTotal as number) * 0.0001);
+      if (surplus <= tol || deficit <= tol || Math.abs(surplus - deficit) > Math.max(tol, surplus * 0.0001)) continue;
+      const lines = detailBySection[over.section as 'ACTIVO' | 'PASIVO' | 'CAPITAL'].keys
+        .map(key => ({ key, value: rawValueByKey(stmt, key) }))
+        .filter((l): l is { key: string; value: number } => typeof l.value === 'number' && Math.abs(l.value) >= 1);
+      const target = deficit;
+      let found: typeof lines | null = null;
+      const tolSubset = Math.max(1, target * 0.0001);
+      outer: for (let i = 0; i < lines.length; i++) {
+        if (Math.abs(lines[i].value - target) <= tolSubset) { found = [lines[i]]; break; }
+        for (let j = i + 1; j < lines.length; j++) {
+          if (Math.abs(lines[i].value + lines[j].value - target) <= tolSubset) { found = [lines[i], lines[j]]; break outer; }
+          for (let k = j + 1; k < lines.length; k++) {
+            if (Math.abs(lines[i].value + lines[j].value + lines[k].value - target) <= tolSubset) { found = [lines[i], lines[j], lines[k]]; break outer; }
+          }
+        }
+      }
+      if (found) suggestions.push({ from: over.section, to: under.section, amount: target, accounts: found.map(l => { const [t, ...n] = l.key.split('||'); return { name: n.join('||'), statementType: t, value: l.value }; }) });
+    }
+  }
+
+  // Ecuación contable con totales REPORTADOS. Si el EFF no trae total de pasivo, se cae a la suma
+  // del detalle (nunca a Activo − Capital, que cuadraría por construcción y no probaría nada).
+  const pasivoForCheck = reportedPasivo ?? sections.find(s => s.section === 'PASIVO')?.computedSum ?? null;
+  const totalPasivoMasCapital = pasivoForCheck !== null && equity !== null ? pasivoForCheck + equity : null;
   const diferencia = totalActivo !== null && totalPasivoMasCapital !== null ? totalActivo - totalPasivoMasCapital : null;
 
   return {
@@ -1243,6 +1420,7 @@ export function computeStatementReconciliation(
     period: stmt.period,
     periodDate: stmt.periodDate,
     sections,
+    suggestions,
     balanceCheck: { totalActivo, totalPasivoMasCapital, diferencia },
   };
 }
@@ -1547,7 +1725,7 @@ export function buildCovenantTraceability(
   const periods = normalizedPeriods(statements);
   const labels = formulaLabelsFromStatements(statements, concepts);
   if (financial.length === 0 || periods.length === 0) {
-    return { name: 'Trazabilidad Covenant', rows: [['Sin covenants financieros definidos']] };
+    return { name: 'Trazabilidad Covenant', rows: [['Sin indicadores financieros definidos']] };
   }
 
   const rows: SheetDef['rows'] = [
@@ -2029,7 +2207,7 @@ export function buildMonitoreo(
   const rowMap = covenantDataRowMap(statements, concepts);
 
   if (financial.length === 0 || periods.length === 0) {
-    return { name: 'Monitoreo', rows: [['Sin covenants financieros definidos']] };
+    return { name: 'Monitoreo', rows: [['Sin indicadores financieros definidos']] };
   }
 
   const rows: SheetDef['rows'] = [
@@ -2088,7 +2266,7 @@ export function buildCovenantsCalculados(
   const rowMap = covenantDataRowMap(statements, concepts);
 
   if (financial.length === 0 || periods.length === 0) {
-    return { name: 'Covenants Calculados', rows: [['Sin covenants financieros definidos']] };
+    return { name: 'Covenants Calculados', rows: [['Sin indicadores financieros definidos']] };
   }
 
   const rows: SheetDef['rows'] = [
@@ -2331,7 +2509,7 @@ export function buildGraficas(statements: FinancialStatement_DB[]): SheetDef {
   // (Previously standardRatios(p.stmt) — an expensive fuzzy-match over every
   // raw account — was recomputed for each indicator × period, i.e. dozens of
   // times per period; the dominant cost of generating the workbook.)
-  const ratiosByPeriod = periods.map(p => standardRatios(p.stmt));
+  const ratiosByPeriod = periods.map(p => standardRatios(p.stmt, statements));
   const byKey = new Map(ratiosByPeriod[ratiosByPeriod.length - 1].map(r => [r.key, r]));
   const rows: SheetDef['rows'] = [
     ['GRÁFICAS — RAZONES Y COVENANTS'],
@@ -2361,245 +2539,12 @@ export function buildGraficas(statements: FinancialStatement_DB[]): SheetDef {
   return { name: 'Gráficas', rows, colWidths: Array(20).fill(11), images };
 }
 
-// Categorical bar chart (lender concentration, maturity ladder) — same
-// canvas-to-PNG approach as renderTrendChartPng, since ExcelJS still has no
-// native chart support, just a different mark (bars instead of a line).
-function renderCategoryBarChartPng(title: string, categories: string[], values: number[]): string | null {
-  if (typeof document === 'undefined') return null;
-  const width = 480;
-  const height = 260;
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return null;
 
-  ctx.fillStyle = '#FFFFFF';
-  ctx.fillRect(0, 0, width, height);
-  ctx.fillStyle = '#' + AX.ink;
-  ctx.font = 'bold 13px Arial';
-  ctx.fillText(title, 10, 20);
-
-  const padding = { left: 70, right: 15, top: 32, bottom: 46 };
-  const plotW = width - padding.left - padding.right;
-  const plotH = height - padding.top - padding.bottom;
-  const n = categories.length;
-  if (!n) {
-    ctx.fillStyle = '#' + AX.muted;
-    ctx.font = '11px Arial';
-    ctx.fillText('Sin datos suficientes', padding.left, padding.top + plotH / 2);
-    return canvas.toDataURL('image/png').split(',')[1];
-  }
-  const max = Math.max(...values, 1);
-
-  ctx.strokeStyle = '#' + AX.line;
-  ctx.fillStyle = '#' + AX.muted;
-  ctx.font = '9px Arial';
-  const gridLines = 4;
-  for (let i = 0; i <= gridLines; i++) {
-    const y = padding.top + plotH - (i / gridLines) * plotH;
-    ctx.beginPath();
-    ctx.moveTo(padding.left, y);
-    ctx.lineTo(padding.left + plotW, y);
-    ctx.stroke();
-    const value = (i / gridLines) * max;
-    ctx.fillText(value.toLocaleString('es-MX', { maximumFractionDigits: 0 }), 4, y + 3);
-  }
-
-  const barGap = 8;
-  const barWidth = Math.max(4, plotW / n - barGap);
-  ctx.fillStyle = '#' + AX.blue;
-  ctx.textAlign = 'center';
-  categories.forEach((cat, i) => {
-    const value = values[i] ?? 0;
-    const barHeight = (value / max) * plotH;
-    const x = padding.left + i * (plotW / n) + (plotW / n - barWidth) / 2;
-    const y = padding.top + plotH - barHeight;
-    ctx.fillStyle = '#' + AX.blue;
-    ctx.fillRect(x, y, barWidth, barHeight);
-    ctx.fillStyle = '#' + AX.muted;
-    ctx.font = '8px Arial';
-    const label = cat.length > 14 ? `${cat.slice(0, 12)}...` : cat;
-    ctx.fillText(label, x + barWidth / 2, height - 30);
-  });
-  ctx.textAlign = 'left';
-
-  return canvas.toDataURL('image/png').split(',')[1];
-}
-
-// PASIVOS INSTITUCIONALES — who lends money TO the client (the mirror of the
-// Loan Tape's "who the client lends to"). One row per facility, so this is a
-// plain table + summary + charts rather than the loan-tape's file-based
-// standardize/analyze pipeline.
-export function buildInstitutionalLiabilities(liabilities: InstitutionalLiability_DB[]): SheetDef {
-  if (!liabilities.length) {
-    return { name: 'Pasivos Institucionales', rows: [['PASIVOS INSTITUCIONALES'], [], ['Sin pasivos institucionales registrados para este cliente.']], colWidths: [50] };
-  }
-
-  const summary = buildLiabilitiesSummary(liabilities);
-  const lenderRows = buildLenderConcentration(liabilities);
-  const maturityRows = buildMaturityLadder(liabilities);
-
-  const rows: SheetDef['rows'] = [
-    ['PASIVOS INSTITUCIONALES'],
-    ['Quién le presta dinero a este cliente: líneas de crédito, préstamos y bonos con instituciones.'],
-    [],
-    ['RESUMEN'],
-    ['Saldo total', fmtNum(summary.totalCurrentBalance, '#,##0;[Red](#,##0);-')],
-    ['Monto original total', fmtNum(summary.totalOriginalAmount, '#,##0;[Red](#,##0);-')],
-    ['Tasa promedio ponderada', summary.weightedAverageRate === null ? 'N/A' : fmtNum(summary.weightedAverageRate, '0.0%')],
-    ['Utilización promedio (saldo/monto original)', summary.averageUtilization === null ? 'N/A' : fmtNum(summary.averageUtilization, '0.0%')],
-    ['Número de acreedores', summary.lenderCount],
-    ['Próximo vencimiento', summary.nextMaturity ? `${summary.nextMaturity.lenderName} — ${summary.nextMaturity.maturityDate}` : 'N/A'],
-    [],
-    ['DETALLE POR ACREEDOR/FACILIDAD'],
-    ['Acreedor', 'Tipo', 'Moneda', 'Monto Original', 'Saldo Actual', 'Tasa', 'Referencia Tasa', 'Originación', 'Vencimiento', 'Amortización', 'Garantía', 'Notas'],
-    ...liabilities.map(l => [
-      l.lenderName,
-      LIABILITY_TYPE_LABELS[l.liabilityType] || l.liabilityType,
-      l.currency,
-      l.originalAmount === null ? null : fmtNum(l.originalAmount, '#,##0;[Red](#,##0);-'),
-      l.currentBalance === null ? null : fmtNum(l.currentBalance, '#,##0;[Red](#,##0);-'),
-      l.interestRate === null ? null : fmtNum(l.interestRate, '0.0%'),
-      l.rateDescription || '',
-      l.originationDate || '',
-      l.maturityDate || '',
-      l.amortization || '',
-      l.guarantee || '',
-      l.notes || '',
-    ]),
-  ];
-
-  const chartsStartRow = rows.length + 1;
-  const images: SheetDef['images'] = [];
-  const lenderChart = renderCategoryBarChartPng('Concentración por Acreedor', lenderRows.slice(0, 8).map(r => r.key), lenderRows.slice(0, 8).map(r => r.currentBalance));
-  if (lenderChart) images.push({ base64: lenderChart, col: 0, row: chartsStartRow, width: 480, height: 260 });
-  const maturityChart = renderCategoryBarChartPng('Calendario de Vencimientos', maturityRows.map(r => r.year === 0 ? 'Sin fecha' : String(r.year)), maturityRows.map(r => r.currentBalance));
-  if (maturityChart) images.push({ base64: maturityChart, col: 9, row: chartsStartRow, width: 480, height: 260 });
-  rows.push([], [], ['GRÁFICAS'], ...Array(13).fill([]));
-
-  return {
-    name: 'Pasivos Institucionales',
-    rows,
-    colWidths: [26, 20, 10, 16, 16, 10, 20, 14, 14, 16, 24, 30],
-    wrapColumns: [11, 12],
-    images,
-  };
-}
-
-function buildInstitutionalLiabilitiesInsights(liabilities: InstitutionalLiability_DB[]): SheetDef {
-  const summary = buildLiabilitiesSummary(liabilities);
-  const insights = buildLiabilitiesInsights(liabilities);
-  return {
-    name: 'Insights',
-    rows: [
-      ['INSIGHTS DE PASIVOS INSTITUCIONALES'],
-      ['Señales automáticas para revisar concentración, liquidez, costo financiero y calidad de datos.'],
-      [],
-      ['Métrica', 'Valor'],
-      ['Facilities / filas', summary.count],
-      ['Acreedores únicos', summary.lenderCount],
-      ['Saldo total', fmtNum(summary.totalCurrentBalance, '#,##0;[Red](#,##0);-')],
-      ['Tasa ponderada', summary.weightedAverageRate === null ? 'N/A' : fmtNum(summary.weightedAverageRate, '0.0%')],
-      ['Saldo moneda distinta a MXN', fmtNum(summary.foreignCurrencyBalance, '#,##0;[Red](#,##0);-')],
-      ['Saldo vence <= 12 meses', fmtNum(summary.shortTermBalance, '#,##0;[Red](#,##0);-')],
-      ['Filas sin vencimiento', summary.missingMaturityCount],
-      ['Filas sin tasa/referencia', summary.missingRateCount],
-      [],
-      ['Severidad', 'Insight', 'Detalle', 'Recomendación'],
-      ...insights.map(item => [item.severity, item.title, item.detail, item.recommendation]),
-    ],
-    colWidths: [18, 28, 50, 60],
-    wrapColumns: [3, 4],
-  };
-}
-
-function buildInstitutionalLiabilitiesCollection(liabilities: InstitutionalLiability_DB[]): SheetDef {
-  return {
-    name: 'Coleccion',
-    rows: [
-      ['COLECCIÓN DE PASIVOS'],
-      ['Base normalizada exportable: una fila por acreedor/facility.'],
-      [],
-      ['Acreedor', 'Tipo', 'Moneda', 'Monto Original', 'Saldo Actual', 'Tasa', 'Referencia Tasa', 'Originación', 'Vencimiento', 'Amortización', 'Garantía', 'Notas', 'Source Document ID'],
-      ...liabilities.map(l => [
-        l.lenderName,
-        LIABILITY_TYPE_LABELS[l.liabilityType] || l.liabilityType,
-        l.currency,
-        l.originalAmount === null ? null : fmtNum(l.originalAmount, '#,##0;[Red](#,##0);-'),
-        l.currentBalance === null ? null : fmtNum(l.currentBalance, '#,##0;[Red](#,##0);-'),
-        l.interestRate === null ? null : fmtNum(l.interestRate, '0.0%'),
-        l.rateDescription || '',
-        l.originationDate || '',
-        l.maturityDate || '',
-        l.amortization || '',
-        l.guarantee || '',
-        l.notes || '',
-        l.sourceDocumentId || '',
-      ]),
-    ],
-    colWidths: [26, 22, 10, 16, 16, 10, 24, 14, 14, 18, 28, 42, 38],
-    wrapColumns: [7, 10, 11, 12],
-  };
-}
-
-function buildInstitutionalLiabilitiesConcentration(liabilities: InstitutionalLiability_DB[]): SheetDef {
-  const rowsFor = (title: string, rows: ReturnType<typeof buildLenderConcentration>) => [
-    [title],
-    ['Grupo', 'Saldo Actual', '% del Total', 'Facilities'],
-    ...rows.map(row => [row.key, fmtNum(row.currentBalance, '#,##0;[Red](#,##0);-'), fmtNum(row.pctOfTotal, '0.0%'), row.count]),
-    [],
-  ];
-
-  return {
-    name: 'Concentracion',
-    rows: [
-      ['CONCENTRACIÓN DE FONDEO'],
-      [],
-      ...rowsFor('Por acreedor', buildLenderConcentration(liabilities)),
-      ...rowsFor('Por tipo de pasivo', buildTypeConcentration(liabilities)),
-      ...rowsFor('Por moneda', buildCurrencyConcentration(liabilities)),
-    ],
-    colWidths: [34, 18, 14, 12],
-  };
-}
-
-function buildInstitutionalLiabilitiesMaturities(liabilities: InstitutionalLiability_DB[]): SheetDef {
-  const maturityRows = buildMaturityLadder(liabilities);
-  const sortedFacilities = liabilities
-    .slice()
-    .sort((a, b) => (a.maturityDate || '9999-12-31').localeCompare(b.maturityDate || '9999-12-31'));
-  return {
-    name: 'Vencimientos',
-    rows: [
-      ['CALENDARIO DE VENCIMIENTOS'],
-      [],
-      ['Año', 'Saldo Actual', 'Facilities'],
-      ...maturityRows.map(row => [row.year === 0 ? 'Sin fecha' : row.year, fmtNum(row.currentBalance, '#,##0;[Red](#,##0);-'), row.count]),
-      [],
-      ['DETALLE POR FECHA'],
-      ['Acreedor', 'Saldo Actual', 'Moneda', 'Vencimiento', 'Tasa', 'Tipo'],
-      ...sortedFacilities.map(l => [
-        l.lenderName,
-        l.currentBalance === null ? null : fmtNum(l.currentBalance, '#,##0;[Red](#,##0);-'),
-        l.currency,
-        l.maturityDate || 'Sin fecha',
-        l.interestRate === null ? l.rateDescription || '' : fmtNum(l.interestRate, '0.0%'),
-        LIABILITY_TYPE_LABELS[l.liabilityType] || l.liabilityType,
-      ]),
-    ],
-    colWidths: [26, 18, 12, 14, 14, 22],
-  };
-}
-
-export async function exportInstitutionalLiabilities(liabilities: InstitutionalLiability_DB[], clientName: string): Promise<void> {
-  await exportToExcel([
-    buildInstitutionalLiabilities(liabilities),
-    buildInstitutionalLiabilitiesInsights(liabilities),
-    buildInstitutionalLiabilitiesCollection(liabilities),
-    buildInstitutionalLiabilitiesConcentration(liabilities),
-    buildInstitutionalLiabilitiesMaturities(liabilities),
-  ], `Pasivos_Institucionales_${clientName}`);
+// Reporte de pasivos: mismas hojas/estilo Axcess que el reporte de cartera — ver liabilitiesReport.ts.
+export async function exportInstitutionalLiabilities(
+  liabilities: InstitutionalLiability_DB[], clientName: string, assetLiability: AssetLiabilityAnalysis | null = null, target?: ReservedDownloadTarget,
+): Promise<void> {
+  await exportToExcel(buildLiabilitiesReportSheets(clientName, liabilities, assetLiability), `Pasivos_Institucionales_${clientName}`, target);
 }
 
 // INDICADORES — the full standard ratio set (independent of which ones happen
@@ -2618,7 +2563,7 @@ export function buildIndicadores(statements: FinancialStatement_DB[], concepts: 
   const periods = normalizedPeriods(statements);
   if (!periods.length) return { name: 'Indicadores', rows: [['Sin periodos cargados']] };
   const rowMap = covenantDataRowMap(statements, concepts);
-  const byKey = new Map(standardRatios(periods.at(-1)!.stmt).map(r => [r.key, r]));
+  const byKey = new Map(standardRatios(periods.at(-1)!.stmt, statements).map(r => [r.key, r]));
 
   const rows: SheetDef['rows'] = [
     ['INDICADORES FINANCIEROS'],
@@ -2708,7 +2653,13 @@ function evaluateCovValue(cov: Covenant_DB, s: FinancialStatement_DB): number | 
 }
 
 // 6. OBLIGACIONES — templated (matches OBLIGACIONES DE HACER Y NO HACER.xlsx exactly)
-async function exportHacerNoHacerExcel(covenants: Covenant_DB[], clientName: string): Promise<void> {
+export interface HacerNoHacerCompliance {
+  log: ComplianceLog;
+  month: string;
+  transactionNames?: Record<string, string>;
+}
+
+async function exportHacerNoHacerExcel(covenants: Covenant_DB[], clientName: string, compliance?: HacerNoHacerCompliance): Promise<void> {
   const ExcelJS = await loadExcelJS();
   const hacer = covenants.filter(c => c.type === 'hacer');
   const noHacer = covenants.filter(c => c.type === 'noHacer');
@@ -2830,11 +2781,68 @@ async function exportHacerNoHacerExcel(covenants: Covenant_DB[], clientName: str
   }
   ws.getRow(r).height = 15.75;
 
+  if (compliance) addComplianceSheets(wb, [...hacer, ...noHacer], compliance);
+
   const buf = await wb.xlsx.writeBuffer();
   downloadBlob(
     new Blob([buf as ArrayBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
     `${todayStamp()} - Obligaciones_${clientName}.xlsx`,
   );
+}
+
+// Matriz mes a mes (12 meses al mes de revisión) + bitácora de incumplimientos con su motivo.
+function addComplianceSheets(wb: any, covenants: Covenant_DB[], c: HacerNoHacerCompliance) {
+  const months = monthsEndingAt(c.month, 12);
+  const STYLE: Record<string, { text: string; fill: string; font: string }> = {
+    cumple: { text: '✓', fill: 'FFE4F7EC', font: 'FF128A48' },
+    incumple: { text: '✗', fill: 'FFFDECEB', font: 'FFC2271C' },
+    na: { text: 'N.A.', fill: 'FFF1F5F9', font: 'FF64748B' },
+  };
+  const header = (ws: any, values: string[]) => {
+    const row = ws.addRow(values);
+    row.eachCell((cell: any) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1430E6' } };
+      cell.font = { name: 'Arial', size: 9, bold: true, color: { argb: 'FFFFFFFF' } };
+      cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    });
+  };
+
+  const ws = wb.addWorksheet('Cumplimiento mensual', { views: [{ state: 'frozen', xSplit: 3, ySplit: 3 }] });
+  ws.columns = [{ width: 48 }, { width: 10 }, { width: 24 }, ...months.map(() => ({ width: 9 }))];
+  ws.addRow([`CUMPLIMIENTO MENSUAL — al ${complianceMonthLabel(c.month)}`]).font = { name: 'Arial', size: 11, bold: true, color: { argb: 'FF1430E6' } };
+  ws.addRow(['✓ cumple · ✗ incumple · N.A. no aplica · vacío = pendiente de revisar']).font = { name: 'Arial', size: 8, italic: true, color: { argb: 'FF5D6B8A' } };
+  header(ws, ['Obligación', 'Tipo', 'Contrato', ...months.map(complianceMonthLabel)]);
+  covenants.forEach(cov => {
+    const row = ws.addRow([
+      cov.name, cov.type === 'hacer' ? 'Hacer' : 'No hacer', (cov.transactionId && c.transactionNames?.[cov.transactionId]) || 'General',
+      ...months.map(m => { const e = c.log[cov.id]?.[m]; return e ? STYLE[e.status].text : ''; }),
+    ]);
+    row.font = { name: 'Arial', size: 9 };
+    months.forEach((m, i) => {
+      const e = c.log[cov.id]?.[m];
+      const cell = row.getCell(4 + i);
+      cell.alignment = { horizontal: 'center' };
+      if (!e) return;
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: STYLE[e.status].fill } };
+      cell.font = { name: 'Arial', size: 9, bold: true, color: { argb: STYLE[e.status].font } };
+      if (e.reason) cell.note = e.reason;
+    });
+  });
+
+  const wb2 = wb.addWorksheet('Incumplimientos', { views: [{ state: 'frozen', ySplit: 1 }] });
+  wb2.columns = [{ width: 10 }, { width: 44 }, { width: 24 }, { width: 70 }, { width: 14 }, { width: 28 }, { width: 22 }, { width: 14 }];
+  header(wb2, ['Mes', 'Obligación', 'Contrato', 'Motivo', 'Fuente', 'Certificado', 'Capturó', 'Fecha']);
+  const rows: any[][] = [];
+  covenants.forEach(cov => Object.entries(c.log[cov.id] || {}).forEach(([m, e]) => {
+    if (e.status !== 'incumple') return;
+    rows.push([m, cov.name, (cov.transactionId && c.transactionNames?.[cov.transactionId]) || 'General', e.reason || '', e.source === 'certificado' ? 'Certificado' : 'Manual', e.certificate || '', e.userName, e.updatedAt.slice(0, 10)]);
+  }));
+  rows.sort((a, b) => (a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : 0)).forEach(r => {
+    const row = wb2.addRow([complianceMonthLabel(r[0]), ...r.slice(1)]);
+    row.font = { name: 'Arial', size: 9 };
+    row.getCell(4).alignment = { wrapText: true, vertical: 'top' };
+  });
+  if (!rows.length) wb2.addRow(['—', 'Sin incumplimientos registrados']);
 }
 
 // 7. TRANSACCIONES
@@ -3357,101 +3365,25 @@ export async function exportLoanTape(
 }
 
 interface CockpitExportPayload {
-  data: { periods: string[]; labels: string[]; series: any[]; migration: any[]; watchlist: any[]; allRows: any[] };
+  data: CockpitData;
   vintage: any[];
-  narrative: string[];
   snapshot: any;
   focusPeriod: string;
   focusLabel: string;
+  groupOverrides?: Record<string, string>;
 }
 
-const COCKPIT_IMG_TITLES: Record<string, string> = {
-  evo: 'Evolución de saldo & cartera vencida', calidad: 'Migración de calidad de cartera',
-  dpd: 'Mapa de calor DPD', conc: 'Concentración acumulada (foco)', hhi: 'HHI & Top-1 en el tiempo',
-  roll: 'Roll-rate — deterioro vs. cura', clientes: 'Tendencia de clientes principales',
-  cosecha: 'Cosecha por año de originación', watchlist: 'Watchlist de vencidos crónicos',
-};
-const COCKPIT_IMG_ORDER = ['evo', 'calidad', 'dpd', 'conc', 'hhi', 'roll', 'clientes', 'cosecha', 'watchlist'];
-const pctNum = (v: number) => Math.round((v || 0) * 1000) / 10; // fraction -> percent, 1 decimal
-
+// Reporte de cartera (Cockpit): hojas con gráficas nativas de Excel — ver loanTapeReport.ts.
 export function buildLoanTapeCockpitSheets(
-  tapes: LoanTape_DB[], selectedPeriods: string[], payload: CockpitExportPayload, images: Array<{ id: string; base64: string }> = [],
+  clientName: string, selectedPeriods: string[], payload: CockpitExportPayload,
 ): SheetDef[] {
-  const { data, vintage, narrative, snapshot, focusLabel } = payload;
-  const selSet = new Set(selectedPeriods);
-  const sel = data.series.filter((s: any) => selSet.has(s.period));
-
-  const resumen: SheetDef['rows'] = [
-    ['ANÁLISIS CONSOLIDADO DE LOAN TAPE'], [],
-    ['Corte foco', focusLabel], ['Cortes seleccionados', selectedPeriods.length, 'de', data.periods.length], [],
-    ['LECTURA CUANTITATIVA (descriptiva)'],
-    ...narrative.map(line => [line]),
-  ];
-
-  const serieRows = [['Período', 'Saldo', 'Créditos', 'Clientes', 'Tasa pond. %', 'Vigente %', 'Atrasada %', 'Vencida %', 'HHI', 'Top-1 %', 'Top-3 %', 'Top-10 %', '>180 saldo', 'Runoff %'],
-    ...sel.map((s: any) => [s.label, Math.round(s.saldo), s.creditos, s.clientes, s.wa_rate != null ? pctNum(s.wa_rate) : null, pctNum(s.vigPct), pctNum(s.atrPct), pctNum(s.venPct), Math.round(s.hhi * 1000) / 1000, pctNum(s.top1), pctNum(s.top3), pctNum(s.top10), Math.round(s.over180), s.runoff != null ? pctNum(s.runoff) : null])];
-
-  const migRows = [['Período', 'Altas #', 'Altas $', 'Bajas #', 'Bajas $', 'Deteriorados', 'Curados', 'Empeoraron'],
-    ...data.migration.filter((m: any) => selSet.has(m.period)).map((m: any) => [m.label, m.new_n, Math.round(m.new_bal), m.gone_n, Math.round(m.gone_bal), m.deteriorated, m.cured, m.worsened])];
-
-  const vintRows = [['Cohorte (año orig.)', 'Créditos', 'Saldo', 'Vigente %', 'Atrasada %', 'Vencida %', 'DPD prom.'],
-    ...vintage.map((v: any) => [v.cohort, v.creditos, Math.round(v.saldo), pctNum(v.vigPct), pctNum(v.atrPct), pctNum(v.venPct), v.avgDpd != null ? Math.round(v.avgDpd) : null])];
-
-  const watchRows = [['Crédito', 'Cliente', 'Cortes vencido', 'Máx DPD', 'Saldo actual'],
-    ...data.watchlist.map((w: any) => [w.loan_id, w.client, w.monthsOverdue, w.maxDpd, Math.round(w.saldoActual)])];
-
-  const conc = snapshot?.concentrations || {};
-  const anom = snapshot?.anomalies || {};
-  const q = snapshot?.portfolioQuality || {};
-  const concSheetRows: SheetDef['rows'] = [
-    [`CONCENTRACIÓN — ${focusLabel}`], [],
-    ...rowsFromObjects('Por cliente (Top 20)', conc.by_client, ['name', 'count', 'balance', 'pct']), [],
-    ...rowsFromObjects('Por producto', conc.by_loan_type, ['name', 'count', 'balance', 'pct', 'avg_interest_rate', 'avg_days_overdue']), [],
-    ...rowsFromObjects('Por estado', conc.by_state, ['name', 'count', 'balance', 'pct']),
-  ];
-  const anomSheetRows: SheetDef['rows'] = [
-    [`ANOMALÍAS — ${focusLabel} (vs. corte previo)`], [],
-    ...rowsFromObjects('Créditos nuevos', anom.new_loans, ['loan_id', 'outstanding_balance', 'start_date', 'category', 'percentage']), [],
-    ...rowsFromObjects('Deterioro DPD', anom.dpd_deterioration, ['loan_id', 'days_overdue_prev', 'days_overdue_latest', 'outstanding_balance']), [],
-    ...rowsFromObjects('Créditos que desaparecen', anom.disappeared_loans, ['loan_id', 'outstanding_balance', 'end_date', 'category', 'days_overdue_prev']),
-  ];
-  const qualityRows: SheetDef['rows'] = [
-    [`CALIDAD Y DPD — ${focusLabel}`], [],
-    ['Clasificación', 'Créditos', 'Saldo', '%'],
-    ...['vigente', 'atrasada', 'vencida', 'sin_dato'].filter(k => q[k]).map(k => [k, q[k].count, Math.round(q[k].balance), pctNum(q[k].pct)]), [],
-    ...rowsFromObjects('Distribución DPD', snapshot?.dpd_distribution, ['bucket', 'count', 'balance', 'pct']),
-  ];
-
-  const standardizedSel = data.allRows.filter((r: any) => !r.file_date || selSet.has(r.file_date));
-
-  const graficas: SheetDef = { name: 'Gráficas', rows: [['GRÁFICAS DEL DASHBOARD'], []], images: [] };
-  const byId = new Map(images.map(im => [im.id, im.base64]));
-  for (const id of COCKPIT_IMG_ORDER) {
-    const b64 = byId.get(id);
-    if (!b64) continue;
-    graficas.rows.push([COCKPIT_IMG_TITLES[id] || id]);
-    graficas.images!.push({ base64: b64, col: 0, row: graficas.rows.length, width: 640, height: 340 });
-    for (let k = 0; k < 19; k++) graficas.rows.push([]); // reserve vertical space
-  }
-
-  return [
-    { name: 'Resumen', rows: resumen, colWidths: [120], wrapColumns: [0] },
-    { name: 'Serie mensual', rows: serieRows, colWidths: [12, 16, 10, 10, 12, 11, 12, 11, 8, 10, 10, 11, 16, 11] },
-    { name: 'Migración DPD', rows: migRows, colWidths: [12, 10, 16, 10, 16, 13, 10, 12] },
-    { name: 'Cosecha', rows: vintRows, colWidths: [18, 10, 16, 11, 12, 11, 11] },
-    { name: 'Watchlist', rows: watchRows, colWidths: [16, 40, 14, 10, 16] },
-    { name: 'Concentracion', rows: concSheetRows, colWidths: [40, 10, 16, 10, 14, 12] },
-    { name: 'Anomalias', rows: anomSheetRows, colWidths: [18, 16, 16, 16, 12] },
-    { name: 'Calidad y DPD', rows: qualityRows, colWidths: [18, 12, 16, 10] },
-    { name: 'LT Estandarizada', rows: rowsFromObjects('LOAN TAPE ESTANDARIZADA (períodos seleccionados)', standardizedSel, ['file_date', 'loan_id', 'client', 'amount', 'outstanding_balance', 'interest_rate', 'loan_status', 'start_date', 'end_date', 'loan_type', 'days_overdue', 'currency', 'industry', 'state']), colWidths: [12, 18, 28, 16, 18, 12, 14, 14, 14, 20, 12, 10, 18, 18] },
-    graficas,
-  ];
+  return buildLoanTapeReportSheets(clientName, selectedPeriods, payload);
 }
 
 export async function exportLoanTapeCockpit(
-  tapes: LoanTape_DB[], clientName: string, selectedPeriods: string[], payload: CockpitExportPayload, images: Array<{ id: string; base64: string }> = [], target?: ReservedDownloadTarget,
+  _tapes: LoanTape_DB[], clientName: string, selectedPeriods: string[], payload: CockpitExportPayload, target?: ReservedDownloadTarget,
 ): Promise<void> {
-  await exportToExcel(buildLoanTapeCockpitSheets(tapes, selectedPeriods, payload, images), `Cockpit_${clientName}`, target);
+  await exportToExcel(buildLoanTapeCockpitSheets(clientName, selectedPeriods, payload), `Cockpit_${clientName}`, target);
 }
 
 export async function exportCovenantsFinancieros(
@@ -3475,10 +3407,10 @@ export async function exportCovenantsFinancieros(
 }
 
 export async function exportHacerNoHacer(
-  covenants: Covenant_DB[], clientName: string, format: 'excel' | 'pdf', el?: HTMLElement,
+  covenants: Covenant_DB[], clientName: string, format: 'excel' | 'pdf', el?: HTMLElement, compliance?: HacerNoHacerCompliance,
 ): Promise<void> {
   if (format === 'excel') {
-    await exportHacerNoHacerExcel(covenants, clientName);
+    await exportHacerNoHacerExcel(covenants, clientName, compliance);
   } else {
     if (el) await exportToPdf([el], `Obligaciones_${clientName}`);
   }

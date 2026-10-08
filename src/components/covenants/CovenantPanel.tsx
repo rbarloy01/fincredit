@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useClientMonitored } from '../clients/MonitoringContext';
 import { db, Covenant_DB, CovenantAnnotation, FinancialStatement_DB, Transaction } from '../../db/index';
 import { Session } from '../../services/auth';
 import {
@@ -79,6 +80,8 @@ function evaluateCovenant(cov: Covenant_DB, statements: FinancialStatement_DB[])
 }
 
 const StatusBadge: React.FC<{ status: 'cumple' | 'alerta' | 'incumple' }> = ({ status }) => {
+  const monitored = useClientMonitored();
+  if (!monitored) return <span className="flex items-center gap-1 text-xs font-black px-2.5 py-1 rounded-full border bg-slate-100 text-slate-500 border-slate-200">SIN MONITOREO</span>;
   const map = {
     cumple: 'bg-emerald-100 text-emerald-800 border-emerald-200',
     alerta: 'bg-amber-100 text-amber-800 border-amber-200',

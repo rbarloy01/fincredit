@@ -176,6 +176,9 @@ const ClientForm: React.FC<Props> = ({ session, aiSettings, initialData, onSave,
         documentation: initialData?.documentation || [],
         reportDate: initialData?.reportDate || new Date().toISOString().slice(0, 10),
         lastPeriod: initialData?.lastPeriod || '',
+        eligibilityCriteria: initialData?.eligibilityCriteria || [],
+        fiscalBuroStatus: initialData?.fiscalBuroStatus || {},
+        operationsNotes: initialData?.operationsNotes || '',
       };
 
       let savedClient: Client;

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { isClientMonitored } from '../../lib/clientStatus';
 import { db, Client } from '../../db/index';
 import { Session } from '../../services/auth';
 import { Plus, Search, Building2, Hash, Briefcase, TrendingUp, ChevronRight, AlertTriangle, FileClock, CalendarClock, Trash2 } from 'lucide-react';
@@ -71,6 +72,7 @@ const ClientList: React.FC<Props> = ({ session, onSelectClient, onNewClient }) =
         if (cancelled) return;
         let breaches = 0, overdueDocs = 0, missingTapes = 0;
         for (const client of clients) {
+          if (!isClientMonitored(client)) continue; // dormant / cerrado: sin alertas
           const statements = statementsByClient[client.id] || [];
           const covenants = covenantsByClient[client.id] || [];
           breaches += covenants.filter(c => evaluateCovenantAuto(c, statements).status === 'incumple').length;

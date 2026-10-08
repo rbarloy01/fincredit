@@ -1,5 +1,6 @@
 import { StructuredLoanTapeAnalysis } from '../services/ai';
 import { MappingNote, StandardLoan, buildLoanTapeDataProfile } from './loanTapeAnalytics';
+import { classifyDpd } from './portfolioRules';
 
 export type LoanTapeBlockType = 'kpi' | 'table' | 'bar' | 'line' | 'pie';
 
@@ -89,7 +90,7 @@ function portfolioTrend(rows: StandardLoan[]) {
     const periodRows = rows.filter(row => row.file_date === date);
     const balance = totalBalance(periodRows);
     const overdueBalance = totalBalance(periodRows.filter(row => (row.days_overdue || 0) > 0));
-    const severeBalance = totalBalance(periodRows.filter(row => (row.days_overdue || 0) > 90));
+    const severeBalance = totalBalance(periodRows.filter(row => classifyDpd(row.days_overdue ?? 0) === 'vencida'));
     return {
       period: date,
       balance,
@@ -223,7 +224,7 @@ export function createLoanTapeWorkspaceBlock(
   }
 
   const overdue = totalBalance(latest.filter(row => (row.days_overdue || 0) > 0));
-  const severe = totalBalance(latest.filter(row => (row.days_overdue || 0) > 90));
+  const severe = totalBalance(latest.filter(row => classifyDpd(row.days_overdue ?? 0) === 'vencida'));
   const clients = new Set(latest.map(row => row.client).filter(Boolean)).size;
   return block(prompt, 'Resumen de cartera', analysis?.executiveSummary || 'Vista ejecutiva del último corte.', 'kpi', [
     { label: 'Saldo total', value: balance, format: 'money' },

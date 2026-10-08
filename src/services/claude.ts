@@ -1,4 +1,5 @@
 // Claude API service — calls /api/claude proxy (Vite dev server)
+import { sheetToRows } from '../lib/sheetRows';
 // No Anthropic SDK; uses raw fetch()
 
 export interface RawLineItem {
@@ -348,7 +349,7 @@ Extensión: 3-4 párrafos. Tono profesional e institucional.`,
       const workbook = XLSX.read(new Uint8Array(buffer), { type: 'array' });
       const sheetName = workbook.SheetNames[0];
       const sheet = workbook.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json(sheet, { defval: null });
+      const rows = sheetToRows(XLSX, sheet, { defval: null });
       return rows;
     } catch (err) {
       console.error('Error parsing Excel:', err);

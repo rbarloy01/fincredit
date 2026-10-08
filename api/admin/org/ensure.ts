@@ -68,6 +68,21 @@ function bootstrapOrgConfig() {
   return name && slug ? { name, slug } : null;
 }
 
+// New sign-ups land as 'pending'; without an org they are invisible to managers (org-scoped RLS),
+// so attach them to the org most used by existing profiles on the same email domain.
+async function orgForEmailDomain(supabaseUrl: string, serviceKey: string, email: string) {
+  const domain = email.split('@')[1];
+  if (!domain) return null;
+  const peers = await restJson(
+    `${supabaseUrl}/rest/v1/profiles?select=org_id&email=ilike.${encodeURIComponent(`%@${domain}`)}&org_id=not.is.null`,
+    serviceKey,
+    'GET',
+  );
+  const counts = new Map<string, number>();
+  for (const peer of peers || []) counts.set(peer.org_id, (counts.get(peer.org_id) || 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+}
+
 async function ensureProfile(supabaseUrl: string, serviceKey: string, user: any) {
   const existing = await restJson(`${supabaseUrl}/rest/v1/profiles?select=id,role,org_id&id=eq.${encodeURIComponent(user.id)}&limit=1`, serviceKey, 'GET');
   let orgId = existing?.[0]?.org_id || null;
@@ -76,6 +91,8 @@ async function ensureProfile(supabaseUrl: string, serviceKey: string, user: any)
     const config = bootstrapOrgConfig();
     if (config) orgId = await ensureOrganization(supabaseUrl, serviceKey, config.name, config.slug);
   }
+
+  if (!orgId) orgId = await orgForEmailDomain(supabaseUrl, serviceKey, profileEmail(user));
 
   const row = {
     name: profileName(user),

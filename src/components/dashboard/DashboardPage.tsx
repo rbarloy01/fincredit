@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { QUALITY_SETTING_KEY, usableStatements, type StatementQualityRecord } from '../../lib/statementQuality';
 import {
   AlertTriangle, ArrowRight, Building2, CalendarClock, FileWarning,
   Gauge, Moon, ShieldAlert, ShieldCheck, TrendingUp, Briefcase, PieChart, Hourglass, Gavel,
@@ -215,13 +216,16 @@ const DashboardPage: React.FC<Props> = ({ onSelectClient }) => {
       try {
         for (let i = 0; i < missing.length; i += DETAIL_BATCH_SIZE) {
           const batch = missing.slice(i, i + DETAIL_BATCH_SIZE);
-          const [nextStatements, nextCovenants, nextTransactions, nextActivities, nextPipelineMeta] = await Promise.all([
+          const [rawStatements, nextCovenants, nextTransactions, nextActivities, nextPipelineMeta, qualityByClient] = await Promise.all([
             db.getDashboardStatementsForClients(batch),
             db.getCovenantsForClients(batch),
             db.getTransactionsForClients(batch),
             db.getCrmActivitiesForClients(batch),
             db.getClientSettingsForClients<MasterOrgPipelineMeta>(batch, 'master_org_pipeline'),
+            db.getClientSettingsForClients<Record<string, StatementQualityRecord>>(batch, QUALITY_SETTING_KEY),
           ]);
+          // Estados en revisión (no pasaron la puerta de calidad) no cuentan en alertas ni indicadores.
+          const nextStatements = Object.fromEntries(Object.entries(rawStatements).map(([clientId, list]) => [clientId, usableStatements(list, qualityByClient[clientId] || {})]));
           if (!active) return;
           setStatementsByClient(prev => ({ ...prev, ...nextStatements }));
           setCovenantsByClient(prev => ({ ...prev, ...nextCovenants }));

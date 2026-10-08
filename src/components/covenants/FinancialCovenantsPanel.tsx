@@ -1,13 +1,52 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useClientMonitored } from '../clients/MonitoringContext';
 import { db, Covenant_DB, CovenantAnnotation, FinancialStatement_DB, Transaction } from '../../db/index';
 import { Session } from '../../services/auth';
-import { Plus, ChevronDown, ChevronRight, MessageCircle, Send, TrendingUp, CheckCircle, AlertTriangle, XCircle, X, Trash2, Download, FileText, Star, Clipboard, BarChart3, ArrowDownRight, ArrowUpRight, RefreshCw } from 'lucide-react';
+import { Plus, ChevronDown, ChevronRight, MessageCircle, Send, TrendingUp, CheckCircle, AlertTriangle, XCircle, X, Trash2, Download, FileText, Star, Clipboard, BarChart3, ArrowDownRight, ArrowUpRight, RefreshCw, Pin } from 'lucide-react';
 import type { DefinedConcept } from '../../lib/export';
 import { loadExportModule } from '../../lib/exportLoader';
 import { accountOptions, buildCovenantAnalystInsight, buildCovenantInsightPrompt, evaluateCovenantAuto, evaluateCovenantForStatement, evaluateFormula, formulaLabel, getMetric, isPercentCovenant, prioritizedLatestCovenantPerformance, rawAccountKey, resolveCovenantThreshold, standardRatioFormula, standardRatios, suggestedCovenants } from '../../lib/financialMetrics';
 import { GlobalCovenantTemplate, loadOrgConsolidationRules, loadOrgGlobalCovenantTemplates } from '../../lib/accountConsolidation';
 import { matchesFacilityFilter } from '../../lib/facilityHistory';
 import { normalizeFinancialNumberString, parseNullableFinancialNumber } from '../../lib/numberParsing';
+import CovenantBuilder, { type CovenantBuilderSave } from './CovenantBuilder';
+import { thresholdToStore } from '../../lib/covenantBuilder';
+import { parseFormulaText } from '../../lib/formulaText';
+import { buildFavoriteInsights, buildFavoritesPrompt, explainFormula, favoritesDefaultKey, favoritesSettingKey, indicatorKey, summarizeFavorites, toggleFavorite, type FavoriteInsight } from '../../lib/indicatorInsights';
+
+const FavButton: React.FC<{ active: boolean; onClick: () => void; size?: string }> = ({ active, onClick, size = 'w-4 h-4' }) => (
+  <button
+    type="button"
+    onClick={e => { e.stopPropagation(); onClick(); }}
+    title={active ? 'Quitar de mis favoritos' : 'Marcar como favorito: aparece primero en el storyline'}
+    aria-pressed={active}
+    className={`flex-shrink-0 rounded-lg p-1.5 transition-colors ${active ? 'bg-indigo-100 text-indigo-700' : 'text-slate-300 hover:bg-slate-100 hover:text-indigo-600'}`}
+  >
+    <Pin className={`${size} ${active ? 'fill-current' : ''}`} />
+  </button>
+);
+
+const Sparkline: React.FC<{ series: Array<{ period: string; value: number | null }>; className?: string }> = ({ series, className = 'text-indigo-600' }) => {
+  const pts = series.map((p, i) => ({ i, v: p.value })).filter((p): p is { i: number; v: number } => p.v !== null);
+  if (pts.length < 2) return <span className="text-[10px] font-bold text-slate-300">sin serie</span>;
+  const min = Math.min(...pts.map(p => p.v)); const max = Math.max(...pts.map(p => p.v)); const span = max - min || 1;
+  const w = 84; const h = 26; const step = series.length > 1 ? w / (series.length - 1) : w;
+  const path = pts.map((p, idx) => `${idx === 0 ? 'M' : 'L'}${(p.i * step).toFixed(1)},${(h - 3 - ((p.v - min) / span) * (h - 6)).toFixed(1)}`).join(' ');
+  const last = pts[pts.length - 1];
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className={className} aria-label="Tendencia de los últimos cortes">
+      <path d={path} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />
+      <circle cx={last.i * step} cy={h - 3 - ((last.v - min) / span) * (h - 6)} r="2.6" fill="currentColor" />
+    </svg>
+  );
+};
+
+const SEVERITY_STYLE: Record<FavoriteInsight['severity'], { label: string; chip: string; spark: string }> = {
+  critico: { label: 'Crítico', chip: 'bg-rose-50 text-rose-700 border-rose-200', spark: 'text-rose-600' },
+  atencion: { label: 'Atención', chip: 'bg-amber-50 text-amber-800 border-amber-200', spark: 'text-amber-600' },
+  sin_dato: { label: 'Sin dato', chip: 'bg-slate-100 text-slate-600 border-slate-200', spark: 'text-slate-400' },
+  ok: { label: 'En rango', chip: 'bg-emerald-50 text-emerald-700 border-emerald-200', spark: 'text-emerald-600' },
+};
 
 const nanoid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
@@ -21,6 +60,10 @@ interface Props {
 }
 
 const StatusBadge: React.FC<{ status: 'cumple' | 'alerta' | 'incumple' }> = ({ status }) => {
+  const monitored = useClientMonitored();
+  if (!monitored) {
+    return <span className="flex items-center gap-1 text-xs font-black px-2.5 py-1 rounded-full border bg-slate-100 text-slate-500 border-slate-200">SIN MONITOREO</span>;
+  }
   const map = {
     cumple: 'bg-emerald-100 text-emerald-800 border-emerald-200',
     alerta: 'bg-amber-100 text-amber-800 border-amber-200',
@@ -146,6 +189,7 @@ function saveLocalNote(covenantId: string, note: CovenantAnnotation) {
 }
 
 const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', transactions = [], session, statements, onCovenantsChange }) => {
+  const monitored = useClientMonitored();
   const [covenants, setCovenants] = useState<Covenant_DB[]>([]);
   const [annotations, setAnnotations] = useState<Record<string, CovenantAnnotation[]>>({});
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -168,6 +212,8 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
   const [hiddenStandard, setHiddenStandard] = useState<string[]>([]);
   const [measurementConfig, setMeasurementConfig] = useState<CovenantMeasurementConfigMap>({});
   const [facilityFilter, setFacilityFilter] = useState<'all' | 'general' | string>('all');
+  const [favorites, setFavorites] = useState<string[]>([]);
+  const [fmap, setFmap] = useState({ open: false, query: '', onlyFav: false, onlyIssues: false });
   const notesEndRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const orderedStatements = useMemo(
@@ -180,6 +226,35 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
       .join('||'),
     [orderedStatements],
   );
+
+
+  // Favorites belong to the analyst: stored per user, with the last choice as default for clients where none was set yet.
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      const stored = await db.getClientSetting<string[] | null>(clientId, favoritesSettingKey(session.userId), null);
+      let favs: string[] | null = Array.isArray(stored) ? stored : null;
+      if (!favs) {
+        try { const d = JSON.parse(localStorage.getItem(favoritesDefaultKey(session.userId)) || 'null'); if (Array.isArray(d)) favs = d; } catch { /* no default yet */ }
+      }
+      if (!favs) {
+        // Another device, or the choice made in the onboarding tour: the analyst's default is saved with the organization.
+        const org = await db.getOrgSetting<string[] | null>(session.userId, favoritesDefaultKey(session.userId), null).catch(() => null);
+        if (Array.isArray(org)) favs = org;
+      }
+      if (active) setFavorites(favs || []);
+    })().catch(() => undefined);
+    return () => { active = false; };
+  }, [clientId, session.userId]);
+
+  const toggleFav = (cov: Covenant_DB) => {
+    const next = toggleFavorite(favorites, indicatorKey(cov));
+    setFavorites(next);
+    void db.setClientSetting(clientId, favoritesSettingKey(session.userId), next);
+    try { localStorage.setItem(favoritesDefaultKey(session.userId), JSON.stringify(next)); } catch { /* storage blocked */ }
+    void db.setOrgSetting(session.userId, favoritesDefaultKey(session.userId), next);
+  };
+  const isFav = (cov: Covenant_DB) => favorites.includes(indicatorKey(cov));
 
   const loadData = async () => {
     await loadOrgConsolidationRules(session.userId);
@@ -258,25 +333,29 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
     if (expanded && notesEndRef.current) notesEndRef.current.scrollIntoView({ behavior: 'smooth' });
   }, [expanded, annotations]);
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!form.name.trim()) return;
+  const handleBuilderSave = async (payload: CovenantBuilderSave) => {
     setSaving(true);
     try {
-      const formula = form.expressionTokens.length > 0
-        ? `expr:${JSON.stringify(form.expressionTokens)}`
-        : form.numerator && form.denominator
-          ? `ratio:${form.numerator}/${form.denominator}`
-          : form.formula.trim();
-      await db.createCovenant({ clientId, transactionId: form.transactionId || undefined, name: form.name.trim(), type: 'financial', formula, threshold: form.threshold.trim(), operator: form.operator, description: form.description.trim(), isCustom: true });
+      const created = await db.createCovenant({
+        clientId, transactionId: payload.transactionId || undefined, name: payload.name.trim(), type: 'financial', formula: payload.formula,
+        threshold: payload.kind === 'none' ? '' : thresholdToStore(payload.limit, payload.unit), operator: payload.kind,
+        description: (payload.description || '').trim(), isCustom: true,
+      });
+      // the unit the analyst picked decides how the covenant is displayed, instead of being guessed from its name
+      const nextConfig = { ...measurementConfig, [created.id]: { frequency: 'mensual' as const, startPeriod: '', displayMode: (payload.unit === 'percent' ? 'percent' : 'number') as CovenantDisplayMode } };
+      setMeasurementConfig(nextConfig);
+      await db.setClientSetting(clientId, covenantMeasurementKey(clientId), nextConfig);
+      if (payload.isContract) persistContractCovenants([...contractCovenants, ...contractKeysFor(created)]);
       setForm(EMPTY);
       setShowForm(false);
       await loadData();
+      flashNotice(`Covenant «${created.name}» creado`);
     } catch (err: any) { alert(err.message); }
     finally { setSaving(false); }
   };
 
   const setManualStatus = async (cov: Covenant_DB, status: 'cumple' | 'alerta' | 'incumple' | 'auto') => {
+    if (!monitored && status !== 'auto' && status !== 'cumple') { alert('Cliente sin monitoreo: no se puede marcar incumplimiento ni alerta.'); return; }
     setSavingAction(`${cov.id}:status`);
     try {
       const real = await materialize(cov as Covenant_DB & { virtual?: boolean });
@@ -446,8 +525,8 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
       return matchesFacilityFilter(cov, facilityFilter, transactions.length);
     });
     const covenantRows = displayCovenants.map(cov => ({ cov, ...evaluateCovenantAuto(cov, orderedStatements) }));
-    const breachedCount = covenantRows.filter(r => r.status === 'incumple').length;
-    const warningCount = covenantRows.filter(r => r.status === 'alerta').length;
+    const breachedCount = monitored ? covenantRows.filter(r => r.status === 'incumple').length : 0;
+    const warningCount = monitored ? covenantRows.filter(r => r.status === 'alerta').length : 0;
     const calculatedCount = covenantRows.filter(r => r.value !== null).length;
     const latestPerformance = prioritizedLatestCovenantPerformance(displayCovenants, orderedStatements, contractCovenants);
     const performanceById = new Map(latestPerformance.map(row => [row.covenantId, row]));
@@ -457,10 +536,13 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
     const bettermentCount = latestPerformance.filter(r => r.movement === 'betterment').length;
     const noDataPerformanceCount = latestPerformance.filter(r => r.movement === 'insufficient').length;
     const covenantById = new Map(displayCovenants.map(cov => [cov.id, cov]));
-    const storylineRows = latestPerformance
+    // Storyline = the analyst's favorites (always, pinned first) + the highest-priority movements to fill up to 6.
+    const storylineAll = latestPerformance
       .map(row => ({ row, cov: covenantById.get(row.covenantId) }))
-      .filter((item): item is { row: typeof latestPerformance[number]; cov: Covenant_DB } => !!item.cov)
-      .slice(0, 6);
+      .filter((item): item is { row: typeof latestPerformance[number]; cov: Covenant_DB } => !!item.cov);
+    const favRows = storylineAll.filter(item => favorites.includes(indicatorKey(item.cov)));
+    const otherRows = storylineAll.filter(item => !favorites.includes(indicatorKey(item.cov)));
+    const storylineRows = [...favRows, ...otherRows.slice(0, Math.max(3, 6 - favRows.length))];
     const suggestions = suggestedCovenants(orderedStatements).filter(s => !allDisplayCovenants.some(c => clean(c.name) === clean(s.name)));
     const globalSuggestions = globalTemplates
       .filter(t => t.active)
@@ -485,10 +567,25 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
       covenantById, storylineRows, suggestions, globalSuggestions, mappedOptions, labelMap,
       performanceById,
     };
-  }, [orderedStatements, latestStatement, hiddenStandard, covenants, clientId, facilityFilter, transactions, contractCovenants, clientName, globalTemplates, concepts]);
+  }, [orderedStatements, latestStatement, hiddenStandard, covenants, clientId, facilityFilter, transactions, contractCovenants, clientName, globalTemplates, concepts, monitored, favorites]);
   const formatConfigFor = (cov: Covenant_DB) => measurementConfig[cov.id] || {};
   const fmtCov = (value: number | null, cov: Covenant_DB) => formatCovenantValue(value, cov, formatConfigFor(cov));
   const reqLabel = (cov: Covenant_DB) => requirementLabel(cov, formatConfigFor(cov));
+  const favoriteInsights = useMemo(
+    () => buildFavoriteInsights(allDisplayCovenants, orderedStatements, favorites, (value, cov) => formatCovenantValue(value, cov, measurementConfig[cov.id] || {}), monitored),
+    [allDisplayCovenants, orderedStatements, favorites, measurementConfig, monitored],
+  );
+  const favoriteSummary = useMemo(() => summarizeFavorites(favoriteInsights, session.userName || 'El analista'), [favoriteInsights, session.userName]);
+  const favoriteInsightById = useMemo(() => new Map(favoriteInsights.map(i => [i.covenantId, i])), [favoriteInsights]);
+  const mapLabels = useMemo(() => Object.fromEntries(Object.entries(labelMap).map(([k, v]) => [k, String(v).replace(/^Mapped:\s*/, '')])), [labelMap]);
+  const mapRows = useMemo(
+    () => allDisplayCovenants.filter(c => c.type === 'financial').map(cov => ({
+      cov,
+      explain: explainFormula(cov, latestStatement, mapLabels),
+      shown: latestStatement ? evaluateCovenantForStatement(cov, latestStatement, orderedStatements) : null,
+    })),
+    [allDisplayCovenants, latestStatement, orderedStatements, mapLabels],
+  );
   const contractKeysFor = (cov: Covenant_DB) => [cov.id, cov.formula ? `formula:${cov.formula}` : '', `name:${clean(cov.name)}`].filter(Boolean);
   const isContractCovenant = (cov: Covenant_DB) => contractKeysFor(cov).some(key => contractCovenants.includes(key));
   const handleExport = async (format: 'excel' | 'pdf') => {
@@ -510,59 +607,10 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
     setHiddenStandard(unique);
     void db.setClientSetting(clientId, hiddenStandardKey(clientId), unique);
   };
-  const parsePromptToTokens = (prompt: string): { tokens: string[]; missing: string[] } => {
-    const aliases = [
-      ...mappedOptions.map(o => ({ key: o.key, label: o.label.replace('Mapped: ', '') })),
-      ...options.map(o => ({ key: `account:${o.key}`, label: o.label })),
-    ].sort((a, b) => b.label.length - a.label.length);
-    const operatorWords: Array<[RegExp, string]> = [
-      [/\belevado a\b|\ba la potencia\b|\bpotencia\b|\^/gi, '^'],
-      [/\bentre\b|\bdividido por\b|\bsobre\b|\//gi, '/'],
-      [/\bpor\b|\bmultiplicado por\b|\*/gi, '*'],
-      [/\bmenos\b|\brestando\b|-/gi, '-'],
-      [/\bmas\b|\bmás\b|\bsumando\b|\+/gi, '+'],
-      [/\(/g, '('],
-      [/\)/g, ')'],
-    ];
-    let text = ` ${prompt} `;
-    for (const [re, op] of operatorWords) text = text.replace(re, ` ${op} `);
-    const parts = text.split(/\s+/).filter(Boolean);
-    const tokens: string[] = [];
-    const missing: string[] = [];
-    let buffer: string[] = [];
-    const flush = () => {
-      const phrase = clean(buffer.join(' '));
-      buffer = [];
-      if (!phrase) return;
-      const asNumber = parseNullableFinancialNumber(phrase);
-      if (asNumber !== null) { tokens.push(`num:${asNumber}`); return; }
-      const hit = aliases.find(a => {
-        const label = clean(a.label);
-        return label.includes(phrase) || phrase.includes(label) || phrase.split(' ').every(w => label.includes(w));
-      });
-      if (hit) tokens.push(`ref:${hit.key}`);
-      else missing.push(phrase);
-    };
-    for (const part of parts) {
-      if (['+', '-', '*', '/', '^', '(', ')'].includes(part)) {
-        flush();
-        tokens.push(part);
-      } else {
-        buffer.push(part);
-      }
-    }
-    flush();
-    return { tokens, missing };
-  };
-
-  const handleChatBuild = () => {
-    const { tokens, missing } = parsePromptToTokens(form.chatPrompt);
-    if (missing.length > 0 || tokens.length === 0) {
-      setForm(p => ({ ...p, chatResult: `No encontré: ${missing.join(', ') || 'cuentas válidas'}. Usa nombres extraídos o selecciona manual.` }));
-      return;
-    }
-    setForm(p => ({ ...p, expressionTokens: tokens, chatResult: 'Fórmula creada. Revísala antes de guardar.' }));
-  };
+  const parsePromptToTokens = (prompt: string): { tokens: string[]; missing: string[] } => parseFormulaText(prompt, [
+    ...mappedOptions.map(o => ({ key: o.key, label: o.label.replace('Mapped: ', '') })),
+    ...options.map(o => ({ key: `account:${o.key}`, label: o.label })),
+  ], parseNullableFinancialNumber);
 
   const handleDelete = async (cov: Covenant_DB & { virtual?: boolean }) => {
     if (!confirm('¿Eliminar este covenant financiero?')) return;
@@ -705,7 +753,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
 
   const copyInsightPrompt = async () => {
     try {
-      await navigator.clipboard.writeText(latestInsightPrompt);
+      await navigator.clipboard.writeText(latestInsightPrompt + buildFavoritesPrompt(clientName, session.userName || 'el analista', favoriteInsights));
       setPromptCopied(true);
       window.setTimeout(() => setPromptCopied(false), 1800);
     } catch {
@@ -718,7 +766,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
     <div ref={panelRef} className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-black text-slate-900">Covenants Financieros</h2>
+          <h2 className="text-lg font-black text-slate-900">Indicadores Financieros</h2>
           <p className="text-slate-500 text-sm mt-0.5">{displayCovenants.length} de {allDisplayCovenants.length} covenant{allDisplayCovenants.length !== 1 ? 's' : ''} · métricas medidas contra estados financieros</p>
           {actionNotice && <p className="text-xs font-black text-emerald-700 mt-1">{actionNotice}</p>}
         </div>
@@ -777,7 +825,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
 
       {allDisplayCovenants.length > 0 && displayCovenants.length === 0 && (
         <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center">
-          <p className="text-slate-500 font-semibold">No hay covenants financieros para esta facility.</p>
+          <p className="text-slate-500 font-semibold">No hay indicadores financieros para esta facility.</p>
           <p className="text-slate-400 text-sm mt-1">Cambia el filtro o asigna un covenant existente a esta facility desde su detalle.</p>
         </div>
       )}
@@ -785,7 +833,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
       {displayCovenants.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           <div className="bg-white border border-slate-200 rounded-2xl p-4">
-            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Covenants</p>
+            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Indicadores</p>
             <p className="text-2xl font-black text-slate-900 mt-1">{displayCovenants.length}</p>
           </div>
           <div className="bg-white border border-emerald-200 rounded-2xl p-4">
@@ -848,16 +896,70 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
         </div>
       )}
 
+      {displayCovenants.length > 0 && (
+        <div className="bg-white border border-indigo-200 rounded-2xl overflow-hidden">
+          <div className="px-5 py-4 border-b border-indigo-100 bg-indigo-50/50 flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-xs font-black text-indigo-900 uppercase tracking-widest flex items-center gap-2">
+                <Pin className="w-4 h-4 text-indigo-600" />
+                Mis indicadores favoritos
+              </h3>
+              <p className="text-xs text-indigo-700 mt-1">
+                {favoriteSummary.headline}
+              </p>
+            </div>
+            <span className="rounded-full bg-white px-3 py-1 text-[10px] font-black uppercase tracking-widest text-indigo-600 border border-indigo-100">{favorites.length} marcado{favorites.length === 1 ? '' : 's'}</span>
+          </div>
+          {favoriteInsights.length === 0 ? (
+            <div className="p-5 text-xs font-semibold text-slate-500">
+              {favoriteSummary.bullets[0]} Usa el ícono <Pin className="inline w-3.5 h-3.5 align-text-bottom text-indigo-600" /> en el storyline o en el mapa de fórmulas.
+            </div>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {favoriteInsights.map(ins => {
+                const cov = covenantById.get(ins.covenantId);
+                const style = SEVERITY_STYLE[ins.severity];
+                return (
+                  <div key={ins.key} className="grid grid-cols-1 gap-3 px-5 py-4 lg:grid-cols-[1.1fr_auto_2fr] lg:items-center">
+                    <div className="flex items-start gap-2 min-w-0">
+                      {cov && <FavButton active onClick={() => toggleFav(cov)} />}
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="text-sm font-black text-slate-900">{ins.name}</p>
+                          <span className={`rounded-full border px-2 py-0.5 text-[9px] font-black uppercase tracking-widest ${style.chip}`}>{style.label}</span>
+                        </div>
+                        <p className="mt-1 text-xs text-slate-500">{ins.period}: <span className="font-mono font-black text-slate-800">{cov ? fmtCov(ins.value, cov) : '—'}</span>
+                          {ins.previousValue !== null && cov && <> <span className="text-slate-300">vs.</span> anterior <span className="font-mono font-black text-slate-700">{fmtCov(ins.previousValue, cov)}</span></>}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center"><Sparkline series={ins.series} className={style.spark} /></div>
+                    <ul className="space-y-1">
+                      {ins.lines.map((line, idx) => <li key={idx} className="text-xs leading-relaxed text-slate-600">{line}</li>)}
+                    </ul>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {favoriteInsights.length > 0 && (
+            <div className="border-t border-indigo-100 bg-indigo-50/40 px-5 py-3">
+              {favoriteSummary.bullets.map((b, i) => <p key={i} className="text-xs text-indigo-900"><span className="font-black mr-1">{i + 1}.</span>{b}</p>)}
+            </div>
+          )}
+        </div>
+      )}
+
       {storylineRows.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
           <div className="px-5 py-4 border-b border-slate-100 flex items-start justify-between gap-4">
             <div>
               <h3 className="text-xs font-black text-slate-700 uppercase tracking-widest flex items-center gap-2">
                 <BarChart3 className="w-4 h-4 text-indigo-500" />
-                Storyline de deterioro por covenant
+                Storyline de indicadores
               </h3>
               <p className="text-xs text-slate-500 mt-1">
-                Lectura del último corte contra el periodo anterior: dirección, magnitud, impacto y holgura frente al límite.
+                Tus favoritos van primero (con su tendencia); después, los movimientos más relevantes del último corte contra el anterior.
               </p>
             </div>
             <span className="rounded-full bg-slate-100 px-3 py-1 text-[10px] font-black uppercase tracking-widest text-slate-500">
@@ -873,12 +975,12 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
                 : row.delta > 0
                   ? 'text-indigo-700 bg-indigo-50 border-indigo-100'
                   : 'text-cyan-700 bg-cyan-50 border-cyan-100';
-              const impactClass = row.movement === 'deterioration'
+              const impactClass = monitored && row.movement === 'deterioration'
                 ? 'text-rose-700 bg-rose-50 border-rose-100'
                 : row.movement === 'betterment'
                   ? 'text-emerald-700 bg-emerald-50 border-emerald-100'
                   : 'text-slate-600 bg-slate-50 border-slate-200';
-              const riskTone = riskToneFromDistance(distance, row.status);
+              const riskTone = monitored ? riskToneFromDistance(distance, row.status) : 'Sin límite';
               const riskClass = riskTone === 'Breach'
                 ? 'text-rose-700 bg-rose-50 border-rose-100'
                 : riskTone === 'Presión alta'
@@ -896,7 +998,9 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
                 <div key={row.covenantId} className="grid grid-cols-1 gap-4 px-5 py-4 lg:grid-cols-[1.2fr_1fr_1.6fr] lg:items-center">
                   <div>
                     <div className="flex items-center gap-2 flex-wrap">
+                      <FavButton active={isFav(cov)} onClick={() => toggleFav(cov)} size="w-3.5 h-3.5" />
                       <p className="text-sm font-black text-slate-900">{row.covenantName}</p>
+                      {favoriteInsightById.has(row.covenantId) && <Sparkline series={favoriteInsightById.get(row.covenantId)!.series} className={SEVERITY_STYLE[favoriteInsightById.get(row.covenantId)!.severity].spark} />}
                       {row.isContractCovenant && <span className="text-[9px] font-black text-amber-700 bg-amber-50 border border-amber-100 rounded-full px-2 py-0.5">CONTRATO</span>}
                     </div>
                     <p className="mt-1 text-xs text-slate-500">
@@ -938,6 +1042,98 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
           </div>
         </div>
       )}
+
+      {mapRows.length > 0 && latestStatement && (() => {
+        const issues = mapRows.filter(r => r.explain.severity !== 'ok');
+        const errors = mapRows.filter(r => r.explain.severity === 'error').length;
+        const q = fmap.query.trim().toLowerCase();
+        const visible = mapRows
+          .filter(r => !fmap.onlyFav || isFav(r.cov))
+          .filter(r => !fmap.onlyIssues || r.explain.severity !== 'ok')
+          .filter(r => !q || `${r.cov.name} ${r.explain.text}`.toLowerCase().includes(q));
+        const money = (v: number | null) => (v === null ? 'sin dato' : Math.abs(v) >= 1e6 ? `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 1 })}M` : Math.abs(v) >= 1e3 ? `$${(v / 1e3).toLocaleString('es-MX', { maximumFractionDigits: 0 })}K` : v.toLocaleString('es-MX', { maximumFractionDigits: 2 }));
+        return (
+          <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+            <button type="button" onClick={() => setFmap(f => ({ ...f, open: !f.open }))} className="flex w-full items-start justify-between gap-4 px-5 py-4 text-left hover:bg-slate-50">
+              <div>
+                <h3 className="text-xs font-black text-slate-700 uppercase tracking-widest flex items-center gap-2">
+                  {fmap.open ? <ChevronDown className="w-4 h-4 text-indigo-500" /> : <ChevronRight className="w-4 h-4 text-indigo-500" />}
+                  Mapa de fórmulas
+                </h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Qué cuentas alimentan cada indicador en {latestStatement.period}, con su valor. Un insumo sin dato se toma como 0, por eso aquí se marca.
+                </p>
+              </div>
+              <div className="flex flex-shrink-0 items-center gap-2">
+                {errors > 0 && <span className="rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-[10px] font-black uppercase tracking-widest text-rose-700">{errors} con insumos sin dato</span>}
+                <span className="rounded-full bg-slate-100 px-3 py-1 text-[10px] font-black uppercase tracking-widest text-slate-500">{mapRows.length} indicadores{issues.length ? ` · ${issues.length} con avisos` : ''}</span>
+              </div>
+            </button>
+            {fmap.open && (
+              <>
+                <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 px-5 py-3">
+                  <input
+                    value={fmap.query}
+                    onChange={e => setFmap(f => ({ ...f, query: e.target.value }))}
+                    placeholder="Buscar indicador o cuenta…"
+                    className="min-w-[200px] flex-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 outline-none focus:ring-2 focus:ring-indigo-200"
+                  />
+                  <label className="flex items-center gap-1.5 text-[11px] font-black text-slate-600"><input type="checkbox" checked={fmap.onlyFav} onChange={e => setFmap(f => ({ ...f, onlyFav: e.target.checked }))} />Solo favoritos</label>
+                  <label className="flex items-center gap-1.5 text-[11px] font-black text-slate-600"><input type="checkbox" checked={fmap.onlyIssues} onChange={e => setFmap(f => ({ ...f, onlyIssues: e.target.checked }))} />Solo con avisos</label>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="border-y border-slate-100 bg-slate-50 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                        <th className="px-3 py-2 w-10"></th>
+                        <th className="px-3 py-2">Indicador</th>
+                        <th className="px-3 py-2">Fórmula</th>
+                        <th className="px-3 py-2">Insumos ({latestStatement.period})</th>
+                        <th className="px-3 py-2 text-right">Resultado</th>
+                        <th className="px-3 py-2">Avisos</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {visible.length === 0 && <tr><td colSpan={6} className="px-5 py-6 text-center text-xs font-semibold text-slate-400">Ningún indicador coincide con el filtro.</td></tr>}
+                      {visible.map(({ cov, explain, shown }) => {
+                        const source = isContractCovenant(cov) ? 'Contrato' : cov.isCustom ? 'Propio' : 'Estándar';
+                        return (
+                          <tr key={cov.id} className={explain.severity === 'error' ? 'bg-rose-50/40' : ''}>
+                            <td className="px-3 py-2 align-top"><FavButton active={isFav(cov)} onClick={() => toggleFav(cov)} size="w-3.5 h-3.5" /></td>
+                            <td className="px-3 py-2 align-top">
+                              <p className="font-black text-slate-900">{cov.name}</p>
+                              <span className={`mt-1 inline-block rounded-full border px-2 py-0.5 text-[9px] font-black uppercase tracking-widest ${source === 'Contrato' ? 'border-amber-100 bg-amber-50 text-amber-700' : source === 'Propio' ? 'border-violet-100 bg-violet-50 text-violet-700' : 'border-slate-200 bg-slate-50 text-slate-500'}`}>{source}</span>
+                            </td>
+                            <td className="px-3 py-2 align-top font-mono text-[11px] text-slate-700">{explain.text}</td>
+                            <td className="px-3 py-2 align-top">
+                              {explain.inputs.length === 0
+                                ? <span className="text-[11px] font-semibold text-slate-400">{explain.kind === 'texto libre' ? 'Interpretada por palabras clave' : '—'}</span>
+                                : <div className="flex flex-wrap gap-1">{explain.inputs.map(input => (
+                                  <span key={input.ref} title={`${input.kind}: ${input.ref}`} className={`rounded-md border px-1.5 py-0.5 text-[10px] font-bold ${input.missing ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-slate-200 bg-slate-50 text-slate-700'}`}>
+                                    {input.label}: <span className="font-mono">{input.missing ? 'sin dato → 0' : money(input.value)}</span>
+                                  </span>
+                                ))}</div>}
+                            </td>
+                            <td className="px-3 py-2 align-top text-right font-mono font-black text-slate-900 whitespace-nowrap">
+                              {shown ? fmtCov(shown.value, cov) : 'N/D'}
+                              {shown?.annualized && <span className="block text-[9px] font-black uppercase tracking-widest text-indigo-500">anualizado</span>}
+                            </td>
+                            <td className="px-3 py-2 align-top">
+                              {explain.notes.length === 0
+                                ? <span className="text-[11px] font-semibold text-emerald-600">Completo</span>
+                                : <ul className="space-y-1">{explain.notes.map((n, i) => <li key={i} className={`text-[11px] leading-snug ${explain.severity === 'error' && i === 0 ? 'font-bold text-rose-700' : 'text-slate-500'}`}>{n}</li>)}</ul>}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </div>
+        );
+      })()}
 
       {covenantRows.length > 0 && orderedStatements.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
@@ -1035,11 +1231,11 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
                       })()}
                     </td>
                     {orderedStatements.slice(-6).map(stmt => {
-                      const result = evaluateCovenantForStatement(cov, stmt);
+                      const result = evaluateCovenantForStatement(cov, stmt, orderedStatements);
                       return (
                         <td key={stmt.id} className="px-4 py-2 text-center">
                           <div className={`inline-flex min-w-20 flex-col items-center rounded-lg border px-2.5 py-1.5 ${
-                            result.value === null ? 'bg-slate-50 text-slate-400 border-slate-200' : periodStatusClass(result.status)
+                            result.value === null || !monitored ? 'bg-slate-50 text-slate-400 border-slate-200' : periodStatusClass(result.status)
                           }`}>
                             <span className="font-mono font-black">{fmtCov(result.value, cov)}</span>
                             <span className="text-[9px] font-black uppercase opacity-80">{result.value === null ? '0' : result.status}</span>
@@ -1065,116 +1261,17 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
       )}
 
       {showForm && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[92vh] overflow-y-auto">
-            <div className="flex items-center justify-between p-6 border-b border-slate-100">
-              <h3 className="font-black text-slate-900">Nuevo Covenant Financiero</h3>
-              <button onClick={() => setShowForm(false)} className="text-slate-400 hover:text-slate-700"><X className="w-5 h-5" /></button>
-            </div>
-            <form onSubmit={handleSave} className="p-6 space-y-4">
-              <div>
-                <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Nombre *</label>
-                <input className={inputClass} value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} placeholder="ej: Razón de Apalancamiento" required />
-              </div>
-              {transactions.length > 0 && (
-                <div>
-                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Facility / Transacción</label>
-                  <select className={inputClass} value={form.transactionId} onChange={e => setForm(p => ({ ...p, transactionId: e.target.value }))}>
-                    <option value="">General del cliente</option>
-                    {transactions.map(tx => <option key={tx.id} value={tx.id}>{tx.name}</option>)}
-                  </select>
-                </div>
-              )}
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Fórmula</label>
-                  <input className={inputClass} value={form.formula} onChange={e => setForm(p => ({ ...p, formula: e.target.value }))} placeholder="ej: Deuda/EBITDA" />
-                </div>
-                <div>
-                  <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Umbral</label>
-                  <input className={inputClass} value={form.threshold} onChange={e => setForm(p => ({ ...p, threshold: e.target.value }))} placeholder="ej: 4.0" />
-                </div>
-              </div>
-              {options.length > 0 && (
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="text-xs font-black text-slate-700 uppercase tracking-widest">Formula builder</p>
-                    <div className="flex items-center gap-2">
-                      <button type="button" onClick={() => setForm(p => ({ ...p, expressionTokens: p.expressionTokens.slice(0, -1) }))} className="h-8 rounded-md border border-slate-300 bg-white px-3 text-xs font-black text-slate-600 hover:bg-slate-50">Borrar</button>
-                      <button type="button" onClick={() => setForm(p => ({ ...p, expressionTokens: [] }))} className="h-8 rounded-md border border-rose-200 bg-white px-3 text-xs font-black text-rose-600 hover:bg-rose-50">Limpiar</button>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-[40px_1fr] items-stretch overflow-hidden rounded-lg border border-slate-300 bg-white">
-                    <div className="flex items-center justify-center border-r border-slate-300 bg-slate-100 text-xs font-black text-slate-500">fx</div>
-                    <div className={formulaBarClass}>
-                      {form.expressionTokens.length === 0 ? <span className="text-slate-400">Selecciona cuentas y operadores para construir la fórmula</span> : form.expressionTokens.map(tokenLabel).join(' ')}
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_220px]">
-                    <div>
-                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1.5">Cuenta o métrica</label>
-                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto]">
-                        <select className={inputClass} value={form.selectedRef} onChange={e => setForm(p => ({ ...p, selectedRef: e.target.value }))}>
-                          <option value="">Selecciona una referencia</option>
-                          {mappedOptions.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
-                          {options.map(o => <option key={o.key} value={`account:${o.key}`}>{o.label}</option>)}
-                        </select>
-                        <button type="button" onClick={() => form.selectedRef && setForm(p => ({ ...p, expressionTokens: [...p.expressionTokens, `ref:${p.selectedRef}`], selectedRef: '' }))} className="rounded-xl bg-slate-900 px-4 py-2.5 text-xs font-black text-white hover:bg-slate-800">Insertar</button>
-                      </div>
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1.5">Número</label>
-                      <div className="grid grid-cols-[1fr_auto] gap-2">
-                        <input value={form.numberValue} onChange={e => setForm(p => ({ ...p, numberValue: e.target.value }))} placeholder="0.00" className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-mono text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-                        <button type="button" onClick={() => {
-                          const value = normalizeFinancialNumberString(form.numberValue);
-                          if (value) setForm(p => ({ ...p, expressionTokens: [...p.expressionTokens, `num:${value}`], numberValue: '' }));
-                        }} className="rounded-xl border border-slate-300 bg-white px-3 text-xs font-black text-slate-700 hover:bg-slate-50">Insertar</button>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {(['+', '-', '*', '/', '^', '(', ')'] as const).map(op => (
-                      <button key={op} type="button" onClick={() => setForm(p => ({ ...p, expressionTokens: [...p.expressionTokens, op] }))} className={formulaToolButtonClass}>{op}</button>
-                    ))}
-                  </div>
-                  <div className="border-t border-slate-200 pt-3">
-                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1.5">Convertir texto a fórmula</label>
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto]">
-                      <textarea
-                        value={form.chatPrompt}
-                        onChange={e => setForm(p => ({ ...p, chatPrompt: e.target.value }))}
-                        rows={2}
-                        placeholder="Ej: deuda total entre ebitda"
-                        className={inputClass}
-                      />
-                      <button type="button" onClick={handleChatBuild} className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-black text-slate-700 hover:bg-slate-50">Convertir</button>
-                    </div>
-                    {form.chatResult && <p className="mt-2 text-xs font-bold text-slate-500">{form.chatResult}</p>}
-                  </div>
-                </div>
-              )}
-              <div>
-                <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Operador</label>
-                <select className={inputClass} value={form.operator} onChange={e => setForm(p => ({ ...p, operator: e.target.value as any }))}>
-                  <option value="lte">≤ menor o igual</option>
-                  <option value="gte">≥ mayor o igual</option>
-                  <option value="lt">&lt; menor que</option>
-                  <option value="gt">&gt; mayor que</option>
-                  <option value="none">N/A</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-xs font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Descripción</label>
-                <textarea className={inputClass} value={form.description} onChange={e => setForm(p => ({ ...p, description: e.target.value }))} rows={3} placeholder="Descripción del covenant según contrato" />
-              </div>
-              <div className="flex gap-3 pt-2">
-                <button type="button" onClick={() => setShowForm(false)} className="flex-1 py-2.5 rounded-xl border border-slate-200 text-slate-700 text-sm font-bold hover:bg-slate-50">Cancelar</button>
-                <button type="submit" disabled={saving} className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-black disabled:opacity-60">{saving ? 'Guardando...' : 'Guardar'}</button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <CovenantBuilder
+          statements={orderedStatements}
+          accountOpts={options}
+          mappedOpts={mappedOptions}
+          transactions={transactions}
+          monitored={monitored}
+          initialTransactionId={form.transactionId}
+          saving={saving}
+          onSave={handleBuilderSave}
+          onClose={() => setShowForm(false)}
+        />
       )}
 
       {globalSuggestions.length > 0 && (
@@ -1221,7 +1318,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
       {displayCovenants.length === 0 && (
         <div className="bg-white border border-slate-200 rounded-2xl p-12 text-center">
           <TrendingUp className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-          <p className="text-slate-500 font-semibold">Sin covenants financieros</p>
+          <p className="text-slate-500 font-semibold">Sin indicadores financieros</p>
           <p className="text-slate-400 text-sm mt-1">Agrega métricas definidas en el contrato para monitorearlas contra los estados financieros</p>
         </div>
       )}
@@ -1494,7 +1591,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
                       >
                         Automático
                       </button>
-                      {(['cumple', 'alerta', 'incumple'] as const).map(s => (
+                      {(['cumple', 'alerta', 'incumple'] as const).filter(opt => monitored || opt === 'cumple').map(s => (
                         <button
                           key={s}
                           onClick={() => setManualStatus(cov, s)}

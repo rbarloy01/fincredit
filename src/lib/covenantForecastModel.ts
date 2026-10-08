@@ -1,5 +1,5 @@
 import type { Covenant_DB, FinancialStatement_DB } from '../db/index';
-import { covenantPerformanceHistory, resolveCovenantThreshold } from './financialMetrics';
+import { covenantDirection, covenantPerformanceHistory, resolveCovenantThreshold } from './financialMetrics';
 
 export type CovenantTrend = 'mejorando' | 'deteriorando' | 'estable';
 export type CovenantForecastConfidence = 'baja' | 'media' | 'alta';
@@ -63,7 +63,7 @@ export function forecastCovenant(cov: Covenant_DB, statements: FinancialStatemen
   const lastValue = points[points.length - 1].y;
 
   // Compliant direction: +1 means "higher is better" (gte/gt), -1 means "lower is better" (lte/lt).
-  const directionSign = cov.operator === 'gte' || cov.operator === 'gt' ? 1 : -1;
+  const directionSign = covenantDirection(cov) === 'higher' ? 1 : -1;
   const sigma = residualStd > 0 ? residualStd : Math.max(Math.abs(predictedNextValue) * 0.05, 0.001);
   const z = (directionSign * (predictedNextValue - threshold)) / sigma;
   const rawBreachProbability = Math.min(1, Math.max(0, 1 - normalCdf(z)));

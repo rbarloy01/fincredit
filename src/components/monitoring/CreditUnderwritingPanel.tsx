@@ -1,10 +1,11 @@
 import React from 'react';
+import { isClientMonitored } from '../../lib/clientStatus';
 import { Client, Covenant_DB, FinancialStatement_DB, LoanTape_DB, Transaction } from '../../db/index';
 import { AlertTriangle, ArrowDownRight, ArrowUpRight, Brain, CheckCircle, Circle, FileClock, Gauge, Landmark, Lock, Minus, ShieldCheck, FileSpreadsheet, Scale, TrendingUp } from 'lucide-react';
 import { evaluateCovenantAuto, evaluateCovenantForStatement, isPercentCovenant, resolveCovenantThreshold, standardRatios } from '../../lib/financialMetrics';
 import { predictCreditRisk, CREDIT_RISK_DISCLAIMER } from '../../lib/creditRiskModel';
 import { forecastCovenants } from '../../lib/covenantForecastModel';
-import { loanTapePeriodDate, sortLoanTapesByPeriod } from '../../lib/loanTapeAnalytics';
+import { loanTapePeriodDate, sortLoanTapesByPeriod, storedAnalysisFor } from '../../lib/loanTapeAnalytics';
 
 interface Props {
   client: Client;
@@ -49,6 +50,7 @@ function dateLabel(value?: string) {
 }
 
 function statusClass(status: string) {
+  if (status === 'pausado') return 'bg-slate-50 text-slate-500 border-slate-200';
   if (status === 'incumple') return 'bg-rose-50 text-rose-800 border-rose-200';
   if (status === 'alerta') return 'bg-amber-50 text-amber-800 border-amber-200';
   return 'bg-emerald-50 text-emerald-800 border-emerald-200';
@@ -67,6 +69,7 @@ function riskBandLabel(band: 'low' | 'medium' | 'high') {
 }
 
 function strongStatusClass(status: string) {
+  if (status === 'pausado') return 'bg-slate-200 text-slate-600 border-slate-300';
   if (status === 'incumple') return 'bg-rose-600 text-white border-rose-700';
   if (status === 'alerta') return 'bg-amber-400 text-amber-950 border-amber-500';
   return 'bg-emerald-600 text-white border-emerald-700';
@@ -121,7 +124,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
   const sortedTapes = sortLoanTapesByPeriod<LoanTape_DB>(loanTapes);
   const latestTape = sortedTapes[0];
   const latestTapePeriod = latestTape ? loanTapePeriodDate(latestTape) : '';
-  const tapeAnalysis = latestTape?.extractedData?._analysis || null;
+  const tapeAnalysis = storedAnalysisFor(latestTape);
   const tapeQuality = tapeAnalysis?.portfolioQuality || {};
   const tapeConcentrations = tapeAnalysis?.concentrations || {};
   const tapeValidation = tapeAnalysis?.validation || [];
@@ -133,16 +136,18 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
   const maxClient = tapeConcentrations.by_client?.[0];
   const tapeAlertCount = tapeValidation.length
     + Object.values(tapeAnomalies).reduce((sum: number, rows: any) => sum + (Array.isArray(rows) ? rows.length : 0), 0);
-  const latestRatios = latestStatement ? standardRatios(latestStatement) : [];
-  const previousRatios = previousStatement ? standardRatios(previousStatement) : [];
+  const latestRatios = latestStatement ? standardRatios(latestStatement, sortedStatements) : [];
+  const previousRatios = previousStatement ? standardRatios(previousStatement, sortedStatements) : [];
   const ratioRows = latestRatios.map(ratio => {
     const previous = previousRatios.find(item => item.key === ratio.key)?.value ?? null;
     const delta = ratio.value !== null && previous !== null ? ratio.value - previous : null;
     return { ...ratio, previous, delta };
   });
-  const covenantResults = covenants.filter(c => c.type === 'financial').map(c => ({ covenant: c, ...evaluateCovenantAuto(c, sortedStatements) }));
-  const breaches = covenantResults.filter(r => r.status === 'incumple');
-  const warnings = covenantResults.filter(r => r.status === 'alerta');
+  const covenantResults = covenants.filter(c => c.type === 'financial').map(c => { const r = evaluateCovenantAuto(c, sortedStatements); return { covenant: c, ...r, status: (isClientMonitored(client) ? r.status : 'pausado') as typeof r.status }; });
+  const monitored = isClientMonitored(client);
+  // Dormant / cerrado: sin incumplimientos ni alertas.
+  const breaches = monitored ? covenantResults.filter(r => r.status === 'incumple') : [];
+  const warnings = monitored ? covenantResults.filter(r => r.status === 'alerta') : [];
   const priorityCovenants = covenantResults
     .sort((a, b) => {
       const rank: Record<string, number> = { incumple: 0, alerta: 1, cumple: 2 };
@@ -166,7 +171,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
     conditionChanges: tapeAnomalies.condition_changes?.length || 0,
   };
   const financialCompleteness = latestRatios.length === 0 ? 0 : Math.round((latestRatios.filter(r => r.value !== null).length / latestRatios.length) * 100);
-  const contractChecks = [
+  const contractChecksRaw = [
     {
       label: 'Contrato / facility',
       value: primaryTransaction?.name || client.contractName || 'Pendiente',
@@ -188,7 +193,8 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
       status: primaryTransaction?.maturityAt ? (daysSince(primaryTransaction.maturityAt) > 0 ? 'incumple' : 'cumple') : 'alerta',
     },
   ];
-  const alerts = [
+  const contractChecks = monitored ? contractChecksRaw : contractChecksRaw.map(c => ({ ...c, status: 'pausado' }));
+  const alertsRaw = [
     ...breaches.map(r => ({ severity: 'critical', title: `Covenant incumplido: ${r.covenant.name}`, detail: r.value === null ? 'Sin valor calculable' : `Valor actual ${r.value.toLocaleString('es-MX', { maximumFractionDigits: 4 })}` })),
     ...(daysSince(latestStatement?.periodDate) > 45 ? [{ severity: 'warning', title: 'Estados financieros vencidos', detail: latestStatement ? `Último periodo hace ${daysSince(latestStatement.periodDate)} días` : 'Sin estados financieros cargados' }] : []),
     ...(loanTapes.length === 0 ? [{ severity: 'warning', title: 'Loan tape faltante', detail: 'No hay loan tape cargada para monitoreo' }] : []),
@@ -199,6 +205,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
     ...(highValidationIssues > 0 ? [{ severity: 'warning', title: 'Calidad de datos del tape', detail: `${highValidationIssues} validaciones críticas en el archivo` }] : []),
     ...(transactions.length === 0 ? [{ severity: 'warning', title: 'Contrato/facility faltante', detail: 'No hay transacción registrada' }] : []),
   ];
+  const alerts = monitored ? alertsRaw : [];
   const readinessChecks = [
     { done: !!client.name, label: 'Cliente registrado' },
     { done: transactions.length > 0, label: 'Contrato/facility cargado' },
@@ -467,7 +474,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
         <div className="2xl:col-span-2 bg-white border border-slate-200 rounded-2xl p-6">
           <div className="flex items-center justify-between gap-3 mb-5">
             <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest flex items-center gap-2">
-              <Scale className="w-4 h-4 text-indigo-600" />Covenants financieros
+              <Scale className="w-4 h-4 text-indigo-600" />Indicadores financieros
             </h3>
             <span className="text-xs font-black text-slate-500">{testedCovenants}/{covenantResults.length}</span>
           </div>
@@ -486,7 +493,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
             ))}
             {covenantResults.length === 0 && (
               <p className="text-sm text-slate-400 font-bold bg-slate-50 border border-slate-100 rounded-xl px-4 py-5 text-center">
-                Sin covenants financieros configurados.
+                Sin indicadores financieros configurados.
               </p>
             )}
           </div>
@@ -539,7 +546,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
                         {latestHeadroom === null ? 'N/A' : covenantValueLabel(latestHeadroom, row.covenant)}
                       </td>
                       {covenantStatementWindow.map(stmt => {
-                        const result = evaluateCovenantForStatement(row.covenant, stmt);
+                        const result = evaluateCovenantForStatement(row.covenant, stmt, statements);
                         return (
                           <td key={stmt.id} className="px-3 py-3 text-center">
                             <div className={`inline-flex min-w-20 flex-col items-center rounded-lg border px-2.5 py-1.5 ${result.value === null ? 'bg-slate-50 text-slate-400 border-slate-200' : strongStatusClass(result.status)}`}>

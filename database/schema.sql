@@ -47,6 +47,9 @@ CREATE TABLE IF NOT EXISTS clients (
   last_period           TEXT DEFAULT '',
   logo_left             TEXT,
   logo_right            TEXT,
+  eligibility_criteria  JSONB DEFAULT '[]',
+  fiscal_buro_status    JSONB DEFAULT '{}',
+  operations_notes      TEXT DEFAULT '',
   created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

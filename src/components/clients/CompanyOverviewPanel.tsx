@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Save, Sparkles } from 'lucide-react';
+import { Save, FileText } from 'lucide-react';
 import { Client, Covenant_DB, CustomField, FinancialStatement_DB, Transaction, db } from '../../db/index';
-import { AISettings, generateOpinion } from '../../services/ai';
+import { AISettings } from '../../services/ai';
 import { evaluateCovenantAuto, standardRatios } from '../../lib/financialMetrics';
 import WorkingOverlay from '../common/WorkingOverlay';
 
@@ -49,14 +49,13 @@ const CompanyOverviewPanel: React.FC<Props> = ({ client, transactions, statement
   const key = `finmonitor_company_overview_${client.id}`;
   const [text, setText] = useState('');
   const [saving, setSaving] = useState(false);
-  const [generating, setGenerating] = useState(false);
 
   useEffect(() => {
     db.getClientSetting<string>(client.id, key, '').then(setText);
   }, [client.id, key]);
 
   const latest = [...statements].sort((a, b) => a.periodDate.localeCompare(b.periodDate)).at(-1);
-  const ratios = latest ? standardRatios(latest) : [];
+  const ratios = latest ? standardRatios(latest, statements) : [];
   const location = getField(customFields, [/ubic/i, /local/i, /geograf/i, /estado/i, /ciudad/i, /pais/i, /país/i]) || 'Sin dato';
   const start = getField(customFields, [/inicio.*oper/i, /fecha.*inicio/i, /start/i, /fundaci/i]) || 'Sin dato';
   const financialCovenants = covenants.filter(c => c.type === 'financial');
@@ -82,28 +81,11 @@ const CompanyOverviewPanel: React.FC<Props> = ({ client, transactions, statement
       return `${c.name}: ${r.value === null ? 'N/A' : r.value.toLocaleString('es-MX', { maximumFractionDigits: 4 })}`;
     }).join('; ');
     const ratioSummary = ratios.slice(0, 6).map(r => `${r.label}: ${r.value === null ? 'N/A' : r.value.toLocaleString('es-MX', { maximumFractionDigits: 4 })}`).join('; ');
-    return `${client.name} participa en el sector ${client.industry || 'sin industria capturada'}, con tipo de crédito ${client.creditType?.join(', ') || 'sin dato'} y exposición total de ${client.totalCreditValue.toLocaleString('es-MX')} ${client.currency}. Ubicación geográfica: ${location}. Inicio de operación: ${start}. Analista responsable: ${client.analystName || 'sin dato'}.\n\nCuenta con ${transactions.length} facility/facilities registradas por ${fmtCurrency(totalTransactionAmount, client.currency)} y ${financialCovenants.length} covenant(s) financiero(s). Documentos pendientes o no cumplidos: ${pendingDocs.length}.\n\nCon base en la información financiera cargada${latest ? ` al periodo ${latest.period}` : ''}, los indicadores principales observados son: ${ratioSummary || 'sin razones calculables todavía'}.\n\nCovenants financieros monitoreados: ${covenantSummary || 'sin covenants financieros configurados'}. Este apartado puede ajustarse manualmente para reflejar historia operativa, mercado, administración, fortalezas, riesgos y consideraciones específicas del crédito.`;
+    return `${client.name} participa en el sector ${client.industry || 'sin industria capturada'}, con tipo de crédito ${client.creditType?.join(', ') || 'sin dato'} y exposición total de ${client.totalCreditValue.toLocaleString('es-MX')} ${client.currency}. Ubicación geográfica: ${location}. Inicio de operación: ${start}. Analista responsable: ${client.analystName || 'sin dato'}.\n\nCuenta con ${transactions.length} facility/facilities registradas por ${fmtCurrency(totalTransactionAmount, client.currency)} y ${financialCovenants.length} covenant(s) financiero(s). Documentos pendientes o no cumplidos: ${pendingDocs.length}.\n\nCon base en la información financiera cargada${latest ? ` al periodo ${latest.period}` : ''}, los indicadores principales observados son: ${ratioSummary || 'sin razones calculables todavía'}.\n\nIndicadores financieros monitoreados: ${covenantSummary || 'sin indicadores financieros configurados'}. Este apartado puede ajustarse manualmente para reflejar historia operativa, mercado, administración, fortalezas, riesgos y consideraciones específicas del crédito.`;
   };
 
-  const generate = async () => {
-    setGenerating(true);
-    try {
-      if (latest) {
-        const covData = covenants.filter(c => c.type === 'financial').map(c => {
-          const r = evaluateCovenantAuto(c, statements);
-          return { name: c.name, threshold: c.threshold, value: r.value?.toString(), status: r.status };
-        });
-        const aiText = await generateOpinion(aiSettings, client.name, latest.period, covData, `Ubicación: ${location}. Inicio operación: ${start}. Sector: ${client.industry}. Tipo crédito: ${client.creditType?.join(', ')}.`);
-        setText(aiText);
-      } else {
-        setText(localDraft());
-      }
-    } catch {
-      setText(localDraft());
-    } finally {
-      setGenerating(false);
-    }
-  };
+  // Borrador determinístico con los datos ya calculados (sin IA): la narrativa la ajusta el analista.
+  const generate = () => setText(localDraft());
 
   const save = async () => {
     setSaving(true);
@@ -116,7 +98,7 @@ const CompanyOverviewPanel: React.FC<Props> = ({ client, transactions, statement
 
   return (
     <div className="space-y-6">
-      <WorkingOverlay show={saving || generating} title={generating ? 'Generando overview' : 'Guardando overview'} />
+      <WorkingOverlay show={saving} title="Guardando overview" />
       <div className="bg-white border border-slate-200 rounded-2xl p-6">
         <div className="flex items-start justify-between gap-4 mb-5">
           <div>
@@ -124,10 +106,10 @@ const CompanyOverviewPanel: React.FC<Props> = ({ client, transactions, statement
             <p className="text-sm text-slate-500 mt-1">Perfil narrativo editable para reportes, análisis preliminar y contexto de benchmarking.</p>
           </div>
           <div className="flex gap-2">
-            <button onClick={generate} disabled={generating || saving} className="flex items-center gap-2 bg-slate-900 text-white px-4 py-2.5 rounded-xl text-sm font-black disabled:opacity-50">
-              <Sparkles className="w-4 h-4" /> Generar
+            <button onClick={generate} disabled={saving} className="flex items-center gap-2 bg-slate-900 text-white px-4 py-2.5 rounded-xl text-sm font-black disabled:opacity-50">
+              <FileText className="w-4 h-4" /> Borrador con datos
             </button>
-            <button onClick={save} disabled={generating || saving} className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2.5 rounded-xl text-sm font-black disabled:opacity-50">
+            <button onClick={save} disabled={saving} className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2.5 rounded-xl text-sm font-black disabled:opacity-50">
               <Save className="w-4 h-4" /> Guardar
             </button>
           </div>
@@ -155,7 +137,7 @@ const CompanyOverviewPanel: React.FC<Props> = ({ client, transactions, statement
           <OverviewField label="Frecuencia mora 12m" value={fmtNumber(client.defaultFrequency12m)} />
           <OverviewField label="Saldo vencido actual" value={fmtCurrency(client.currentDue, client.currency)} />
           <OverviewField label="Docs pendientes" value={pendingDocs.length} />
-          <OverviewField label="Covenants financieros" value={financialCovenants.length} />
+          <OverviewField label="Indicadores financieros" value={financialCovenants.length} />
           <OverviewField label="Hacer / No Hacer" value={`${affirmativeCovenants.length} / ${negativeCovenants.length}`} />
         </div>
 

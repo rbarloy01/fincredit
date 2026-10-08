@@ -68,7 +68,7 @@ const PROVIDERS: { id: AIProvider; label: string; placeholder: string; color: st
   { id: 'bytez', label: 'Bytez', placeholder: 'bytez...', color: 'bg-amber-100 text-amber-800 border-amber-200' },
   { id: 'nvidia_nim', label: 'NVIDIA NIM', placeholder: 'nvapi-...', color: 'bg-lime-100 text-lime-800 border-lime-200' },
 ];
-const TASKS: AITask[] = ['financials', 'contracts', 'loan_tape', 'liabilities', 'opinion', 'account_consolidation'];
+const TASKS: AITask[] = ['financials', 'contracts', 'loan_tape', 'liabilities', 'opinion', 'account_consolidation', 'assistant'];
 
 type HealthStatus = 'pass' | 'fail';
 

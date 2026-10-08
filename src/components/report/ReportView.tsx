@@ -1,4 +1,6 @@
 import React, { useRef, useState, useEffect, useMemo } from 'react';
+import { isClientMonitored } from '../../lib/clientStatus';
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Cell, ReferenceLine } from 'recharts';
 import { db, Client, FinancialStatement_DB, Covenant_DB, LoanTape_DB, CustomField, Transaction, InstitutionalLiability_DB } from '../../db/index';
 import { StructuredLoanTapeAnalysis } from '../../services/ai';
 import { Download, ChevronDown, ChevronRight, MessageSquare, FileSpreadsheet, Upload, Trash2, ImageDown, ArrowUp, ArrowDown, Save, LayoutGrid } from 'lucide-react';
@@ -18,7 +20,7 @@ import {
   formatPercent as formatLiabilityPercent,
   LIABILITY_TYPE_LABELS,
 } from '../../lib/institutionalLiabilitiesAnalytics';
-import { sortLoanTapesByPeriod } from '../../lib/loanTapeAnalytics';
+import { sortLoanTapesByPeriod, storedAnalysisFor } from '../../lib/loanTapeAnalytics';
 
 interface Props {
   client: Client;
@@ -258,7 +260,7 @@ interface ReportTemplate {
 const DEFAULT_BLOCKS: ReportBlockConfig[] = [
   { id: 'payment', label: 'Cobranza', visible: true, order: 10 },
   { id: 'aforo', label: 'Aforo', visible: true, order: 20 },
-  { id: 'financialCovenants', label: 'Covenants Financieros', visible: true, order: 30 },
+  { id: 'financialCovenants', label: 'Indicadores Financieros', visible: true, order: 30 },
   { id: 'institutionalLiabilities', label: 'Pasivos Institucionales', visible: true, order: 40 },
   { id: 'loanTape', label: 'Loan Tape', visible: true, order: 50 },
   { id: 'documentation', label: 'Documentación', visible: true, order: 60 },
@@ -323,6 +325,11 @@ const normalizeReportTemplates = (saved: unknown): ReportTemplate[] => {
 const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loanTapes, institutionalLiabilities = [], transactions = [], customFields = [], onCustomFieldsChange, onClientUpdate, onClose }) => {
   const page1Ref = useRef<HTMLDivElement>(null);
   const condRef = useRef<HTMLDivElement>(null);
+  const carteraRef = useRef<HTMLDivElement>(null);
+  const elegibilidadRef = useRef<HTMLDivElement>(null);
+  const lineaVidaRef = useRef<HTMLDivElement>(null);
+  const fiscalBuroRef = useRef<HTMLDivElement>(null);
+  const benchmarkRef = useRef<HTMLDivElement>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [editOpen, setEditOpen] = useState(true);
   const [reportMode, setReportMode] = useState<'inv' | 'interno'>('inv');
@@ -357,7 +364,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
   );
   const latest = sortedStatements.length > 0 ? sortedStatements[sortedStatements.length - 1] : null;
   const latestTape = useMemo(() => sortLoanTapesByPeriod<LoanTape_DB>(loanTapes)[0] || null, [loanTapes]);
-  const tapeAnalysis: StructuredLoanTapeAnalysis | null = latestTape?.extractedData?._analysis || null;
+  const tapeAnalysis: StructuredLoanTapeAnalysis | null = useMemo(() => storedAnalysisFor(latestTape), [latestTape]);
   const liabilitiesSummary = useMemo(() => buildLiabilitiesSummary(institutionalLiabilities), [institutionalLiabilities]);
   const liabilityInsights = useMemo(() => buildLiabilitiesInsights(institutionalLiabilities), [institutionalLiabilities]);
   const liabilityConcentration = useMemo(() => buildLenderConcentration(institutionalLiabilities).slice(0, 5), [institutionalLiabilities]);
@@ -750,6 +757,11 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
       if (condRef.current && (hacerCovenants.length > 0 || noHacerCovenants.length > 0)) {
         await renderPageToPDF(condRef.current, pdf, html2canvas, true);
       }
+      if (carteraRef.current) await renderPageToPDF(carteraRef.current, pdf, html2canvas, true);
+      if (elegibilidadRef.current) await renderPageToPDF(elegibilidadRef.current, pdf, html2canvas, true);
+      if (lineaVidaRef.current) await renderPageToPDF(lineaVidaRef.current, pdf, html2canvas, true);
+      if (fiscalBuroRef.current) await renderPageToPDF(fiscalBuroRef.current, pdf, html2canvas, true);
+      if (benchmarkRef.current) await renderPageToPDF(benchmarkRef.current, pdf, html2canvas, true);
       const now = new Date();
       const ds = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
       pdf.save(`${ds} - Reporte Monitoreo - ${client.name}.pdf`);
@@ -1023,7 +1035,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
           ]);
         });
       });
-      XLSX.utils.book_append_sheet(wb, sheetFromRows(rows), 'Covenants');
+      XLSX.utils.book_append_sheet(wb, sheetFromRows(rows), 'Indicadores');
 
       const xlCol = (n: number) => {
         let s = '';
@@ -1379,7 +1391,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
           <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-2">Incluir:</span>
           {[
             { label: 'Aforo', id: 'aforo' as ReportBlockId },
-            { label: 'Covenants', id: 'financialCovenants' as ReportBlockId },
+            { label: 'Indicadores', id: 'financialCovenants' as ReportBlockId },
             { label: 'Pasivos', id: 'institutionalLiabilities' as ReportBlockId },
             { label: 'Doc.', id: 'documentation' as ReportBlockId },
             { label: 'Loan Tape', id: 'loanTape' as ReportBlockId },
@@ -1538,7 +1550,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
                       <td className="px-3 py-2">
                         <select value={pay.principalStatus} onChange={e => updatePaymentPeriod(month, { principalStatus: e.target.value as any })} className="bg-white border border-slate-200 rounded-lg px-2 py-1">
                           <option value="paid">Cumple</option>
-                          <option value="unpaid">Incumple</option>
+                          {isClientMonitored(client) && <option value="unpaid">Incumple</option>}
                           <option value="none">N/A</option>
                         </select>
                       </td>
@@ -1548,7 +1560,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
                       <td className="px-3 py-2">
                         <select value={pay.interestStatus} onChange={e => updatePaymentPeriod(month, { interestStatus: e.target.value as any })} className="bg-white border border-slate-200 rounded-lg px-2 py-1">
                           <option value="paid">Cumple</option>
-                          <option value="unpaid">Incumple</option>
+                          {isClientMonitored(client) && <option value="unpaid">Incumple</option>}
                           <option value="none">N/A</option>
                         </select>
                       </td>
@@ -1562,7 +1574,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
                         <select value={aforo.status} onChange={e => updateAforoPeriod(month, { status: e.target.value as any })} className="bg-white border border-slate-200 rounded-lg px-2 py-1">
                           <option value="good">Cumple</option>
                           <option value="warning">Alerta</option>
-                          <option value="bad">Incumple</option>
+                          {isClientMonitored(client) && <option value="bad">Incumple</option>}
                         </select>
                       </td>
                     </tr>
@@ -1613,7 +1625,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
                   />
                   {tapeAnalysis?.findings?.filter(f => f.severity === 'high').length > 0 && (
                     <div className="mt-2 bg-rose-50 border border-rose-200 rounded-lg px-4 py-2.5">
-                      <p className="text-xs font-bold text-rose-700 mb-1">Hallazgos críticos de la IA a considerar:</p>
+                      <p className="text-xs font-bold text-rose-700 mb-1">Hallazgos críticos a considerar:</p>
                       <ul className="space-y-0.5">
                         {tapeAnalysis.findings.filter(f => f.severity === 'high').map((f, i) => (
                           <li key={i} className="text-xs text-rose-600">· {f.title}: {f.detail}</li>
@@ -1823,7 +1835,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
         {/* Financial covenants */}
         {financialCovenants.length > 0 && blockVisible('financialCovenants') && (
           <div style={{ marginBottom: 24, width: '100%', ...blockStyle('financialCovenants') }}>
-            <h3 style={{ fontSize: 12, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.1em', color: '#0066E6', margin: '0 0 16px 0' }}>Covenants Financieros</h3>
+            <h3 style={{ fontSize: 12, fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.1em', color: '#0066E6', margin: '0 0 16px 0' }}>Indicadores Financieros</h3>
             {covenantFrequencyGroups.map(group => (
               <div key={group.frequency} style={{ marginBottom: 12 }}>
                 {covenantFrequencyGroups.length > 1 && (
@@ -2124,6 +2136,437 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
           <ReportFooter />
         </div>
       )}
+
+      {/* ── PAGE 3: Cartera — Concentraciones y Análisis ── */}
+      <div
+        ref={carteraRef}
+        className="pdf-page"
+        style={{ width: 794, backgroundColor: '#f8fafc', padding: '36px 44px', fontFamily: "'Inter', 'Helvetica Neue', Arial, sans-serif", boxSizing: 'border-box' }}
+      >
+        <div style={{ ...vc, gap: 14, marginBottom: 20 }}>
+          <div style={{ ...vcc, width: 46, height: 46, borderRadius: 14, backgroundColor: '#ffffff', color: '#0018E6', fontSize: 20, fontWeight: 900, border: '1px solid #dbe3ef' }}>FM</div>
+          <div>
+            <div style={{ fontSize: 24, fontWeight: 900, color: '#020617', letterSpacing: '-0.04em', lineHeight: 1 }}>{commercialName}</div>
+            <div style={{ fontSize: 12, fontWeight: 900, color: '#6b98ff', marginTop: 5 }}>Cartera — Concentraciones y Análisis</div>
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 16 }}>
+          {[
+            { label: 'Cartera Vigente', value: '91.2%', color: '#059669' },
+            { label: 'Cartera Atrasada', value: '5.7%', color: '#d97706' },
+            { label: 'Cartera Vencida', value: '3.1%', color: '#e11d48' },
+            { label: 'Score de Riesgo', value: '82/100', color: '#0f172a' },
+          ].map(item => (
+            <div key={item.label} style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: 10, backgroundColor: '#fff' }}>
+              <div style={{ fontSize: 7, fontWeight: 900, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{item.label}</div>
+              <div style={{ fontSize: 15, fontWeight: 900, color: item.color, marginTop: 2 }}>{item.value}</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
+          <div>
+            <div style={sectionKicker}>Cartera</div>
+            <div style={{ ...sectionTitle, fontSize: 10, marginBottom: 6 }}>Concentración por Cliente</div>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead><tr><TH>Acreditado</TH><TH style={{ textAlign: 'right' }}>Saldo</TH><TH style={{ textAlign: 'right' }}>%</TH></tr></thead>
+              <tbody>
+                {[
+                  ['Industrias Monterrey SA', '$4,820,000', 24.3, 'high'],
+                  ['Comercializadora del Golfo', '$3,010,000', 15.1, 'medium'],
+                  ['Grupo Transportista Norte', '$1,950,000', 9.8, 'low'],
+                  ['Constructora Delta', '$1,640,000', 8.2, 'low'],
+                  ['Distribuidora Altamira', '$1,280,000', 6.4, 'low'],
+                  ['Servicios Integrales MX', '$980,000', 4.9, 'low'],
+                  ['Agroindustrial Reyes', '$760,000', 3.8, 'low'],
+                ].map(([name, saldo, pct, sev], i) => (
+                  <tr key={String(name)} style={{ backgroundColor: i % 2 === 0 ? '#fff' : '#f8fafc' }}>
+                    <TD>{name}</TD>
+                    <TD style={{ textAlign: 'right', fontFamily: 'monospace' }}>{saldo}</TD>
+                    <TD style={{ textAlign: 'right', fontFamily: 'monospace', fontWeight: 700, color: sev === 'high' ? '#e11d48' : sev === 'medium' ? '#d97706' : '#334155' }}>{pct}%</TD>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div>
+            <div style={sectionKicker}>Cartera</div>
+            <div style={{ ...sectionTitle, fontSize: 10, marginBottom: 6 }}>Concentración por Industria</div>
+            <BarChart
+              width={330} height={190}
+              data={[
+                { name: 'Automotriz', pct: 31.2 },
+                { name: 'Comercio', pct: 22.4 },
+                { name: 'Servicios', pct: 18.0 },
+                { name: 'Construcción', pct: 14.6 },
+                { name: 'Agroindustria', pct: 8.3 },
+                { name: 'Transporte', pct: 5.5 },
+              ]}
+              layout="vertical"
+              margin={{ top: 4, right: 20, left: 4, bottom: 4 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+              <XAxis type="number" tick={{ fontSize: 8, fill: '#94a3b8' }} unit="%" />
+              <YAxis type="category" dataKey="name" width={82} tick={{ fontSize: 8, fill: '#334155' }} />
+              <Bar dataKey="pct" fill="#0018E6" radius={[0, 4, 4, 0]} barSize={14} />
+            </BarChart>
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 14 }}>
+          <div style={sectionKicker}>Calidad</div>
+          <div style={{ ...sectionTitle, fontSize: 10, marginBottom: 6 }}>Distribución DPD (% de Saldo)</div>
+          <BarChart
+            width={700} height={160}
+            data={[
+              { name: '0d', pct: 71.4 },
+              { name: '1-30d', pct: 15.6 },
+              { name: '31-60d', pct: 5.7 },
+              { name: '61-90d', pct: 4.3 },
+              { name: '91-180d', pct: 2.1 },
+              { name: '>180d', pct: 0.9 },
+            ]}
+            margin={{ top: 4, right: 8, left: 0, bottom: 4 }}
+          >
+            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+            <XAxis dataKey="name" tick={{ fontSize: 8, fill: '#334155' }} />
+            <YAxis tick={{ fontSize: 8, fill: '#94a3b8' }} unit="%" />
+            <Bar dataKey="pct" radius={[4, 4, 0, 0]} barSize={32}>
+              {['#059669', '#84cc16', '#d97706', '#f97316', '#e11d48', '#991b1b'].map((color, i) => (
+                <Cell key={i} fill={color} />
+              ))}
+            </Bar>
+          </BarChart>
+        </div>
+
+        <div>
+          <div style={sectionKicker}>Control Interno</div>
+          <div style={{ ...sectionTitle, fontSize: 10, marginBottom: 6 }}>Movimientos y Anomalías del Mes</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+            {[
+              { label: 'Créditos Nuevos', value: '6', color: '#059669' },
+              { label: 'Créditos Deteriorados', value: '3', color: '#e11d48' },
+              { label: 'Créditos Mejorados', value: '5', color: '#059669' },
+              { label: 'Inconsistencias DPD', value: '1', color: '#d97706' },
+            ].map(item => (
+              <div key={item.label} style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: 8, backgroundColor: '#fff' }}>
+                <div style={{ fontSize: 7, fontWeight: 900, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{item.label}</div>
+                <div style={{ fontSize: 13, fontWeight: 900, color: item.color, marginTop: 2 }}>{item.value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <ReportFooter />
+      </div>
+
+      {/* ── PAGE 4: Aforo — Análisis vs. Criterios de Elegibilidad ── */}
+      <div
+        ref={elegibilidadRef}
+        className="pdf-page"
+        style={{ width: 794, backgroundColor: '#f8fafc', padding: '36px 44px', fontFamily: "'Inter', 'Helvetica Neue', Arial, sans-serif", boxSizing: 'border-box' }}
+      >
+        <div style={{ ...vc, gap: 14, marginBottom: 20 }}>
+          <div style={{ ...vcc, width: 46, height: 46, borderRadius: 14, backgroundColor: '#ffffff', color: '#0018E6', fontSize: 20, fontWeight: 900, border: '1px solid #dbe3ef' }}>FM</div>
+          <div>
+            <div style={{ fontSize: 24, fontWeight: 900, color: '#020617', letterSpacing: '-0.04em', lineHeight: 1 }}>{commercialName}</div>
+            <div style={{ fontSize: 12, fontWeight: 900, color: '#6b98ff', marginTop: 5 }}>Aforo — Concentración vs. Criterios de Elegibilidad</div>
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 20 }}>
+          <div style={sectionKicker}>Aforo</div>
+          <div style={{ ...sectionTitle, marginBottom: 8 }}>Evolución Mensual (Real vs. Requerido Mínimo)</div>
+          <LineChart
+            width={700} height={200}
+            data={[
+              { name: 'ABR 26', aforo: 1.37 },
+              { name: 'MAY 26', aforo: 1.55 },
+              { name: 'JUN 26', aforo: 1.35 },
+              { name: 'JUL 26', aforo: 1.33 },
+              { name: 'AGO 26', aforo: 1.41 },
+              { name: 'SEP 26', aforo: 1.44 },
+            ]}
+            margin={{ top: 8, right: 16, left: 0, bottom: 4 }}
+          >
+            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+            <XAxis dataKey="name" tick={{ fontSize: 9, fill: '#334155' }} />
+            <YAxis domain={[1.0, 1.7]} tick={{ fontSize: 9, fill: '#94a3b8' }} />
+            <Tooltip />
+            <ReferenceLine y={1.25} stroke="#e11d48" strokeDasharray="4 4" label={{ value: 'Mín. 1.25', position: 'insideBottomLeft', fontSize: 9, fill: '#e11d48' }} />
+            <Line type="monotone" dataKey="aforo" stroke="#0018E6" strokeWidth={2.5} dot={{ r: 4, fill: '#0018E6' }} />
+          </LineChart>
+        </div>
+
+        <div>
+          <div style={sectionKicker}>Elegibilidad</div>
+          <div style={{ ...sectionTitle, marginBottom: 8 }}>Concentración vs. Criterios de Elegibilidad del Contrato</div>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr><TH>Criterio</TH><TH style={{ textAlign: 'right' }}>Real</TH><TH style={{ textAlign: 'right' }}>Límite</TH><TH style={{ textAlign: 'center' }}>Estado</TH></tr>
+            </thead>
+            <tbody>
+              {[
+                { label: 'Concentración máx. por acreditado', real: '24.3%', limit: '≤ 20%', ok: false },
+                { label: 'Concentración máx. por industria', real: '31.2%', limit: '≤ 35%', ok: true },
+                { label: 'Top 10 créditos / cartera total', real: '38.4%', limit: '≤ 40%', ok: true },
+                { label: 'Cartera atrasada (1-90d)', real: '5.7%', limit: '≤ 8%', ok: true },
+                { label: 'Cartera vencida (>90d)', real: '3.1%', limit: '≤ 5%', ok: true },
+                { label: 'Plazo promedio ponderado', real: '18 meses', limit: '≤ 24 meses', ok: true },
+                { label: 'Ticket promedio', real: '$142,000', limit: '≤ $250,000', ok: true },
+                { label: 'Créditos a partes relacionadas', real: '0%', limit: '≤ 5%', ok: true },
+              ].map((row, i) => (
+                <tr key={row.label} style={{ backgroundColor: i % 2 === 0 ? '#fff' : '#f8fafc' }}>
+                  <TD>{row.label}</TD>
+                  <TD style={{ textAlign: 'right', fontFamily: 'monospace', fontWeight: 700 }}>{row.real}</TD>
+                  <TD style={{ textAlign: 'right', fontFamily: 'monospace', color: '#94a3b8' }}>{row.limit}</TD>
+                  <TD style={{ textAlign: 'center' }}>
+                    <span style={{ backgroundColor: (row.ok ? '#059669' : '#e11d48') + '20', color: row.ok ? '#059669' : '#e11d48', padding: '2px 8px', borderRadius: 4, fontSize: 8, fontWeight: 900 }}>
+                      {row.ok ? 'CUMPLE' : 'NO CUMPLE'}
+                    </span>
+                  </TD>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <ReportFooter />
+      </div>
+
+      {/* ── PAGE 5: Línea de Vida del Crédito ── */}
+      <div
+        ref={lineaVidaRef}
+        className="pdf-page"
+        style={{ width: 794, backgroundColor: '#f8fafc', padding: '36px 44px', fontFamily: "'Inter', 'Helvetica Neue', Arial, sans-serif", boxSizing: 'border-box' }}
+      >
+        <div style={{ ...vc, gap: 14, marginBottom: 20 }}>
+          <div style={{ ...vcc, width: 46, height: 46, borderRadius: 14, backgroundColor: '#ffffff', color: '#0018E6', fontSize: 20, fontWeight: 900, border: '1px solid #dbe3ef' }}>FM</div>
+          <div>
+            <div style={{ fontSize: 24, fontWeight: 900, color: '#020617', letterSpacing: '-0.04em', lineHeight: 1 }}>{commercialName}</div>
+            <div style={{ fontSize: 12, fontWeight: 900, color: '#6b98ff', marginTop: 5 }}>Línea de Vida del Crédito — Hallazgos Relevantes</div>
+          </div>
+        </div>
+
+        <div>
+          {[
+            { date: 'SEP 26', type: 'Covenant', title: 'Cobertura de Servicio de Deuda en alerta (0.98x vs. 0.93/0.90 req.)', severity: 'warning' as const },
+            { date: 'AGO 26', type: 'Aforo', title: 'Aforo se mantuvo dentro de rango (1.41 vs. 1.25/1.40 req.)', severity: 'good' as const },
+            { date: 'JUL 26', type: 'Amortización', title: 'Amortización programada aplicada sin incidencias — $850,000', severity: 'good' as const },
+            { date: 'JUN 26', type: 'Covenant', title: 'Cartera Atrasada se acercó al límite superior (18.66% vs. 17/20% req.)', severity: 'warning' as const },
+            { date: 'MAY 26', type: 'Disposición', title: 'Disposición adicional de línea autorizada — $2,000,000', severity: 'info' as const },
+            { date: 'ABR 26', type: 'Deterioro', title: 'Acreditado "Constructora Delta" migró de 1-30d a 31-60d DPD', severity: 'bad' as const },
+            { date: 'MAR 26', type: 'Documentación', title: 'Reporte Buró de Crédito actualizado — Score 712', severity: 'info' as const },
+            { date: 'FEB 26', type: 'Covenant', title: 'Apalancamiento Ajustado en alerta (113% vs. 118/125% req.)', severity: 'warning' as const },
+            { date: 'ENE 26', type: 'Amortización', title: 'Amortización extraordinaria voluntaria aplicada — $1,200,000', severity: 'good' as const },
+            { date: 'DIC 25', type: 'Aforo', title: 'Cierre de ejercicio — Aforo 1.26, dentro de rango', severity: 'good' as const },
+          ].map((ev, i, arr) => {
+            const color = ev.severity === 'bad' ? '#e11d48' : ev.severity === 'warning' ? '#d97706' : ev.severity === 'good' ? '#059669' : '#64748b';
+            return (
+              <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '9px 0', borderBottom: i < arr.length - 1 ? '1px solid #e2e8f0' : 'none' }}>
+                <span style={{ width: 9, height: 9, borderRadius: 999, backgroundColor: color, marginTop: 5, flexShrink: 0 }} />
+                <div style={{ flex: 1 }}>
+                  <span style={{ fontSize: 9, fontWeight: 900, color: '#94a3b8', width: 42, display: 'inline-block' }}>{ev.date}</span>
+                  <span style={{ fontSize: 8, fontWeight: 900, color, textTransform: 'uppercase', letterSpacing: '0.04em', backgroundColor: color + '15', padding: '2px 6px', borderRadius: 4, marginLeft: 6 }}>{ev.type}</span>
+                  <span style={{ fontSize: 10, color: '#334155', marginLeft: 10 }}>{ev.title}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <ReportFooter />
+      </div>
+
+      {/* ── PAGE 6: Estatus Fiscal y Buró de Crédito ── */}
+      <div
+        ref={fiscalBuroRef}
+        className="pdf-page"
+        style={{ width: 794, backgroundColor: '#f8fafc', padding: '36px 44px', fontFamily: "'Inter', 'Helvetica Neue', Arial, sans-serif", boxSizing: 'border-box' }}
+      >
+        <div style={{ ...vc, gap: 14, marginBottom: 20 }}>
+          <div style={{ ...vcc, width: 46, height: 46, borderRadius: 14, backgroundColor: '#ffffff', color: '#0018E6', fontSize: 20, fontWeight: 900, border: '1px solid #dbe3ef' }}>FM</div>
+          <div>
+            <div style={{ fontSize: 24, fontWeight: 900, color: '#020617', letterSpacing: '-0.04em', lineHeight: 1 }}>{commercialName}</div>
+            <div style={{ fontSize: 12, fontWeight: 900, color: '#6b98ff', marginTop: 5 }}>Estatus Fiscal y Buró de Crédito</div>
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 20 }}>
+          <div style={sectionKicker}>SAT</div>
+          <div style={{ ...sectionTitle, marginBottom: 8 }}>Cumplimiento Fiscal</div>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead><tr><TH>Concepto</TH><TH style={{ textAlign: 'center' }}>Estado</TH><TH>Comentarios</TH></tr></thead>
+            <tbody>
+              {[
+                ['Opinión de Cumplimiento 32D', true, 'Positiva, vigente'],
+                ['Declaración Anual 2025', true, 'Presentada en tiempo'],
+                ['Declaraciones Mensuales (IVA/ISR)', true, 'Al corriente'],
+                ['CFDI Activo / Sin Restricción', true, 'Sin restricción de folios'],
+                ['Créditos Fiscales Firmes', true, 'Sin adeudos reportados'],
+              ].map(([concept, ok, note], i) => (
+                <tr key={String(concept)} style={{ backgroundColor: i % 2 === 0 ? '#fff' : '#f8fafc' }}>
+                  <TD>{concept}</TD>
+                  <TD style={{ textAlign: 'center' }}>
+                    <span style={{ backgroundColor: (ok ? '#059669' : '#e11d48') + '20', color: ok ? '#059669' : '#e11d48', padding: '2px 8px', borderRadius: 4, fontSize: 8, fontWeight: 900 }}>
+                      {ok ? 'CUMPLE' : 'NO CUMPLE'}
+                    </span>
+                  </TD>
+                  <TD style={{ fontSize: 8, color: '#64748b' }}>{note}</TD>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div>
+          <div style={sectionKicker}>Buró de Crédito</div>
+          <div style={{ ...sectionTitle, marginBottom: 8 }}>Historial Crediticio</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 10 }}>
+            {[
+              { label: 'Score Buró', value: '712' },
+              { label: 'Línea Otorgada', value: '$8,500,000' },
+              { label: 'Saldo Actual Reportado', value: '$7,352,134' },
+              { label: 'Última Consulta', value: 'Sep 2026' },
+            ].map(item => (
+              <div key={item.label} style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: 10, backgroundColor: '#fff' }}>
+                <div style={{ fontSize: 7, fontWeight: 900, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{item.label}</div>
+                <div style={{ fontSize: 13, fontWeight: 900, color: '#0f172a', marginTop: 2 }}>{item.value}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 12 }}>
+            <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '8px 10px', backgroundColor: '#fff' }}>
+              <div style={{ fontSize: 8, fontWeight: 900, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 2 }}>Score Buró (300–850)</div>
+              <BarChart width={320} height={70} data={[{ name: 'Score', value: 712 }]} layout="vertical" margin={{ top: 4, right: 10, left: 0, bottom: 4 }}>
+                <XAxis type="number" domain={[300, 850]} tick={{ fontSize: 7, fill: '#94a3b8' }} />
+                <YAxis type="category" dataKey="name" hide />
+                <ReferenceLine x={650} stroke="#94a3b8" strokeDasharray="3 3" />
+                <Bar dataKey="value" radius={[0, 6, 6, 0]} barSize={20} fill="#059669" />
+              </BarChart>
+            </div>
+            <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '8px 10px', backgroundColor: '#fff' }}>
+              <div style={{ fontSize: 8, fontWeight: 900, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 2 }}>Utilización de Línea Reportada</div>
+              <BarChart width={320} height={70} data={[{ name: 'Utilización', value: 86.5 }]} layout="vertical" margin={{ top: 4, right: 10, left: 0, bottom: 4 }}>
+                <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 7, fill: '#94a3b8' }} />
+                <YAxis type="category" dataKey="name" hide />
+                <Bar dataKey="value" radius={[0, 6, 6, 0]} barSize={20} fill="#0018E6" />
+              </BarChart>
+            </div>
+          </div>
+
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead><tr><TH>Acreedor</TH><TH style={{ textAlign: 'right' }}>Saldo</TH><TH style={{ textAlign: 'center' }}>Atraso Máx.</TH><TH style={{ textAlign: 'center' }}>Estatus</TH></tr></thead>
+            <tbody>
+              {[
+                ['Banco Comercial del Norte', '$3,200,000', '0d', true],
+                ['Fondeadora Alterna I', '$2,450,134', '0d', true],
+                ['Arrendadora Industrial', '$1,701,000', '0d', true],
+              ].map(([lender, balance, atraso, ok], i) => (
+                <tr key={String(lender)} style={{ backgroundColor: i % 2 === 0 ? '#fff' : '#f8fafc' }}>
+                  <TD>{lender}</TD>
+                  <TD style={{ textAlign: 'right', fontFamily: 'monospace' }}>{balance}</TD>
+                  <TD style={{ textAlign: 'center', fontFamily: 'monospace' }}>{atraso}</TD>
+                  <TD style={{ textAlign: 'center' }}>
+                    <span style={{ backgroundColor: (ok ? '#059669' : '#e11d48') + '20', color: ok ? '#059669' : '#e11d48', padding: '2px 8px', borderRadius: 4, fontSize: 8, fontWeight: 900 }}>AL CORRIENTE</span>
+                  </TD>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p style={{ fontSize: 8, color: '#94a3b8', marginTop: 10, fontStyle: 'italic' }}>Documento de buró adjunto disponible en la sección "Documentación" de la página 1.</p>
+        </div>
+
+        <ReportFooter />
+      </div>
+
+      {/* ── PAGE 7: Cliente vs. Benchmark del Mes ── */}
+      <div
+        ref={benchmarkRef}
+        className="pdf-page"
+        style={{ width: 794, backgroundColor: '#f8fafc', padding: '36px 44px', fontFamily: "'Inter', 'Helvetica Neue', Arial, sans-serif", boxSizing: 'border-box' }}
+      >
+        <div style={{ ...vc, gap: 14, marginBottom: 20 }}>
+          <div style={{ ...vcc, width: 46, height: 46, borderRadius: 14, backgroundColor: '#ffffff', color: '#0018E6', fontSize: 20, fontWeight: 900, border: '1px solid #dbe3ef' }}>FM</div>
+          <div>
+            <div style={{ fontSize: 24, fontWeight: 900, color: '#020617', letterSpacing: '-0.04em', lineHeight: 1 }}>{commercialName}</div>
+            <div style={{ fontSize: 12, fontWeight: 900, color: '#6b98ff', marginTop: 5 }}>Cliente vs. Cohorte del Mes (Benchmark)</div>
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 16 }}>
+          {[
+            { label: 'Segmento', value: 'SOFOM · Factoraje · Pyme' },
+            { label: 'Clientes en Cohorte', value: '18' },
+            { label: 'Periodo', value: 'Sep 2026' },
+          ].map(item => (
+            <div key={item.label} style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: 10, backgroundColor: '#fff' }}>
+              <div style={{ fontSize: 7, fontWeight: 900, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{item.label}</div>
+              <div style={{ fontSize: 13, fontWeight: 900, color: '#0f172a', marginTop: 2 }}>{item.value}</div>
+            </div>
+          ))}
+        </div>
+
+        {(() => {
+          const benchRatios = [
+            { name: 'Margen Financiero', client: '42.1%', cohort: '38.6%', pct: 68, better: true },
+            { name: 'Rentabilidad Operativa', client: '15.0%', cohort: '12.4%', pct: 71, better: true },
+            { name: 'Deuda / EBITDA', client: '2.4x', cohort: '3.1x', pct: 62, better: true },
+            { name: 'DSCR', client: '1.6x', cohort: '1.3x', pct: 59, better: true },
+            { name: 'Razón Corriente', client: '0.9x', cohort: '1.2x', pct: 28, better: false },
+            { name: 'Apalancamiento', client: '113%', cohort: '121%', pct: 55, better: true },
+            { name: 'ROA', client: '15.0%', cohort: '11.2%', pct: 74, better: true },
+            { name: 'ROE', client: '11.2%', cohort: '9.8%', pct: 63, better: true },
+            { name: 'IMOR (Cartera Vencida)', client: '3.1%', cohort: '4.4%', pct: 70, better: true },
+          ];
+          return (
+            <>
+              <div style={{ ...sectionTitle, fontSize: 11, marginBottom: 4 }}>Percentil del Cliente vs. Cohorte (por razón)</div>
+              <BarChart
+                width={700} height={210}
+                data={benchRatios}
+                layout="vertical"
+                margin={{ top: 4, right: 24, left: 8, bottom: 4 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+                <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 8, fill: '#94a3b8' }} />
+                <YAxis type="category" dataKey="name" width={150} tick={{ fontSize: 8.5, fill: '#334155' }} />
+                <Tooltip />
+                <ReferenceLine x={50} stroke="#94a3b8" strokeDasharray="3 3" />
+                <Bar dataKey="pct" radius={[0, 4, 4, 0]} barSize={12}>
+                  {benchRatios.map((row, i) => (
+                    <Cell key={i} fill={row.better ? '#059669' : '#e11d48'} />
+                  ))}
+                </Bar>
+              </BarChart>
+
+              <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 10 }}>
+                <thead>
+                  <tr><TH>Razón</TH><TH style={{ textAlign: 'right' }}>Cliente</TH><TH style={{ textAlign: 'right' }}>Mediana Cohorte</TH><TH style={{ textAlign: 'center' }}>vs. Cohorte</TH></tr>
+                </thead>
+                <tbody>
+                  {benchRatios.map((row, i) => (
+                    <tr key={row.name} style={{ backgroundColor: i % 2 === 0 ? '#fff' : '#f8fafc' }}>
+                      <TD>{row.name}</TD>
+                      <TD style={{ textAlign: 'right', fontFamily: 'monospace', fontWeight: 900 }}>{row.client}</TD>
+                      <TD style={{ textAlign: 'right', fontFamily: 'monospace', color: '#94a3b8' }}>{row.cohort}</TD>
+                      <TD style={{ textAlign: 'center' }}>
+                        <span style={{ backgroundColor: (row.better ? '#059669' : '#e11d48') + '20', color: row.better ? '#059669' : '#e11d48', padding: '2px 8px', borderRadius: 4, fontSize: 8, fontWeight: 900 }}>
+                          {row.better ? 'MEJOR' : 'POR DEBAJO'}
+                        </span>
+                      </TD>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          );
+        })()}
+
+        <ReportFooter />
+      </div>
     </div>
   );
 };

@@ -1,14 +1,15 @@
 import React, { Suspense, useState, useEffect, useRef } from 'react';
 import { db, LoanTape_DB } from '../../db/index';
 import { Session } from '../../services/auth';
-import { AISettings, analyzeLoanTape, extractLoanTapeSheetsFromDocument, StructuredLoanTapeAnalysis } from '../../services/ai';
+import { AISettings, extractLoanTapeSheetsFromDocument, StructuredLoanTapeAnalysis } from '../../services/ai';
 import {
-  Upload, Trash2, Sparkles, TrendingUp, TrendingDown, Minus,
+  Upload, Trash2, TrendingUp, TrendingDown, Minus,
   BarChart3, FileSpreadsheet, ChevronDown, ChevronRight,
   ShieldCheck, ShieldAlert, ShieldX, AlertTriangle, CheckCircle, XCircle,
   FileText, Bot, Plus, LayoutDashboard,
 } from 'lucide-react';
-import { analyzeLoanTapesLocally, answerLoanTapeQuestion, buildLoanTapeDataProfile, loanTapePeriodDate, standardizeLoanTape } from '../../lib/loanTapeAnalytics';
+import { assessLoanTapeImport, formatDuration } from '../../lib/statementQuality';
+import { analyzeLoanTapesLocally, answerLoanTapeQuestion, buildLoanTapeDataProfile, loanTapePeriodDate, standardizeLoanTape, storedAnalysisFor } from '../../lib/loanTapeAnalytics';
 import {
   createLoanTapeWorkspaceBlock,
   LoanTapeAnalystState,
@@ -21,6 +22,7 @@ import { loadExportModule } from '../../lib/exportLoader';
 import LoanTapeCockpit from './LoanTapeCockpit';
 import { importLoanTapeSheets } from '../../lib/loanTapeImport';
 import { extractPdfText, isUsefulExtractedText } from '../../lib/documentParsing';
+import { sheetToRows } from '../../lib/sheetRows';
 
 const WorkspaceBlock = lazyWithChunkRetry(() => import('./LoanTapeWorkspaceBlock'), 'loan-tape-workspace-block');
 
@@ -270,6 +272,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
   useEffect(() => { loadTapes(); }, [clientId]);
 
   const saveLoanTapeFile = async (file: File) => {
+    const startedAt = performance.now();
     const isTabular = isTabularLoanTapeFile(file);
     const isVisual = isVisualLoanTapeFile(file);
     const prev: any = tapes[0]?.extractedData;
@@ -403,7 +406,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
     // map each sheet by format profile (SIAC/CAUDEX/generic).
     const sheets = workbook.SheetNames.map(name => ({
       name,
-      rows: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, blankrows: false, defval: null }) as any[][],
+      rows: sheetToRows<any[]>(XLSX, workbook.Sheets[name], { header: 1, blankrows: false, defval: null }),
     }));
 
     const result = importLoanTapeSheets(sheets, file.name, { previousTotal });
@@ -434,7 +437,16 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
       tapeType,
       // Store _standardized as the single source of truth; `rows` (raw preview) falls
       // back to it at read time — no duplicated payload.
-      extractedData: { _standardized: result.standardized, _mappingReport: result.mappingReport, _import: rec, _summary: result.summary },
+      extractedData: {
+        _standardized: result.standardized, _mappingReport: result.mappingReport, _import: rec, _summary: result.summary,
+        _quality: (() => {
+          const profile = buildLoanTapeDataProfile(result.standardized, result.mappingReport);
+          return assessLoanTapeImport({
+            mappingReport: result.mappingReport, readinessScore: profile.readinessScore, rows: result.standardized.length,
+            missingCritical: (rec.unmappedCriticalFields || []) as string[], blocker: rec.severity === 'blocker', extractionMs: performance.now() - startedAt,
+          });
+        })(),
+      },
     });
   };
 
@@ -467,13 +479,8 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
         : { ...tape.extractedData, rows, _standardized: standardized };
       const localTapes = tapes.map(t => t.id === tape.id ? { ...t, extractedData: baseData } : t);
       const localAnalysis = analyzeLoanTapesLocally(localTapes, tape.id);
-      let analysis = localAnalysis;
-      try {
-        analysis = { ...localAnalysis, ...(await analyzeLoanTape(aiSettings, standardized, clientName || clientId)), portfolioQuality: localAnalysis.portfolioQuality, dpd_distribution: localAnalysis.dpd_distribution, concentrations: localAnalysis.concentrations, anomalies: localAnalysis.anomalies, validation: localAnalysis.validation };
-      } catch (error) {
-        if (aiSettings.apiKey) throw error;
-        console.warn('Loan tape AI analysis unavailable; using local analysis.', error);
-      }
+      // Análisis 100% local/determinístico (sin narrativa de IA).
+      const analysis = localAnalysis;
       const updatedData = Array.isArray(tape.extractedData)
         ? { rows: tape.extractedData, _standardized: standardized, _analysis: analysis }
         : { ...baseData, _analysis: analysis };
@@ -640,7 +647,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
           const rows: any[] = Array.isArray(data) ? data : (data?.rows || data?._standardized || []);
           const mappingRows: any[] = Array.isArray(data?._mappingReport) ? data._mappingReport : [];
           const standardizedRows: any[] = Array.isArray(data?._standardized) ? data._standardized : [];
-          const analysis: StructuredLoanTapeAnalysis | null = data?._analysis || null;
+          const analysis: StructuredLoanTapeAnalysis | null = storedAnalysisFor(tape);
           const hardValidationRows = (analysis?.validation || []).filter((item: any) => item.severity === 'high');
           const imp: any = (data && !Array.isArray(data)) ? data._import : null;
           const rawFileOnly = !!(data && !Array.isArray(data) && data._unsupportedImport);
@@ -673,9 +680,19 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
 	                  {imp && (
 	                    <p className={`text-[11px] font-bold mt-0.5 truncate ${imp.severity === 'blocker' && rows.length === 0 ? 'text-rose-600' : imp.severity === 'blocker' || imp.severity === 'warning' ? 'text-amber-600' : 'text-emerald-600'}`}
 	                       title={(imp.messages || []).join('\n')}>
-	                      {imp.severity === 'blocker' && rows.length > 0 ? 'Análisis parcial disponible · ' : ''}{(imp.messages || [])[0]}
+	                      {imp.severity === 'blocker' && rows.length > 0 ? 'Análisis parcial disponible · ' : ''}{(imp.messages || []).find((m: string) => /^(⛔|⚠)/.test(m)) || (imp.messages || [])[0]}
 	                    </p>
 	                  )}
+                  {(() => {
+                    const q = data?._quality || (mappingRows.length ? assessLoanTapeImport({ mappingReport: mappingRows, readinessScore: profile.readinessScore, rows: rows.length, missingCritical: (imp?.unmappedCriticalFields || []) as string[], blocker: imp?.severity === 'blocker' }) : null);
+                    if (!q) return null;
+                    const tone = q.level === 'alta' ? 'text-emerald-700' : q.level === 'media' ? 'text-amber-700' : 'text-rose-700';
+                    return (
+                      <p className={`text-[11px] font-bold mt-0.5 ${tone}`} title={q.notes.join('\n') || 'Columnas mapeadas con buena confianza'}>
+                        Confianza de lectura {q.score}/100 ({q.level}){q.extractionMs !== undefined ? ` · importado en ${formatDuration(q.extractionMs)}` : ''}{q.notes.length ? ` · ${q.notes[0]}` : ''}
+                      </p>
+                    );
+                  })()}
                 </div>
                 <div className="flex items-center gap-3">
                   {analysis && <StatusBadge status={analysis.overallStatus} />}
@@ -690,7 +707,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
                       </svg>
-                    ) : <Sparkles className="w-3.5 h-3.5" />}
+                    ) : <BarChart3 className="w-3.5 h-3.5" />}
                     {analyzing === tape.id ? 'Analizando...' : analysis ? 'Actualizar análisis' : 'Analizar'}
                   </button>
                   <button onClick={() => handleDelete(tape.id)} className="text-slate-300 hover:text-rose-500 transition-colors">

@@ -52,6 +52,15 @@ export interface Client {
   lastPeriod: string;
   logoLeft?: string;
   logoRight?: string;
+  eligibilityCriteria: Array<{ id: string; label: string; metric: string; operator: '<=' | '>=' | '<' | '>' | '='; threshold: number; unit?: '%' | 'x' | '' }>;
+  fiscalBuroStatus: {
+    satAlCorriente?: boolean | null;
+    satNotes?: string;
+    buroScore?: number | null;
+    buroFechaConsulta?: string;
+    buroDocumentoId?: string;
+  };
+  operationsNotes: string;
 }
 
 export interface CustomField {
@@ -410,6 +419,8 @@ function toClient(r: any): Client {
     documentation: r.documentation || [], reportDate: r.report_date || '',
     frequency: r.frequency || 'mensual', lastPeriod: r.last_period || '',
     logoLeft: r.logo_left, logoRight: r.logo_right,
+    eligibilityCriteria: r.eligibility_criteria || [], fiscalBuroStatus: r.fiscal_buro_status || {},
+    operationsNotes: r.operations_notes || '',
   };
 }
 
@@ -427,6 +438,8 @@ function fromClient(c: Omit<Client, 'id' | 'createdAt'>): any {
     documentation: c.documentation, report_date: c.reportDate,
     frequency: c.frequency, last_period: c.lastPeriod,
     logo_left: c.logoLeft || null, logo_right: c.logoRight || null,
+    eligibility_criteria: c.eligibilityCriteria, fiscal_buro_status: c.fiscalBuroStatus,
+    operations_notes: c.operationsNotes,
   };
 }
 
@@ -757,6 +770,20 @@ function isMissingSchemaError(error: any, name?: string) {
     && (!name || message.includes(name));
 }
 
+// Columns added by later migrations. A deployment that has not applied a migration yet must still be able to create/read
+// clients, so a missing optional column is dropped from the write instead of failing the whole operation.
+const OPTIONAL_CLIENT_COLUMNS = ['status', 'eligibility_criteria', 'fiscal_buro_status', 'operations_notes'] as const;
+const REPORT_REVAMP_COLUMNS = ['eligibility_criteria', 'fiscal_buro_status', 'operations_notes'] as const;
+export function dropMissingClientColumns(payload: Record<string, any>, error: any): string[] {
+  const message = String(error?.message || error || '');
+  if (!isMissingSchemaError(error)) return [];
+  // exact column name: 'status' must not match inside 'fiscal_buro_status'
+  const dropped = OPTIONAL_CLIENT_COLUMNS.filter(col => new RegExp(`(^|[^a-z0-9_])${col}([^a-z0-9_]|$)`, 'i').test(message) && col in payload);
+  dropped.forEach(col => delete payload[col]);
+  return dropped;
+}
+export const REPORT_REVAMP_MIGRATION = '20261001_report_revamp_fields.sql';
+
 function uniqueMigrationStatuses(items: RolloutMigrationStatus[]) {
   const seen = new Set<string>();
   return items.filter(item => {
@@ -919,6 +946,19 @@ function documentStoragePath(orgId: string, clientId: string, documentType: Sour
 }
 
 // ── DB object ────────────────────────────────────────────────────────────────
+// PostgREST devuelve máximo 1,000 filas por request: las consultas "de todos los clientes"
+// se piden por páginas (orden estable por id como desempate) para no truncar en silencio.
+const PAGE_SIZE = 1000;
+async function fetchAllRows(build: (from: number, to: number) => PromiseLike<{ data: any[] | null; error: any }>, label: string): Promise<any[]> {
+  const rows: any[] = [];
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await build(from, from + PAGE_SIZE - 1);
+    if (error) err(label, error);
+    rows.push(...(data || []));
+    if (!data || data.length < PAGE_SIZE) return rows;
+  }
+}
+
 export const db = {
   async checkRolloutMigrations(feature: RolloutGuardFeature): Promise<RolloutGuardResult> {
     const [appliedVersions, missingSchema] = await Promise.all([
@@ -1012,8 +1052,10 @@ export const db = {
         error = retry.error;
       }
     }
-    if (error && isMissingSchemaError(error, 'status')) {
-      delete payload.status;
+    for (let attempt = 0; error && attempt < OPTIONAL_CLIENT_COLUMNS.length; attempt++) {
+      const dropped = dropMissingClientColumns(payload, error);
+      if (!dropped.length) break;
+      console.warn(`createClient: la base no tiene ${dropped.join(', ')}; se omite (aplica la migración pendiente).`);
       const retry = await supabase.from('clients').insert(payload).select().single();
       row = retry.data;
       error = retry.error;
@@ -1072,9 +1114,16 @@ export const db = {
     if (updates.logoLeft !== undefined) row.logo_left = updates.logoLeft;
     if (updates.logoRight !== undefined) row.logo_right = updates.logoRight;
     if (updates.status !== undefined) row.status = updates.status;
+    if (updates.eligibilityCriteria !== undefined) row.eligibility_criteria = updates.eligibilityCriteria;
+    if (updates.fiscalBuroStatus !== undefined) row.fiscal_buro_status = updates.fiscalBuroStatus;
+    if (updates.operationsNotes !== undefined) row.operations_notes = updates.operationsNotes;
     let { error } = await supabase.from('clients').update(row).eq('id', id);
-    if (error && isMissingSchemaError(error, 'status')) {
-      delete row.status;
+    for (let attempt = 0; error && attempt < OPTIONAL_CLIENT_COLUMNS.length; attempt++) {
+      const dropped = dropMissingClientColumns(row, error);
+      if (!dropped.length) break;
+      // Dropping 'status' is harmless; dropping report data would silently lose what the analyst typed, so say it out loud.
+      const lost = dropped.filter(col => (REPORT_REVAMP_COLUMNS as readonly string[]).includes(col));
+      if (lost.length) throw new Error(`No se pudo guardar (${lost.join(', ')}): falta aplicar la migración ${REPORT_REVAMP_MIGRATION} en Supabase.`);
       if (Object.keys(row).length === 0) return;
       const retry = await supabase.from('clients').update(row).eq('id', id);
       error = retry.error;
@@ -1221,9 +1270,8 @@ export const db = {
 
   async getCustomFieldsForClients(clientIds: string[]): Promise<Record<string, CustomField[]>> {
     if (!clientIds.length) return {};
-    const { data, error } = await supabase.from('custom_fields').select('*').in('client_id', clientIds);
-    if (error) err('getCustomFieldsForClients', error);
-    return (data || [])
+    const data = await fetchAllRows((from, to) => supabase.from('custom_fields').select('*').in('client_id', clientIds).order('id').range(from, to), 'getCustomFieldsForClients');
+    return data
       .filter(r => !String(r.label || '').startsWith('__setting:'))
       .reduce((acc, r) => {
         const clientId = r.client_id;
@@ -1371,9 +1419,8 @@ export const db = {
 
   async getTransactionsForClients(clientIds: string[]): Promise<Record<string, Transaction[]>> {
     if (!clientIds.length) return {};
-    const { data, error } = await supabase.from('transactions').select('*').in('client_id', clientIds).order('created_at', { ascending: false });
-    if (error) err('getTransactionsForClients', error);
-    return (data || []).map(toTransaction).reduce((acc, transaction) => {
+    const data = await fetchAllRows((from, to) => supabase.from('transactions').select('*').in('client_id', clientIds).order('created_at', { ascending: false }).order('id').range(from, to), 'getTransactionsForClients');
+    return data.map(toTransaction).reduce((acc, transaction) => {
       (acc[transaction.clientId] ||= []).push(transaction);
       return acc;
     }, {} as Record<string, Transaction[]>);
@@ -1442,6 +1489,26 @@ export const db = {
       (acc[file.transactionId] ||= []).push(file);
       return acc;
     }, {} as Record<string, ContractFile[]>);
+  },
+
+  // Lista sin base64_data (puede pesar MB por archivo); el contenido se pide solo al abrir.
+  async getContractFilesMetaForTransactions(transactionIds: string[]): Promise<Record<string, ContractFile[]>> {
+    if (!transactionIds.length) return {};
+    const columns = 'id,transaction_id,client_id,source_document_id,original_name,mime_type,uploaded_at,extraction_status';
+    const run = (sel: string) => supabase.from('contract_files').select(sel).in('transaction_id', transactionIds).order('uploaded_at', { ascending: false });
+    let res: any = await run(columns);
+    if (res.error && isMissingSchemaError(res.error, 'source_document_id')) res = await run(columns.replace('source_document_id,', ''));
+    if (res.error) err('getContractFilesMetaForTransactions', res.error);
+    return (res.data || []).map(toContractFile).reduce((acc: Record<string, ContractFile[]>, file: ContractFile) => {
+      (acc[file.transactionId] ||= []).push(file);
+      return acc;
+    }, {} as Record<string, ContractFile[]>);
+  },
+
+  async getContractFileData(id: string): Promise<string> {
+    const { data, error } = await supabase.from('contract_files').select('base64_data').eq('id', id).maybeSingle();
+    if (error) err('getContractFileData', error);
+    return (data as any)?.base64_data || '';
   },
 
   async updateContractFile(id: string, updates: Partial<ContractFile>): Promise<void> {
@@ -1653,9 +1720,8 @@ export const db = {
 
   async getStatementsForClients(clientIds: string[]): Promise<Record<string, FinancialStatement_DB[]>> {
     if (!clientIds.length) return {};
-    const { data, error } = await supabase.from('financial_statements').select('*').in('client_id', clientIds).order('period_date');
-    if (error) err('getStatementsForClients', error);
-    return mergeStatementRows((data || []).map(toStatement)).reduce((acc, statement) => {
+    const data = await fetchAllRows((from, to) => supabase.from('financial_statements').select('*').in('client_id', clientIds).order('period_date').order('id').range(from, to), 'getStatementsForClients');
+    return mergeStatementRows(data.map(toStatement)).reduce((acc, statement) => {
       (acc[statement.clientId] ||= []).push(statement);
       return acc;
     }, {} as Record<string, FinancialStatement_DB[]>);
@@ -1768,6 +1834,17 @@ export const db = {
       (acc[tape.clientId] ||= []).push(tape);
       return acc;
     }, {} as Record<string, LoanTape_DB[]>);
+  },
+
+  // Solo conteos por cliente: extracted_data de un loan tape puede ser enorme y las vistas de lista no lo usan.
+  async getLoanTapeCountsForClients(clientIds: string[]): Promise<Record<string, number>> {
+    if (!clientIds.length) return {};
+    const { data, error } = await supabase.from('loan_tapes').select('id,client_id').in('client_id', clientIds);
+    if (error) err('getLoanTapeCountsForClients', error);
+    return (data || []).reduce((acc: Record<string, number>, row: any) => {
+      acc[row.client_id] = (acc[row.client_id] || 0) + 1;
+      return acc;
+    }, {} as Record<string, number>);
   },
 
   async getLoanTapeById(id: string): Promise<LoanTape_DB | undefined> {

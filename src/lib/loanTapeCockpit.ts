@@ -15,10 +15,14 @@ import {
   weightedAverage,
   groupBy,
   parseDate,
+  loanTapePeriodDate,
 } from './loanTapeAnalytics';
 import type { StructuredLoanTapeAnalysis } from '../services/ai';
 
-export const DPD_BUCKETS = ['0 dias', '1-30', '31-60', '61-90', '91-180', '>180'] as const;
+import { DPD_BUCKET_DEFS, classifyDpd } from './portfolioRules';
+import { inferLoanIds } from './loanIdentity';
+
+export const DPD_BUCKETS = DPD_BUCKET_DEFS.map(b => b.bucket) as unknown as readonly ['0 dias', '1-30', '31-60', '61-89', '90-180', '>180'];
 
 export interface CockpitPeriodPoint {
   period: string;          // 'YYYY-MM-DD'
@@ -85,26 +89,21 @@ export function periodLabel(iso: string | null): string {
 const norm = (v: any) => String(v ?? '').trim();
 const clientKey = (r: StandardLoan) => norm(r.client) || '(sin cliente)';
 
-// APEM / monitoreo convention: vigente = 0-30 DPD, atrasada = 31-90, vencida = >90.
+// Convención de monitoreo (portfolioRules): vigente = 0-30 DPD, atrasada = 31-89, vencida = 90 o más.
 // (The generic skill uses vigente=0; the cockpit follows the client-monitoring cut so
 // figures reconcile with the operational cartera-vencida reports.)
 function classifyBalances(rows: StandardLoan[]) {
-  const bal = (pred: (r: StandardLoan) => boolean) => rows.filter(pred).reduce((a, r) => a + (r.outstanding_balance || 0), 0);
-  return {
-    vig: bal(r => r.days_overdue !== null && r.days_overdue <= 30),
-    atr: bal(r => r.days_overdue !== null && r.days_overdue > 30 && r.days_overdue <= 90),
-    ven: bal(r => r.days_overdue !== null && r.days_overdue > 90),
-    sinDato: bal(r => r.days_overdue === null),
-  };
+  const bal = (key: ReturnType<typeof classifyDpd>) => rows.filter(r => classifyDpd(r.days_overdue) === key).reduce((a, r) => a + (r.outstanding_balance || 0), 0);
+  return { vig: bal('vigente'), atr: bal('atrasada'), ven: bal('vencida'), sinDato: bal('sin_dato') };
 }
 
 function rowsStandardized(tape: LoanTape_DB): StandardLoan[] {
   const data: any = tape.extractedData;
-  const fallback = parseDate(tape.uploadDate);
+  const fallback = loanTapePeriodDate(tape) || parseDate(tape.uploadDate);
   const std: StandardLoan[] = Array.isArray(data?._standardized)
     ? data._standardized
     : standardizeLoanTape(Array.isArray(data) ? data : (data?.rows || []), tape.fileName).standardized;
-  return std.map(r => ({ ...r, file_date: r.file_date || fallback }));
+  return inferLoanIds(std.map(r => ({ ...r, file_date: r.file_date || fallback }))).rows;
 }
 
 function flatten(tapes: LoanTape_DB[]): StandardLoan[] {
@@ -214,7 +213,7 @@ export function buildCockpitData(tapes: LoanTape_DB[]): CockpitData {
   for (const p of periods) {
     for (const r of byPeriod(p)) {
       const id = norm(r.loan_id);
-      if (!id || r.days_overdue === null || r.days_overdue <= 90) continue;
+      if (!id || r.days_overdue === null || classifyDpd(r.days_overdue) !== 'vencida') continue;
       const cur = flags.get(id) || { client: clientKey(r), months: 0, maxDpd: 0 };
       cur.months += 1; cur.maxDpd = Math.max(cur.maxDpd, r.days_overdue || 0);
       flags.set(id, cur);
@@ -236,11 +235,11 @@ export function periodQuality(data: CockpitData, period: string) {
   const rows = activeRows(data.allRows).filter(r => r.file_date === period);
   const total = sum(rows);
   const c = classifyBalances(rows);
-  const cnt = (pred: (r: StandardLoan) => boolean) => rows.filter(pred).length;
+  const cnt = (key: ReturnType<typeof classifyDpd>) => rows.filter(r => classifyDpd(r.days_overdue) === key).length;
   return {
-    vigente: { count: cnt(r => r.days_overdue !== null && r.days_overdue <= 30), balance: c.vig, pct: total ? c.vig / total : 0 },
-    atrasada: { count: cnt(r => r.days_overdue !== null && r.days_overdue > 30 && r.days_overdue <= 90), balance: c.atr, pct: total ? c.atr / total : 0 },
-    vencida: { count: cnt(r => r.days_overdue !== null && r.days_overdue > 90), balance: c.ven, pct: total ? c.ven / total : 0 },
+    vigente: { count: cnt('vigente'), balance: c.vig, pct: total ? c.vig / total : 0 },
+    atrasada: { count: cnt('atrasada'), balance: c.atr, pct: total ? c.atr / total : 0 },
+    vencida: { count: cnt('vencida'), balance: c.ven, pct: total ? c.ven / total : 0 },
   };
 }
 

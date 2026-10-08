@@ -3,15 +3,17 @@ import {
   ResponsiveContainer, ComposedChart, BarChart, LineChart,
   Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Cell,
 } from 'recharts';
-import { FileSpreadsheet, LayoutDashboard } from 'lucide-react';
-import { LoanTape_DB } from '../../db/index';
+import { CalendarRange, FileSpreadsheet, LayoutDashboard } from 'lucide-react';
+import { db, LoanTape_DB } from '../../db/index';
 import {
   buildCockpitData, buildVintage, snapshotAnalysis, buildCockpitNarrative,
   periodLabel, periodQuality, DPD_BUCKETS, type CockpitData,
 } from '../../lib/loanTapeCockpit';
 import { loadExportModule } from '../../lib/exportLoader';
 import { reserveDownloadTarget } from '../../lib/browserDownload';
+import { analyzePortfolio, buildLoanTapeInsights, type Insight } from '../../lib/loanTapeReport';
 import ChartCard from './ChartCard';
+import LoanTapePortfolioCharts from './LoanTapePortfolioCharts';
 
 const C = { green: '#059669', amber: '#f59e0b', red: '#ef4444', indigo: '#4f46e5', cyan: '#06b6d4', slate: '#94a3b8' };
 const CLIENT_COLORS = ['#4f46e5', '#06b6d4', '#059669', '#f59e0b', '#ef4444'];
@@ -34,6 +36,8 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
   const [focus, setFocus] = useState<string>(data.periods[data.periods.length - 1] || '');
   const [cmpA, setCmpA] = useState<string>(data.periods[data.periods.length - 2] || '');
   const [cmpB, setCmpB] = useState<string>(data.periods[data.periods.length - 1] || '');
+  const [rangeStart, setRangeStart] = useState<string>(data.periods[0] || '');
+  const [rangeEnd, setRangeEnd] = useState<string>(data.periods[data.periods.length - 1] || '');
   const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
@@ -41,6 +45,8 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
     setFocus(data.periods[data.periods.length - 1] || '');
     setCmpA(data.periods[data.periods.length - 2] || '');
     setCmpB(data.periods[data.periods.length - 1] || '');
+    setRangeStart(data.periods[0] || '');
+    setRangeEnd(data.periods[data.periods.length - 1] || '');
   }, [periodsKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const nodesRef = useRef<Record<string, HTMLElement | null>>({});
@@ -62,11 +68,23 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
   const focusPoint = data.series.find(s => s.period === focus) || sel[sel.length - 1] || data.series[data.series.length - 1];
   const focusIdxInSel = sel.findIndex(s => s.period === focusPoint.period);
   const prevPoint = focusIdxInSel > 0 ? sel[focusIdxInSel - 1] : null;
+  const availableYears = Array.from(new Set(data.periods.map(p => p.slice(0, 4)))).sort();
+  const selectedPeriodsText = selected.length === data.periods.length
+    ? 'Todos los cortes'
+    : selected.length === 1
+      ? `Corte ${periodLabel(selected[0])}`
+      : `${selected.length} cortes seleccionados`;
 
-  const clearPeriodFilter = () => setSelected(data.periods);
+  const clearPeriodFilter = () => {
+    setSelected(data.periods);
+    setFocus(data.periods[data.periods.length - 1] || '');
+    setRangeStart(data.periods[0] || '');
+    setRangeEnd(data.periods[data.periods.length - 1] || '');
+  };
   const togglePeriod = (p: string) => setSelected(prev => {
     if (prev.length === 1 && prev[0] === p) return data.periods;
     const next = prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p].sort();
+    if (next.includes(p)) setFocus(p);
     return next.length ? next : data.periods;
   });
   const isolatePeriod = (period: string) => {
@@ -76,27 +94,47 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
     }
     setSelected([period]);
     setFocus(period);
+    setRangeStart(period);
+    setRangeEnd(period);
   };
+  const chartPeriod = (event: any): string | undefined => (
+    event?.activePayload?.[0]?.payload?.period
+    || event?.payload?.period
+    || event?.period
+    || data.periods.find((p, index) => data.labels[index] === (event?.activeLabel || event?.payload?.label || event?.label))
+  );
   const isolatePeriodFromChart = (event: any) => {
-    const label = event?.activeLabel || event?.payload?.label || event?.label;
-    const period = data.periods.find((p, index) => data.labels[index] === label);
+    const period = chartPeriod(event);
     if (period) isolatePeriod(period);
   };
-  const preset = (which: 'todo' | 'u3' | 'trim' | 'y2026') => {
-    if (which === 'todo') return setSelected(data.periods);
-    if (which === 'u3') return setSelected(data.periods.slice(-3));
-    if (which === 'y2026') return setSelected(data.periods.filter(p => p.startsWith('2026')));
+  const setSelection = (periods: string[]) => {
+    const next = periods.length ? periods : data.periods;
+    setSelected(next);
+    setFocus(next[next.length - 1] || '');
+    setRangeStart(next[0] || '');
+    setRangeEnd(next[next.length - 1] || '');
+  };
+  const preset = (which: 'todo' | 'u3' | 'trim') => {
+    if (which === 'todo') return clearPeriodFilter();
+    if (which === 'u3') return setSelection(data.periods.slice(-3));
     // trimestral: one period per quarter (last of each)
     const byQ = new Map<string, string>();
     for (const p of data.periods) { const q = `${p.slice(0, 4)}Q${Math.ceil((+p.slice(5, 7)) / 3)}`; byQ.set(q, p); }
-    setSelected([...byQ.values()].sort());
+    setSelection([...byQ.values()].sort());
+  };
+  const presetYear = (year: string) => setSelection(data.periods.filter(p => p.startsWith(year)));
+  const applyRange = (from: string, to: string) => {
+    const [a, b] = from <= to ? [from, to] : [to, from];
+    setRangeStart(a);
+    setRangeEnd(b);
+    setSelection(data.periods.filter(p => p >= a && p <= b));
   };
 
   // chart datasets
-  const evoData = sel.map(s => ({ label: s.label, saldo: s.saldo, venPct: +(s.venPct * 100).toFixed(2) }));
-  const qualData = sel.map(s => ({ label: s.label, Vigente: +s.vigPct.toFixed(4), Atrasada: +s.atrPct.toFixed(4), Vencida: +s.venPct.toFixed(4) }));
-  const hhiData = sel.map(s => ({ label: s.label, HHI: +s.hhi.toFixed(3), Top1: +(s.top1 * 100).toFixed(1) }));
-  const rollData = mig.map(m => ({ label: m.label, Deteriorados: m.deteriorated, Curados: -m.cured }));
+  const evoData = sel.map(s => ({ period: s.period, label: s.label, saldo: s.saldo, venPct: +(s.venPct * 100).toFixed(2) }));
+  const qualData = sel.map(s => ({ period: s.period, label: s.label, Vigente: +s.vigPct.toFixed(4), Atrasada: +s.atrPct.toFixed(4), Vencida: +s.venPct.toFixed(4) }));
+  const hhiData = sel.map(s => ({ period: s.period, label: s.label, HHI: +s.hhi.toFixed(3), Top1: +(s.top1 * 100).toFixed(1) }));
+  const rollData = mig.map(m => ({ period: m.period, label: m.label, Deteriorados: m.deteriorated, Curados: -m.cured }));
   const concData = [
     { n: 'Top 1', pct: +(focusPoint.top1 * 100).toFixed(1) },
     { n: 'Top 3', pct: +(focusPoint.top3 * 100).toFixed(1) },
@@ -105,7 +143,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
   ];
   const cliData = sel.map(s => {
     const idx = data.periods.indexOf(s.period);
-    const row: any = { label: s.label };
+    const row: any = { period: s.period, label: s.label };
     data.clientTrends.forEach(ct => { const v = ct.values[idx]; row[ct.client] = v != null ? +(v / 1e6).toFixed(2) : null; });
     return row;
   });
@@ -113,6 +151,26 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
   const vintData = vintage.map(v => ({ cohort: v.cohort, Vigente: +(v.vig / 1e6).toFixed(2), Atrasada: +(v.atr / 1e6).toFixed(2), Vencida: +(v.ven / 1e6).toFixed(2), venPct: +(v.venPct * 100).toFixed(1) }));
   const narrative = useMemo(() => buildCockpitNarrative(data, selected), [data, selected]);
   const snapFocus = useMemo(() => snapshotAnalysis(tapes, focusPoint.period), [tapes, focusPoint.period]);
+  const [groupOverrides, setGroupOverrides] = useState<Record<string, string>>({});
+  const tapeClientId = tapes[0]?.clientId;
+  useEffect(() => {
+    if (!tapeClientId) return;
+    let active = true;
+    db.getClientSetting<Record<string, string>>(tapeClientId, 'loan_tape_group_overrides', {}).then(v => { if (active) setGroupOverrides(v || {}); });
+    return () => { active = false; };
+  }, [tapeClientId]);
+  const separateMember = (memberName: string) => {
+    const next = { ...groupOverrides, [memberName]: '' };
+    setGroupOverrides(next);
+    if (tapeClientId) void db.setClientSetting(tapeClientId, 'loan_tape_group_overrides', next);
+  };
+  const portfolio = useMemo(() => analyzePortfolio(data, focusPoint.period, groupOverrides), [data, focusPoint.period, groupOverrides]);
+  const insights = useMemo(() => (portfolio ? buildLoanTapeInsights(portfolio, data, (snapFocus as any)?.anomalies) : []), [portfolio, data, snapFocus]);
+  const insightGroups = useMemo(() => {
+    const groups = new Map<string, Insight[]>();
+    insights.forEach(i => { (groups.get(i.category) || groups.set(i.category, []).get(i.category)!).push(i); });
+    return [...groups.entries()];
+  }, [insights]);
   const snapA = useMemo(() => (compare && cmpA ? snapshotAnalysis(tapes, cmpA) : null), [tapes, compare, cmpA]);
   const snapB = useMemo(() => (compare && cmpB ? snapshotAnalysis(tapes, cmpB) : null), [tapes, compare, cmpB]);
 
@@ -121,15 +179,10 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
     const target = reserveDownloadTarget();
     try {
       const mod: any = await loadExportModule();
-      const images: Array<{ id: string; base64: string }> = [];
-      for (const [id, node] of Object.entries(nodesRef.current)) {
-        if (!node) continue;
-        try { const b64 = await mod.captureNodePng(node); if (b64) images.push({ id, base64: b64 }); } catch { /* skip */ }
-      }
       await mod.exportLoanTapeCockpit(
         tapes, clientName || 'Cliente', selected,
-        { data, vintage, narrative, snapshot: snapFocus, focusPeriod: focusPoint.period, focusLabel: focusPoint.label },
-        images, target,
+        { data, vintage, snapshot: snapFocus, focusPeriod: focusPoint.period, focusLabel: focusPoint.label, groupOverrides },
+        target,
       );
     } catch (e: any) {
       alert(`No se pudo exportar el Excel: ${e?.message || e}`);
@@ -163,12 +216,15 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
             </button>
           ))}
           <span className="mx-1 h-4 w-px bg-slate-200" />
-          {([['todo', 'Todo'], ['u3', 'Últimos 3'], ['trim', 'Trimestral'], ['y2026', '2026']] as const).map(([k, lbl]) => (
+          {([['todo', 'Todo'], ['u3', 'Últimos 3'], ['trim', 'Trimestral']] as const).map(([k, lbl]) => (
             <button key={k} onClick={() => preset(k)} className="text-[11px] font-bold px-2 py-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">{lbl}</button>
           ))}
-          {selected.length === 1 && (
+          {availableYears.map(year => (
+            <button key={year} onClick={() => presetYear(year)} className="text-[11px] font-bold px-2 py-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">{year}</button>
+          ))}
+          {selected.length !== data.periods.length && (
             <div className="flex items-center gap-1.5 rounded-lg border border-indigo-100 bg-indigo-50 px-2 py-1">
-              <span className="text-[11px] font-black text-indigo-700">Filtrado: {periodLabel(selected[0])}</span>
+              <span className="text-[11px] font-black text-indigo-700">Filtrado: {selectedPeriodsText}</span>
               <button onClick={clearPeriodFilter} className="text-[10px] font-black uppercase tracking-wide text-indigo-500 hover:text-indigo-800">
                 Quitar filtro
               </button>
@@ -176,6 +232,19 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
           )}
         </div>
         <div className="flex items-center gap-3 flex-wrap">
+          <label className="flex items-center gap-1.5 text-xs font-bold text-slate-600">
+            <CalendarRange className="h-3.5 w-3.5 text-slate-400" />
+            Desde:
+            <select value={rangeStart} onChange={e => applyRange(e.target.value, rangeEnd || e.target.value)} className="text-xs border border-slate-200 rounded-lg px-2 py-1">
+              {data.periods.map((p, i) => <option key={p} value={p}>{data.labels[i]}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-1.5 text-xs font-bold text-slate-600">
+            Hasta:
+            <select value={rangeEnd} onChange={e => applyRange(rangeStart || e.target.value, e.target.value)} className="text-xs border border-slate-200 rounded-lg px-2 py-1">
+              {data.periods.map((p, i) => <option key={p} value={p}>{data.labels[i]}</option>)}
+            </select>
+          </label>
           <label className="flex items-center gap-1.5 text-xs font-bold text-slate-600">
             <input type="checkbox" checked={compare} onChange={e => setCompare(e.target.checked)} /> Comparar 2 meses
           </label>
@@ -193,7 +262,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
             <label className="flex items-center gap-1.5 text-xs font-bold text-slate-600">
               Mes foco:
               <select value={focus} onChange={e => setFocus(e.target.value)} className="text-xs border border-slate-200 rounded-lg px-2 py-1">
-                {data.periods.map((p, i) => <option key={p} value={p}>{data.labels[i]}</option>)}
+                {sel.map(s => <option key={s.period} value={s.period}>{s.label}</option>)}
               </select>
             </label>
           )}
@@ -228,6 +297,39 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
         </ul>
       </div>
 
+      {/* Insights */}
+      {insightGroups.length > 0 && (
+        <div className="bg-white border border-slate-200 rounded-2xl p-5">
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <p className="text-xs font-black text-slate-700 uppercase tracking-widest">Insights de cartera — {focusPoint.label}</p>
+            <p className="text-[11px] font-semibold text-slate-400">{insights.length} hallazgos · {insights.filter(i => i.level === 'alert').length} alertas · {insights.filter(i => i.level === 'warn').length} por revisar</p>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-4">
+            {insightGroups.map(([cat, list]) => (
+              <div key={cat}>
+                <p className="text-[11px] font-black uppercase tracking-wider text-indigo-600 mb-1.5">{cat}</p>
+                <ul className="space-y-1.5">
+                  {list.map((i, idx) => (
+                    <li key={idx} className="text-[13px] text-slate-700 leading-snug flex gap-2">
+                      <span className={`mt-1.5 h-2 w-2 rounded-full shrink-0 ${i.level === 'alert' ? 'bg-rose-500' : i.level === 'warn' ? 'bg-amber-500' : i.level === 'good' ? 'bg-emerald-500' : 'bg-indigo-300'}`} />
+                      <span>{i.text}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Gráficas del corte: calidad, concentraciones, buckets, tasas, plazos, originación */}
+      {portfolio && !portfolio.isSummary && (
+        <div className="space-y-2">
+          <p className="text-xs font-black text-slate-700 uppercase tracking-widest px-1">Análisis de cartera — {focusPoint.label}</p>
+          <LoanTapePortfolioCharts portfolio={portfolio} clientName={clientName || 'Cliente'} onSeparateMember={separateMember} />
+        </div>
+      )}
+
       {/* Evolution */}
       <ChartCard title="Evolución de saldo & cartera vencida (>90d)" subtitle="Barras = saldo · línea = % vencida" fileName={`Evolucion_${clientName}`} captureId="evo" registerNode={registerNode} legend={[{ label: 'Saldo', color: C.indigo }, { label: 'Vencida %', color: C.red }]}>
         <div style={{ height: 260 }}>
@@ -238,7 +340,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
               <YAxis yAxisId="l" tickFormatter={v => moneyM(Number(v))} tick={{ fontSize: 11 }} width={78} />
               <YAxis yAxisId="r" orientation="right" tickFormatter={v => pctPoint(Number(v))} tick={{ fontSize: 11 }} width={58} />
               <Tooltip contentStyle={tooltipStyle} formatter={(v: any, n: any) => n === 'saldo' ? money(Number(v)) : pctPoint(Number(v))} />
-              <Bar yAxisId="l" dataKey="saldo" fill={C.indigo} radius={[3, 3, 0, 0]} name="Saldo" cursor="pointer" />
+              <Bar yAxisId="l" dataKey="saldo" fill={C.indigo} radius={[3, 3, 0, 0]} name="Saldo" cursor="pointer" onClick={isolatePeriodFromChart} />
               <Line yAxisId="r" dataKey="venPct" stroke={C.red} strokeWidth={2.4} dot={{ r: 4, cursor: 'pointer' }} activeDot={{ r: 6, onClick: isolatePeriodFromChart }} name="Vencida %" />
             </ComposedChart>
           </ResponsiveContainer>
@@ -256,9 +358,9 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
                 <YAxis tickFormatter={v => pctS(Number(v))} tick={{ fontSize: 11 }} width={58} />
                 <Tooltip contentStyle={tooltipStyle} formatter={(v: any) => pctS(Number(v))} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Bar dataKey="Vigente" stackId="q" fill={C.green} cursor="pointer" />
-                <Bar dataKey="Atrasada" stackId="q" fill={C.amber} cursor="pointer" />
-                <Bar dataKey="Vencida" stackId="q" fill={C.red} cursor="pointer" />
+                <Bar dataKey="Vigente" stackId="q" fill={C.green} cursor="pointer" onClick={isolatePeriodFromChart} />
+                <Bar dataKey="Atrasada" stackId="q" fill={C.amber} cursor="pointer" onClick={isolatePeriodFromChart} />
+                <Bar dataKey="Vencida" stackId="q" fill={C.red} cursor="pointer" onClick={isolatePeriodFromChart} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -333,8 +435,8 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
                 <YAxis tick={{ fontSize: 11 }} tickFormatter={v => intS(Number(v))} width={44} />
                 <Tooltip contentStyle={tooltipStyle} formatter={(v: any) => intS(Number(v))} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Bar dataKey="Deteriorados" fill={C.red} stackId="s" radius={[3, 3, 0, 0]} cursor="pointer" />
-                <Bar dataKey="Curados" fill={C.green} stackId="s" radius={[0, 0, 3, 3]} cursor="pointer" />
+                <Bar dataKey="Deteriorados" fill={C.red} stackId="s" radius={[3, 3, 0, 0]} cursor="pointer" onClick={isolatePeriodFromChart} />
+                <Bar dataKey="Curados" fill={C.green} stackId="s" radius={[0, 0, 3, 3]} cursor="pointer" onClick={isolatePeriodFromChart} />
               </BarChart>
             </ResponsiveContainer>
           </div>

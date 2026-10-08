@@ -4,10 +4,12 @@ import LoginPage from './components/auth/LoginPage';
 import ClientList from './components/clients/ClientList';
 import { Client, CustomField, db, RolloutGuardFeature, RolloutGuardResult } from './db/index';
 import { AISettings, loadAISettings } from './services/ai';
-import { Activity, AlertTriangle, BarChart3, Building2, ClipboardList, Inbox, Layers3, LayoutDashboard, Settings, LogOut, RefreshCw, ShieldAlert, ShieldCheck, Moon, Sun, Sparkles } from 'lucide-react';
+import { Activity, AlertTriangle, BarChart3, Building2, ClipboardList, Inbox, Layers3, LayoutDashboard, Settings, LogOut, RefreshCw, ShieldAlert, ShieldCheck, Moon, Sun, Sparkles, HelpCircle } from 'lucide-react';
 import { isSupabaseConfigured, supabaseConfigError } from './lib/supabase';
 import { lazyWithChunkRetry, resetChunkRetryStateForCurrentBuild } from './lib/lazyWithChunkRetry';
 import { logDiag } from './lib/telemetry';
+import { needsOnboarding, onboardingKey, type OnboardingRecord } from './lib/onboarding';
+import { favoritesDefaultKey } from './lib/indicatorInsights';
 
 const ClientForm = lazyWithChunkRetry(() => import('./components/clients/ClientForm'), 'client-form');
 const ClientDetail = lazyWithChunkRetry(() => import('./components/clients/ClientDetail'), 'client-detail');
@@ -18,6 +20,9 @@ const IngestionInboxPage = lazyWithChunkRetry(() => import('./components/ingesti
 const LifecyclePage = lazyWithChunkRetry(() => import('./components/lifecycle/LifecyclePage'), 'lifecycle');
 const CrmDashboardPage = lazyWithChunkRetry(() => import('./components/crm/CrmDashboardPage'), 'crm-dashboard');
 const DashboardPage = lazyWithChunkRetry(() => import('./components/dashboard/DashboardPage'), 'dashboard');
+const AssistantDock = lazyWithChunkRetry(() => import('./components/assistant/AssistantDock'), 'assistant-dock');
+const OnboardingTour = lazyWithChunkRetry(() => import('./components/onboarding/OnboardingTour'), 'onboarding-tour');
+const HelpCenter = lazyWithChunkRetry(() => import('./components/onboarding/HelpCenter'), 'help-center');
 const CompanyDefaultPage = lazyWithChunkRetry(() => import('./components/zscore/CompanyDefaultPage'), 'zscore');
 
 type Route = 'dashboard' | 'clients' | 'client_new' | 'client_edit' | 'client_detail' | 'crm' | 'benchmarking' | 'consolidation' | 'lifecycle' | 'zscore' | 'ingestion' | 'settings';
@@ -188,7 +193,25 @@ const App: React.FC = () => {
   const [editingClient, setEditingClient] = useState<Client | undefined>(undefined);
   const [aiSettings, setAiSettings] = useState<AISettings>(loadAISettings);
   const [initializing, setInitializing] = useState(true);
+  const [showTour, setShowTour] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  const [tourFavorites, setTourFavorites] = useState<string[]>([]);
   const [theme, setTheme] = useState<'day' | 'night'>(() => (localStorage.getItem('finmonitor_theme') as 'day' | 'night') || 'day');
+
+  // First time an analyst gets in (or the tour content changed): start the guided tour once.
+  useEffect(() => {
+    if (!session || session.role !== 'analyst') return;
+    let active = true;
+    (async () => {
+      const record = await db.getOrgSetting<OnboardingRecord | null>(session.userId, onboardingKey(session.userId), null);
+      if (!active || !needsOnboarding(record)) return;
+      let defaults: string[] = [];
+      try { defaults = JSON.parse(localStorage.getItem(favoritesDefaultKey(session.userId)) || '[]'); } catch { /* none yet */ }
+      setTourFavorites(Array.isArray(defaults) ? defaults : []);
+      setShowTour(true);
+    })().catch(() => undefined);
+    return () => { active = false; };
+  }, [session?.userId, session?.role]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -351,6 +374,7 @@ const App: React.FC = () => {
           {navItems.map(item => (
             <button
               key={item.id}
+              data-tour={`nav-${item.id}`}
               onClick={() => setRoute(item.id)}
               className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm font-bold transition-all ${
                 route === item.id || (route === 'client_detail' && item.id === 'clients') || (route === 'client_new' && item.id === 'clients') || (route === 'client_edit' && item.id === 'clients')
@@ -366,6 +390,14 @@ const App: React.FC = () => {
 
         {/* User info */}
         <div className="p-4 border-t border-slate-100">
+          <button
+            onClick={() => setShowHelp(true)}
+            data-tour="help"
+            className="mb-3 w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs font-black bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-all border border-indigo-100"
+          >
+            <HelpCircle className="w-4 h-4" />
+            Ayuda y tour
+          </button>
           <button
             onClick={toggleTheme}
             className="mb-3 w-full flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl text-xs font-black bg-slate-50 text-slate-600 hover:bg-slate-100 transition-all border border-slate-100"
@@ -506,6 +538,34 @@ const App: React.FC = () => {
         </Suspense>
         </RouteErrorBoundary>
       </main>
+      <Suspense fallback={null}>
+        <AssistantDock
+          aiSettings={aiSettings}
+          currentClientId={['client_detail', 'client_edit'].includes(route) ? selectedClientId : null}
+        />
+      </Suspense>
+      <Suspense fallback={null}>
+        {showTour && (
+          <OnboardingTour
+            userId={session.userId}
+            userName={session.userName}
+            initialFavorites={tourFavorites}
+            onNavigate={r => setRoute(r === 'settings' && session.role !== 'manager' ? 'dashboard' : r)}
+            onClose={() => { setShowTour(false); setRoute('dashboard'); }}
+          />
+        )}
+        {showHelp && (
+          <HelpCenter
+            onClose={() => setShowHelp(false)}
+            onRestartTour={() => {
+              let defaults: string[] = [];
+              try { defaults = JSON.parse(localStorage.getItem(favoritesDefaultKey(session.userId)) || '[]'); } catch { /* none */ }
+              setTourFavorites(Array.isArray(defaults) ? defaults : []);
+              setShowTour(true);
+            }}
+          />
+        )}
+      </Suspense>
     </div>
   );
 };

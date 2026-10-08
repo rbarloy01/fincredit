@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Covenant_DB, FinancialStatement_DB } from '../src/db/index';
-import { getMetric } from '../src/lib/financialMetrics';
+import { covenantDirection, covenantPerformanceHistory, getMetric, incomeSpan, standardRatios } from '../src/lib/financialMetrics';
 import { forecastCovenant, forecastCovenants } from '../src/lib/covenantForecastModel';
 
 const mapped = (values: Partial<FinancialStatement_DB['mappedData']>): FinancialStatement_DB['mappedData'] => ({
@@ -161,4 +161,67 @@ test('forecastCovenants ranks the covenant with the tighter threshold first', ()
   assert.equal(ranked.length, 2);
   assert.equal(ranked[0].covenantId, 'cov-tight');
   assert.ok(ranked[0].breachProbability > ranked[1].breachProbability);
+});
+
+const icapCovenant = (operator: Covenant_DB['operator'], threshold = ''): Covenant_DB => ({
+  id: 'icap', clientId: 'client-1', name: 'ICAP', type: 'financial', formula: 'ratio:equity/totalAssets',
+  threshold, operator, description: '', isCustom: false, createdAt: '2026-01-01',
+} as Covenant_DB);
+
+test('ICAP rising is an improvement even when the covenant has no threshold (form default operator lte/none)', () => {
+  const stmts = [
+    statement('dic 25', '2025-12-31', { equity: 86_168_157, totalAssets: 96_827_860 }),
+    statement('abr 26', '2026-04-30', { equity: 120_876_066, totalAssets: 129_532_752 }),
+  ];
+  for (const operator of ['lte', 'none'] as const) {
+    const history = covenantPerformanceHistory(icapCovenant(operator), stmts);
+    assert.equal(history[1].movement, 'betterment', `operator ${operator} without threshold`);
+  }
+});
+
+test('covenant direction: contract threshold operator wins; otherwise ratio semantics decide', () => {
+  assert.equal(covenantDirection(icapCovenant('lte', '10')), 'lower');
+  assert.equal(covenantDirection(icapCovenant('gte', '15')), 'higher');
+  assert.equal(covenantDirection(icapCovenant('lte')), 'higher');
+  assert.equal(covenantDirection({ ...icapCovenant('none'), name: 'Apalancamiento', formula: 'ratio:totalDebt/equity' }), 'lower');
+  assert.equal(covenantDirection({ ...icapCovenant('none'), name: 'Cartera vencida', formula: 'ratio:pastDuePortfolio/managedPortfolio' }), 'lower');
+});
+
+test('income-statement ratios are annualized for accumulated periods (Tim Leasing abril = 4 meses)', () => {
+  const dec = statement('Diciembre 2025', '2025-12-31', { netIncome: 10_710_624, totalAssets: 96_827_860, equity: 86_168_157, revenue: 25_908_177 });
+  const apr = statement('Abril 2026', '2026-04-30', { netIncome: 8_207_908, totalAssets: 129_532_752, equity: 120_876_066, revenue: 15_512_141 });
+  assert.equal(incomeSpan(dec, [apr]).months, 12);
+  assert.equal(incomeSpan(apr, [dec]).months, 4);
+  const roa = (stmt: FinancialStatement_DB, siblings: FinancialStatement_DB[]) => standardRatios(stmt, siblings).find(r => r.key === 'roa')!;
+  assert.ok(Math.abs((roa(dec, [apr]).value as number) - 10_710_624 / 96_827_860) < 1e-9);
+  assert.ok(Math.abs((roa(apr, [dec]).value as number) - (8_207_908 * 3) / 129_532_752) < 1e-9);
+  assert.match(roa(apr, [dec]).formula, /anualizado ×3\.00/);
+});
+
+test('a series whose revenue rises and falls is monthly (not accumulated): no annualization surprise', () => {
+  const m = (p: string, d: string, rev: number) => statement(p, d, { revenue: rev, netIncome: rev * 0.1, totalAssets: 1_000, equity: 500 });
+  const series = [m('ene 25', '2025-01-31', 100), m('feb 25', '2025-02-28', 80), m('mar 25', '2025-03-31', 120)];
+  assert.equal(incomeSpan(series[2], series).months, 1);
+  const cumulative = [m('ene 25', '2025-01-31', 100), m('feb 25', '2025-02-28', 190), m('mar 25', '2025-03-31', 310)];
+  assert.equal(incomeSpan(cumulative[2], cumulative).months, 3);
+});
+
+const roaIndicator = (operator: Covenant_DB['operator'], threshold = ''): Covenant_DB => ({
+  id: 'roa', clientId: 'client-1', name: 'ROA', type: 'financial', formula: 'ratio:netIncome/totalAssets',
+  threshold, operator, description: '', isCustom: false, createdAt: '2026-01-01',
+} as Covenant_DB);
+
+test('storyline: an indicator without a limit is compared annualized, so ROA of 4 accumulated months is not a fake deterioration', () => {
+  const dec = statement('Diciembre 2025', '2025-12-31', { netIncome: 10_710_624, totalAssets: 96_827_860, equity: 86_168_157, revenue: 25_908_177 });
+  const apr = statement('Abril 2026', '2026-04-30', { netIncome: 8_207_908, totalAssets: 129_532_752, equity: 120_876_066, revenue: 15_512_141 });
+  const history = covenantPerformanceHistory(roaIndicator('none'), [dec, apr]);
+  assert.ok(Math.abs((history[1].value as number) - (8_207_908 * 3) / 129_532_752) < 1e-9);
+  assert.equal(history[1].movement, 'betterment'); // 19.0% annualized vs 11.1% in December
+});
+
+test('an indicator WITH a contractual limit is measured literally, as the contract states', () => {
+  const dec = statement('Diciembre 2025', '2025-12-31', { netIncome: 10_710_624, totalAssets: 96_827_860, equity: 86_168_157, revenue: 25_908_177 });
+  const apr = statement('Abril 2026', '2026-04-30', { netIncome: 8_207_908, totalAssets: 129_532_752, equity: 120_876_066, revenue: 15_512_141 });
+  const history = covenantPerformanceHistory(roaIndicator('gte', '5'), [dec, apr]);
+  assert.ok(Math.abs((history[1].value as number) - 8_207_908 / 129_532_752) < 1e-9);
 });

@@ -8,11 +8,15 @@
       "destination": "/api/bytez?provider=nvidia_nim"
     },
     {
+      "source": "/api/syntage",
+      "destination": "/api/gemini?route=syntage"
+    },
+    {
       "source": "/api/pipeline/import",
       "destination": "/api/documents/process?pipelineImport=1"
     },
     {
-      "source": "/((?!api/|assets/).*)",
+      "source": "/((?!api/|assets/|favicon\\.ico$|favicon\\.svg$|favicon-32x32\\.png$|apple-touch-icon\\.png$|site\\.webmanifest$).*)",
       "destination": "/index.html"
     }
   ],

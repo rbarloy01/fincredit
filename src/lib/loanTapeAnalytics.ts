@@ -1,4 +1,5 @@
 import { LoanTape_DB } from '../db/index';
+import { DPD_BUCKET_DEFS, DPD_CONSISTENCY, QUALITY_RULES, RISK_THRESHOLDS, checkDpdConsistency, classifyDpd, dpdRangeFromText, isStrongDpdText, resolveDpd, type DpdConsistency, type DpdSource } from './portfolioRules';
 import { StructuredLoanTapeAnalysis } from '../services/ai';
 import { parseNullableFinancialNumber } from './numberParsing';
 
@@ -13,6 +14,9 @@ export interface StandardLoan {
   end_date: string | null;
   loan_type: string | null;
   days_overdue: number | null;
+  dpd_source?: DpdSource | null;
+  id_source?: 'inferred' | null;
+  installment?: number | null;
   currency: string | null;
   industry: string | null;
   state: string | null;
@@ -20,7 +24,7 @@ export interface StandardLoan {
   source_granularity?: 'loan' | 'product_summary' | 'state_summary';
   source_share?: number | null;
 }
-type StandardLoanField = Exclude<keyof StandardLoan, 'source_granularity' | 'source_share'>;
+type StandardLoanField = Exclude<keyof StandardLoan, 'source_granularity' | 'source_share' | 'dpd_source' | 'id_source' | 'installment'>;
 
 export interface MappingNote {
   source_header: string;
@@ -79,20 +83,20 @@ const SYNONYMS: Record<StandardLoanField, string[]> = {
   loan_id: ['contrato', 'loan id', 'loan number', 'loan no', 'folio', 'numero credito', 'numero de credito', 'numero de prestamo intermediario', 'prestamo intermediario', 'no credito', 'no contrato', 'id prestamo', 'id credito', 'operacion', 'cuenta', 'no cuenta', 'referencia'],
   client: ['cliente', 'client', 'customer', 'razon social', 'nombre', 'nombre cliente', 'nombre acreditado', 'acreditado', 'deudor', 'borrower', 'obligor', 'client id', 'id cliente', 'apellidos', 'rfc'],
   amount: ['amount', 'loan amount', 'lended amount', 'principal', 'original amount', 'monto original', 'monto otorgado', 'monto maximo', 'monto autorizado', 'importe dispuesto', 'importe original', 'limite credito', 'linea autorizada', 'costo'],
-  outstanding_balance: ['capital balance', 'saldo capital', 'saldo insoluto', 'saldo actual', 'saldo vigente', 'saldo total', 'capital vigente', 'capital vencido', 'capital moroso y vencido', 'capital mosoro y vencido', 'capital por pagar', 'capital pendiente', 'saldo insoluto capital', 'principal balance', 'outstanding', 'balance'],
+  outstanding_balance: ['capital balance', 'saldo capital', 'saldo insoluto', 'saldo actual', 'saldo vigente', 'saldo total', 'capital vigente', 'capital vencido', 'capital moroso y vencido', 'capital mosoro y vencido', 'capital por pagar', 'capital pendiente', 'saldo insoluto capital', 'principal balance', 'outstanding', 'balance', 'monto activo', 'saldo dispuesto'],
   interest_rate: ['interest rate', 'tasa', 'tasa interes', 'tasa de interes', 'tasa final', 'tasa base', 'tasa anual de interes', 'tasa sobretasa acreditado', 'rate', 'rate %', 'tir', 'tna'],
-  loan_status: ['status', 'estado credito', 'estado del credito', 'loan status', 'estatus', 'estatus credito', 'situacion', 'condicion', 'clasificacion'],
+  loan_status: ['status', 'estado credito', 'estado del credito', 'estado del activo', 'estatus del activo', 'estado activo', 'loan status', 'estatus', 'estatus credito', 'situacion', 'condicion', 'clasificacion'],
   start_date: ['start date', 'origination date', 'fecha inicio', 'fecha otorgamiento', 'fecha apertura', 'fecha disposicion', 'fecha alta', 'disbursement date'],
   end_date: ['end date', 'maturity date', 'fecha vencimiento', 'fecha fin', 'fecha pago final', 'due date'],
   loan_type: ['loan type', 'producto', 'product', 'product type', 'tipo contrato', 'tipo credito', 'tipo prestamo', 'tipo producto', 'linea', 'modalidad', 'subproducto', 'segmento', 'programa', 'plan', 'esquema'],
-  days_overdue: ['days overdue', 'days past due', 'dpd', 'mora dias', 'dias mora', 'dias atraso', 'dias de atraso', 'dias vencidos', 'dias de vencidos', 'dias vencido', 'dias vencida', 'delinquent days'],
+  days_overdue: ['days overdue', 'days past due', 'dpd', 'mora dias', 'dias mora', 'dias de mora', 'dias en mora', 'dias de retraso', 'dias atraso', 'dias de atraso', 'dias vencidos', 'dias de vencidos', 'dias vencido', 'dias vencida', 'delinquent days'],
   currency: ['currency', 'moneda', 'divisa'],
-  industry: ['industry', 'giro', 'sector', 'industria', 'actividad economica', 'ramo'],
+  industry: ['industry', 'giro', 'sector', 'industria', 'actividad economica', 'ramo', 'sub grupo', 'subgrupo', 'sector economico'],
   state: ['state', 'provincia', 'entidad', 'estado residencia', 'estado de residencia', 'region', 'plaza', 'localidad'],
   file_date: ['file date', 'fecha archivo', 'fecha corte', 'fecha reporte', 'corte', 'periodo'],
 };
 
-export const PAID_STATUSES = ['paid', 'fully paid', 'paid off', 'closed', 'canceled', 'cancelled', 'liquidated', 'liquidado', 'pagado'];
+export const PAID_STATUSES = ['paid', 'fully paid', 'paid off', 'closed', 'canceled', 'cancelled', 'liquidated', 'liquidado', 'liquidada', 'pagado', 'pagada', 'settled', 'saldado', 'finiquitado'];
 
 export function normalize(value: any): string {
   return String(value ?? '')
@@ -126,11 +130,68 @@ function excelSerialToDate(serial: number): string | null {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
+const PERIOD_MONTHS_ES: Record<string, number> = {
+  ene: 1, enero: 1, jan: 1, january: 1,
+  feb: 2, febrero: 2, february: 2,
+  mar: 3, marzo: 3, march: 3,
+  abr: 4, abril: 4, apr: 4, april: 4,
+  may: 5, mayo: 5,
+  jun: 6, junio: 6, june: 6,
+  jul: 7, julio: 7, july: 7,
+  ago: 8, agosto: 8, aug: 8, august: 8,
+  sep: 9, sept: 9, septiembre: 9, september: 9,
+  oct: 10, octubre: 10, october: 10,
+  nov: 11, noviembre: 11, november: 11,
+  dic: 12, diciembre: 12, dec: 12, december: 12,
+};
+
+function fullYearToken(rawYear: string): number {
+  if (rawYear.length === 4) return Number(rawYear);
+  const year = Number(rawYear);
+  return year >= 70 ? 1900 + year : 2000 + year;
+}
+
+function dateISO(year: number, month: number, day: number): string | null {
+  if (!Number.isFinite(year) || month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const date = new Date(year, month - 1, day);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null;
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function endOfMonthISO(year: number, month: number): string | null {
+  if (!Number.isFinite(year) || month < 1 || month > 12) return null;
+  const date = new Date(year, month, 0);
+  return dateISO(date.getFullYear(), month, date.getDate());
+}
+
+export function parseLoanTapePeriodText(value?: string | null): string | null {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const normalized = normalize(raw);
+  const monthPattern = Object.keys(PERIOD_MONTHS_ES).join('|');
+  const dayMonthYear = normalized.match(new RegExp(`\\b(\\d{1,2})\\s*(?:de\\s*)?(${monthPattern})(?:\\s*(?:de|del))?\\s*(\\d{2}|\\d{4})\\b`));
+  if (dayMonthYear) {
+    return dateISO(fullYearToken(dayMonthYear[3]), PERIOD_MONTHS_ES[dayMonthYear[2]], Number(dayMonthYear[1]));
+  }
+
+  let monthYear = normalized.match(new RegExp(`\\b(${monthPattern})\\s*(\\d{2}|\\d{4})\\b`));
+  if (!monthYear) monthYear = normalized.match(new RegExp(`\\b(\\d{2}|\\d{4})\\s*(${monthPattern})\\b`));
+  if (monthYear) {
+    const monthToken = PERIOD_MONTHS_ES[monthYear[1]] ? monthYear[1] : monthYear[2];
+    const yearToken = PERIOD_MONTHS_ES[monthYear[1]] ? monthYear[2] : monthYear[1];
+    return endOfMonthISO(fullYearToken(yearToken), PERIOD_MONTHS_ES[monthToken]);
+  }
+
+  return null;
+}
+
 export function parseDate(value: any): string | null {
   if (value === null || value === undefined || value === '') return null;
   if (typeof value === 'number') return excelSerialToDate(value);
   const raw = String(value).trim();
   if (!raw) return null;
+  const textual = parseLoanTapePeriodText(raw);
+  if (textual) return textual;
   const direct = raw.match(/(20\d{2})[-/_.](\d{1,2})[-/_.](\d{1,2})/);
   if (direct) return `${direct[1]}-${direct[2].padStart(2, '0')}-${direct[3].padStart(2, '0')}`;
   const mx = raw.match(/(\d{1,2})[-/_.](\d{1,2})[-/_.](20\d{2})/);
@@ -142,6 +203,8 @@ export function parseDate(value: any): string | null {
 
 function parseFileDate(fileName?: string): string | null {
   const raw = fileName || '';
+  const textual = parseLoanTapePeriodText(raw);
+  if (textual) return textual;
   const normalized = normalize(raw);
   const monthByName: Record<string, number> = {
     ene: 1, enero: 1, jan: 1, january: 1,
@@ -176,21 +239,24 @@ function parseFileDate(fileName?: string): string | null {
     const byName = endOfMonth(fullYear(yearToken), monthByName[monthToken]);
     if (byName) return byName;
   }
+  // "260931" (31 de septiembre) no existe: un día 29-31 que se pasa del mes se lleva al último día del mes
+  // (la intención es el cierre de mes); nunca se devuelve una fecha inválida, que JS movería al mes siguiente.
+  const validDay = (year: number, month: number, day: number): string | null => {
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    const last = new Date(year, month, 0).getDate();
+    const d = day > last ? last : day;
+    return `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  };
   const ymd = raw.match(/(20\d{2})[-_. ]?(\d{2})[-_. ]?(\d{2})/);
   if (ymd) {
-    const month = Number(ymd[2]);
-    const day = Number(ymd[3]);
-    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
+    const valid = validDay(Number(ymd[1]), Number(ymd[2]), Number(ymd[3]));
+    if (valid) return valid;
   }
   const yymmdd = raw.match(/\b(\d{2})[-_. ]?(\d{2})[-_. ]?(\d{2})\b/);
   if (yymmdd) {
-    const year = Number(yymmdd[1]) >= 70 ? `19${yymmdd[1]}` : `20${yymmdd[1]}`;
-    const month = Number(yymmdd[2]);
-    const day = Number(yymmdd[3]);
-    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) return `${year}-${yymmdd[2]}-${yymmdd[3]}`;
-    const altDay = Number(yymmdd[2]);
-    const altMonth = Number(yymmdd[3]);
-    if (altMonth >= 1 && altMonth <= 12 && altDay >= 1 && altDay <= 31) return `${year}-${yymmdd[3]}-${yymmdd[2]}`;
+    const year = Number(yymmdd[1]) >= 70 ? 1900 + Number(yymmdd[1]) : 2000 + Number(yymmdd[1]);
+    const valid = validDay(year, Number(yymmdd[2]), Number(yymmdd[3])) || validDay(year, Number(yymmdd[3]), Number(yymmdd[2]));
+    if (valid) return valid;
   }
   return null;
 }
@@ -262,19 +328,27 @@ function valueSampleScore(target: StandardLoanField, values: any[]): number {
 
 function headerHeuristicScore(target: StandardLoanField, norm: string): number {
   if (!norm) return 0;
-  const looksMonetary = /(capital|interes|saldo|monto|importe|pesos|balance|principal|cartera)/.test(norm);
+  const looksMonetary = /(capital|interes|saldo|monto|importe|pesos|balance|principal|cartera|condonacion|moratori|cobrad|generad|pagad|devengad|ordinari)/.test(norm);
+  // "Condonación de Intereses", "Intereses Moratorios Cobrados" are amounts, not a rate; "Saldo vencido" is the overdue part, not the balance.
+  const interestAmount = /(condonacion|cobrad|generad|moratori|vigente|vencid|devengad|pagad|por cobrar|acumulad)/.test(norm);
+  const overdueAmount = /(vencid|mora|moros|condonacion|cobrad|pagad|historic|interes)/.test(norm) && !/capital/.test(norm);
   if (target === 'loan_id' && /(folio|contrato|credito|cuenta|operacion|referencia)/.test(norm) && /(no|num|numero|id|clave|codigo|cuenta|folio)/.test(norm)) return 35;
   if (target === 'loan_id' && /(prestamo|credito)/.test(norm) && /(intermediario|numero|num|no)/.test(norm)) return 40;
+  if (target === 'loan_id' && /^(id|no|num|numero|folio)$/.test(norm)) return 70;
+  if (target === 'outstanding_balance' && /^total$/.test(norm)) return 45;
   if (target === 'client' && /(cliente|acreditado|deudor|razon social|empresa|nombre)/.test(norm) && !/(credito|contrato|producto|estatus|estado)/.test(norm)) return 35;
   if (target === 'amount' && /(monto|importe|limite|linea|autorizad|otorgad|dispuest|original)/.test(norm) && !/(saldo|insoluto|vencid|vigente|actual)/.test(norm)) return 35;
-  if (target === 'outstanding_balance' && /(saldo|insoluto|balance|capital|principal|cartera)/.test(norm) && !/(tasa|dias)/.test(norm)) return 40;
-  if (target === 'interest_rate' && /(tasa|rate|interes|tir|tna)/.test(norm)) return 40;
-  if (target === 'loan_status' && /(estatus|status|situacion|condicion|clasificacion|estado credito)/.test(norm)) return 35;
+  if (target === 'outstanding_balance' && /(saldo|insoluto|balance|capital|principal|cartera)/.test(norm) && !/(tasa|dias)/.test(norm) && !overdueAmount) return 40;
+  if (target === 'interest_rate' && /(tasa|rate|tir|tna)/.test(norm)) return 40;
+  if (target === 'interest_rate' && /interes/.test(norm) && !interestAmount) return 40;
+  if (target === 'loan_status' && /(estatus|status|situacion|condicion|clasificacion|estado credito|estado del activo)/.test(norm)) return 35;
   if (target === 'start_date' && /(fecha|date)/.test(norm) && /(inicio|apertura|otorg|disposicion|alta|originacion)/.test(norm)) return 40;
   if (target === 'end_date' && /(dias|meses)/.test(norm) && /(vencid|mora|atras)/.test(norm)) return 0;
   if (target === 'end_date' && /(fecha|date|vencimiento|maturity|due)/.test(norm) && /(venc|fin|maturity|due|pago final)/.test(norm)) return 40;
   if (target === 'loan_type' && /(producto|tipo|modalidad|subproducto|segmento|programa|plan|esquema)/.test(norm)) return 35;
   if (target === 'days_overdue' && looksMonetary) return 0;
+  // "No. pagos vencidos" / "cuotas vencidas" cuentan PAGOS, no días: tomarlos como DPD deja 3 pagos atrasados en "3 días" (vigente).
+  if (target === 'days_overdue' && /(pagos|cuotas|mensualidades|amortizaciones|exhibiciones|rentas)/.test(norm) && !/(dias|dpd)/.test(norm)) return 0;
   if (target === 'days_overdue' && /(dpd|dias|mora|atras|vencid|delinquent)/.test(norm)) return 45;
   if (target === 'currency' && /(moneda|divisa|currency)/.test(norm)) return 45;
   if (target === 'industry' && /(giro|sector|industria|actividad|ramo)/.test(norm)) return 35;
@@ -292,6 +366,21 @@ function headerMatchScore(target: StandardLoanField, norm: string): { score: num
   return heuristic ? { score: heuristic, confidence: 'low', reasoning: 'Header matched semantic loan tape pattern' } : { score: 0, confidence: 'low', reasoning: '' };
 }
 
+// How many distinct loan-tape fields a candidate header row names. Used to find the real header under title/summary banners.
+export function scoreHeaderRow(cells: any[]): number {
+  const targets = Object.keys(SYNONYMS) as StandardLoanField[];
+  const hit = new Set<StandardLoanField>();
+  for (const c of cells) {
+    const norm = normalize(c);
+    if (!norm || norm.length > 60) continue;
+    for (const t of targets) {
+      if (hit.has(t)) continue;
+      if (headerMatchScore(t, norm).score >= 40) { hit.add(t); break; }
+    }
+  }
+  return hit.size;
+}
+
 function pickColumns(headers: string[], rows: any[] = []) {
   const mapping: Partial<Record<StandardLoanField, string>> = {};
   const notes: MappingNote[] = [];
@@ -300,6 +389,8 @@ function pickColumns(headers: string[], rows: any[] = []) {
 
   const capitalVigente = normalized.find(h => /capital.*vigente/.test(h.norm) && !/interes/.test(h.norm))?.header;
   const capitalVencido = normalized.find(h => /capital.*(vencid|moros|mosor)/.test(h.norm) && !/interes/.test(h.norm))?.header;
+  const installmentHeader = normalized.find(h => /^(renta|pago|mensualidad|cuota|amortizacion)( mensual| periodic[oa])?( con iva| sin iva)?$|^renta mensual|^pago mensual|^mensualidad/.test(h.norm))?.header;
+  const overdueAmountHeader = normalized.find(h => /^(monto|saldo|importe) (en )?(mora|vencid[oa])$/.test(h.norm))?.header;
 
   const targetOrder: StandardLoanField[] = [
     'days_overdue', 'outstanding_balance', 'amount', 'interest_rate', 'start_date', 'end_date',
@@ -315,12 +406,38 @@ function pickColumns(headers: string[], rows: any[] = []) {
         const headerScore = headerMatchScore(target, h.norm);
         const values = rows.map(row => row?.[h.header]);
         const valueScore = valueSampleScore(target, values);
-        return { ...h, score: headerScore.score + valueScore, headerScore, valueScore };
+        // "id_cliente" y "nombre_cliente" son sinónimos exactos de client: gana el nombre. Un identificador
+        // numérico solo sirve de respaldo cuando no hay ninguna columna con nombres.
+        let clientAdjust = 0;
+        let idFallbackScore = 0;
+        if (target === 'client') {
+          const idLike = (/(^| )(id|clave|codigo|cod|num|numero|no)( |$)/.test(h.norm) && !/(nombre|razon|name|acreditado)/.test(h.norm)) || /^rfc( |$)|(^| )rfc$/.test(h.norm);
+          const sample = values.filter(v => v !== null && v !== undefined && String(v).trim() !== '').slice(0, 50);
+          const mostlyNumeric = sample.length > 0 && sample.filter(v => /^[\d.,\s-]+$/.test(String(v))).length / sample.length >= 0.9;
+          if (idLike) clientAdjust -= 60;
+          if (mostlyNumeric) clientAdjust -= 40;
+          if (idLike || mostlyNumeric) idFallbackScore = headerScore.score + valueScore;
+        }
+        // Una fecha de corte / reporte describe el archivo, no al crédito: nunca es inicio ni vencimiento.
+        const cutoffAsLoanDate = (target === 'start_date' || target === 'end_date') && /(corte|reporte|archivo)/.test(h.norm) ? -1000 : 0;
+        return { ...h, score: headerScore.score + valueScore + clientAdjust + cutoffAsLoanDate, headerScore, valueScore, idFallbackScore };
       })
       .filter(h => h.score >= 30)
       .sort((a, b) => b.score - a.score);
 
-    const best = candidates[0];
+    let best = candidates[0];
+    if (!best && target === 'client') {
+      // No column with names: an explicit client identifier still lets us group by acreditado (concentration, migration).
+      best = normalized
+        .filter(h => !used.has(h.header))
+        .map(h => {
+          const headerScore = headerMatchScore(target, h.norm);
+          const idLike = /(^| )(id|clave|codigo|cod|num|numero|no)( |$)/.test(h.norm);
+          return { ...h, score: headerScore.score, headerScore, valueScore: 0, idFallbackScore: idLike ? headerScore.score : 0 };
+        })
+        .filter(h => h.idFallbackScore >= 75)
+        .sort((a, b) => b.idFallbackScore - a.idFallbackScore)[0];
+    }
     if (best) {
       mapping[target] = best.header;
       used.add(best.header);
@@ -333,16 +450,94 @@ function pickColumns(headers: string[], rows: any[] = []) {
     }
   }
 
+  // Fecha de corte explícita en el archivo (p. ej. "Fecha de corte"): manda sobre el nombre del archivo. Solo se
+  // acepta si el encabezado lo dice y la columna es una fecha casi constante (un corte, no fechas por crédito).
+  const cutoffColumn = normalized
+    .filter(h => !used.has(h.header) && headerMatchScore('file_date', h.norm).score >= 40)
+    .find(h => {
+      const values = rows.map(row => row?.[h.header]).filter(v => v !== null && v !== undefined && String(v).trim() !== '');
+      const dates = values.map(parseDate).filter(Boolean) as string[];
+      return values.length > 0 && dates.length / values.length >= 0.9 && new Set(dates).size <= 2;
+    });
+  if (cutoffColumn) {
+    mapping.file_date = cutoffColumn.header;
+    used.add(cutoffColumn.header);
+    notes.push({ source_header: cutoffColumn.header, target_term: 'file_date', confidence: 'high', reasoning: 'Fecha de corte explícita en el archivo (prevalece sobre el nombre del archivo)' });
+  }
+
   if (capitalVigente && capitalVencido) {
     notes.push({ source_header: `${capitalVigente} + ${capitalVencido}`, target_term: 'outstanding_balance', confidence: 'high', reasoning: 'Prioritized sum of capital vigente and capital vencido' });
   }
 
-  return { mapping, notes, capitalVigente, capitalVencido };
+  return { mapping, notes, capitalVigente, capitalVencido, overdueAmountHeader, installmentHeader };
+}
+
+export interface DpdValidation extends DpdConsistency {
+  evidenceHeader: string;
+  dpdHeader: string | null;
+  strong: boolean;          // bucket numérico (bloquea / corrige) vs estatus genérico (solo advierte)
+  switchedFrom?: string;
+}
+
+// Regla de negocio (portfolioRules.checkDpdConsistency): si el archivo trae su propio bucket / estatus de cobranza,
+// la columna de días de atraso tiene que cuadrar con él. Si no cuadra, se prueba cada columna candidata y se queda la
+// que sí cuadra; si ninguna, se reporta para bloquear el import en vez de publicar una calidad de cartera falsa.
+function validateDpdColumn(headers: string[], rows: any[], mapping: Partial<Record<StandardLoanField, string>>, notes: MappingNote[]): DpdValidation | null {
+  const evidenceHint = /(bucket|mora|atraso|retraso|cobranza|morosidad|dpd|antiguedad|vencid|estatus|status|estado|clasificacion|tramo|rango)/;
+  const notEvidence = /(plazo|meses|residencia|producto|tasa|saldo|monto|importe|fecha|pagos|riesgo|modelo)/;
+  const nonEmpty = (h: string) => rows.map(r => r?.[h]).filter(v => v !== null && v !== undefined && String(v).trim() !== '');
+  const evidence = headers
+    .filter(h => h !== mapping.days_overdue)
+    .map(h => ({ h, norm: normalize(h) }))
+    .filter(x => evidenceHint.test(x.norm) && !notEvidence.test(x.norm))
+    .map(x => {
+      const values = nonEmpty(x.h);
+      const parsed = values.filter(v => typeof v === 'string' && dpdRangeFromText(v) !== null);
+      const strongShare = parsed.length ? parsed.filter(isStrongDpdText).length / parsed.length : 0;
+      return { h: x.h, coverage: values.length ? parsed.length / values.length : 0, strong: strongShare >= 0.5 };
+    })
+    .filter(x => x.coverage >= DPD_CONSISTENCY.minCoverage)
+    .sort((a, b) => Number(b.strong) - Number(a.strong) || b.coverage - a.coverage)[0];
+  if (!evidence) return null;
+  const strong = evidence.strong;
+
+  const balanceOf = (row: any) => (mapping.outstanding_balance ? parseNumber(row[mapping.outstanding_balance]) : null) ?? 1;
+  const score = (h: string | undefined) => checkDpdConsistency(rows.map(row => ({
+    range: dpdRangeFromText(row?.[evidence.h]),
+    dpd: h ? parseNumber(row?.[h]) : null,
+    balance: balanceOf(row),
+  })));
+  const current = mapping.days_overdue;
+  const currentCheck = score(current);
+  if (current && currentCheck.ok) return { ...currentCheck, evidenceHeader: evidence.h, dpdHeader: current, strong };
+  // Evidencia débil (estatus genérico): nunca cambia la columna, solo se reporta.
+  if (!strong) return current ? { ...currentCheck, evidenceHeader: evidence.h, dpdHeader: current, strong } : null;
+
+  // Columnas numéricas que podrían ser días de atraso (no montos), excepto la evidencia misma.
+  const alternatives = headers
+    .filter(h => h !== current && h !== evidence.h && !Object.values(mapping).includes(h))
+    .filter(h => {
+      const vals = nonEmpty(h).slice(0, 200).map(parseNumber).filter((v): v is number => v !== null);
+      return vals.length >= 10 && vals.every(v => v >= 0 && v <= 3650 && Math.abs(v - Math.round(v)) < 1e-6);
+    })
+    .map(h => ({ h, check: score(h) }))
+    .filter(x => x.check.ok && x.check.compared >= DPD_CONSISTENCY.minCompared)
+    .sort((a, b) => a.check.mismatchBalancePct - b.check.mismatchBalancePct);
+  const best = alternatives[0];
+  if (best) {
+    mapping.days_overdue = best.h;
+    const idx = notes.findIndex(n => n.target_term === 'days_overdue');
+    const note: MappingNote = { source_header: best.h, target_term: 'days_overdue', confidence: 'high', reasoning: `Elegida porque cuadra con "${evidence.h}" del propio archivo (${current ? `"${current}" no cuadraba` : 'sin columna previa'})` };
+    if (idx >= 0) notes[idx] = note; else notes.push(note);
+    return { ...best.check, evidenceHeader: evidence.h, dpdHeader: best.h, strong, switchedFrom: current };
+  }
+  return current ? { ...currentCheck, evidenceHeader: evidence.h, dpdHeader: current, strong } : null;
 }
 
 export function standardizeLoanTape(rows: any[], fileName?: string) {
   const headers = rows[0] ? Object.keys(rows[0]) : [];
-  const { mapping, notes, capitalVigente, capitalVencido } = pickColumns(headers, rows);
+  const { mapping, notes, capitalVigente, capitalVencido, overdueAmountHeader, installmentHeader } = pickColumns(headers, rows);
+  const dpdValidation = validateDpdColumn(headers, rows, mapping, notes);
   const fallbackFileDate = parseFileDate(fileName);
 
   const standardized: StandardLoan[] = rows.map(row => {
@@ -353,16 +548,17 @@ export function standardizeLoanTape(rows: any[], fileName?: string) {
       ? (capitalA || 0) + (capitalB || 0)
       : parseNumber(get('outstanding_balance'));
     const explicitDpd = parseNumber(get('days_overdue'));
+    const overdueAmount = overdueAmountHeader ? parseNumber(row[overdueAmountHeader]) : null;
     const statusText = get('loan_status') ? String(get('loan_status')).trim() : null;
-    const inferredDpd = explicitDpd !== null
-      ? explicitDpd
-      : capitalB !== null && capitalB > 0
-        ? 91
-        : statusText && /(vencid|mora|atras)/.test(normalize(statusText))
-          ? 91
-          : capitalA !== null
-            ? 0
-            : null;
+    const endDate = parseDate(get('end_date'));
+    const rowFileDate = parseDate(get('file_date')) || fallbackFileDate;
+    const overdueFlag: boolean | null = overdueAmount !== null ? overdueAmount > 0
+      : capitalB !== null && capitalB > 0 ? true
+      : statusText && /(vencid|mora|atras)/.test(normalize(statusText)) ? true
+      : capitalA !== null ? false
+      : null;
+    const dpdInfo = resolveDpd({ reported: explicitDpd, overdueFlag, cutoff: rowFileDate, dueDate: endDate });
+    const inferredDpd = dpdInfo.dpd;
 
     return {
       loan_id: get('loan_id') ? String(get('loan_id')).trim() : null,
@@ -372,13 +568,15 @@ export function standardizeLoanTape(rows: any[], fileName?: string) {
       interest_rate: parseRate(get('interest_rate')),
       loan_status: statusText,
       start_date: parseDate(get('start_date')),
-      end_date: parseDate(get('end_date')),
+      end_date: endDate,
       loan_type: get('loan_type') ? String(get('loan_type')).trim() : null,
       days_overdue: inferredDpd,
+      dpd_source: dpdInfo.source,
+      installment: installmentHeader ? parseNumber(row[installmentHeader]) : null,
       currency: get('currency') ? String(get('currency')).trim() : 'MXN',
       industry: get('industry') ? String(get('industry')).trim() : null,
       state: get('state') ? String(get('state')).trim() : null,
-      file_date: parseDate(get('file_date')) || fallbackFileDate,
+      file_date: rowFileDate,
     };
   }).filter(row => [
     row.loan_id, row.client, row.amount, row.outstanding_balance, row.interest_rate,
@@ -386,7 +584,7 @@ export function standardizeLoanTape(rows: any[], fileName?: string) {
     row.industry, row.state, row.file_date,
   ].some(v => v !== null && v !== undefined && v !== ''));
 
-  return { standardized, mappingReport: notes };
+  return { standardized, mappingReport: notes, dpdValidation };
 }
 
 export function activeRows(rows: StandardLoan[]) {
@@ -446,10 +644,10 @@ function fmtChange(current: number, previous: number, kind: 'money' | 'pct' | 'n
 export function quality(rows: StandardLoan[]) {
   const total = sum(rows);
   const groups = {
-    vigente: rows.filter(r => r.days_overdue !== null && r.days_overdue === 0),
-    atrasada: rows.filter(r => r.days_overdue !== null && r.days_overdue >= 1 && r.days_overdue <= 90),
-    vencida: rows.filter(r => r.days_overdue !== null && r.days_overdue > 90),
-    sin_dato: rows.filter(r => r.days_overdue === null),
+    vigente: rows.filter(r => classifyDpd(r.days_overdue) === 'vigente'),
+    atrasada: rows.filter(r => classifyDpd(r.days_overdue) === 'atrasada'),
+    vencida: rows.filter(r => classifyDpd(r.days_overdue) === 'vencida'),
+    sin_dato: rows.filter(r => classifyDpd(r.days_overdue) === 'sin_dato'),
   };
   return Object.fromEntries(Object.entries(groups).map(([k, v]) => {
     const balance = sum(v);
@@ -459,15 +657,8 @@ export function quality(rows: StandardLoan[]) {
 
 export function dpdDistribution(rows: StandardLoan[]) {
   const total = sum(rows);
-  const buckets = [
-    { bucket: '0 dias', min: 0, max: 0 },
-    { bucket: '1-30', min: 1, max: 30 },
-    { bucket: '31-60', min: 31, max: 60 },
-    { bucket: '61-90', min: 61, max: 90 },
-    { bucket: '91-180', min: 91, max: 180 },
-    { bucket: '>180', min: 181, max: Infinity },
-  ];
-  const distribution = buckets.map(b => {
+  const buckets = DPD_BUCKET_DEFS;
+  const distribution: Array<{ bucket: string; count: number; balance: number; pct: number }> = buckets.map(b => {
     const items = rows.filter(r => r.days_overdue !== null && r.days_overdue >= b.min && r.days_overdue <= b.max);
     const balance = sum(items);
     return { bucket: b.bucket, count: items.length, balance, pct: pct(balance, total) };
@@ -782,16 +973,9 @@ export function buildLoanTapeExportContexts(tapes: LoanTape_DB[]): LoanTapeExpor
       : standardized.mappingReport;
     const localAnalysis = analyzeLoanTapesLocally(tapes, tape.id);
     const storedAnalysis = data?._analysis as StructuredLoanTapeAnalysis | undefined;
+    // Todo sale del cálculo vigente (portfolioRules); solo se conservan las verificaciones de congruencia con contrato.
     const analysis = storedAnalysis
-      ? {
-          ...localAnalysis,
-          ...storedAnalysis,
-          portfolioQuality: localAnalysis.portfolioQuality,
-          dpd_distribution: localAnalysis.dpd_distribution,
-          concentrations: localAnalysis.concentrations,
-          anomalies: localAnalysis.anomalies,
-          validation: localAnalysis.validation,
-        }
+      ? { ...localAnalysis, congruencyChecks: storedAnalysis.congruencyChecks?.length ? storedAnalysis.congruencyChecks : localAnalysis.congruencyChecks }
       : localAnalysis;
 
     return {
@@ -977,7 +1161,9 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
   const previousWeightedDpd = weightedAverage(previousRows, 'days_overdue');
   const weightedRate = weightedAverage(latest, 'interest_rate');
   const previousWeightedRate = weightedAverage(previousRows, 'interest_rate');
-  const top10Pct = latestIsSummary ? null : topShare(latest, 10);
+  const top10Pct = latestIsSummary ? null : topShare(latest, 10); // los 10 CRÉDITOS más grandes
+  const top10ClientsPct = latestIsSummary ? null : concentrations.by_client.slice(0, 10).reduce((a, c) => a + c.pct, 0); // los 10 CLIENTES más grandes
+  const zeroDpdPct = latestIsSummary ? 0 : dpd.find(d => d.bucket === '0 dias')?.pct || 0;
   const previousTop10Pct = topShare(previousRows, 10);
   const missingDpdPct = latestIsSummary ? 0 : q.sin_dato?.pct || 0;
   const highValidation = validation.filter(item => item.severity === 'high');
@@ -985,11 +1171,11 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
   const riskScore = Math.min(100, Math.round(
     ((vencidaPct || 0) * 100 * 4)
     + ((atrasadaPct || 0) * 100 * 1.5)
-    + (maxClientPct > 0.3 ? 15 : maxClientPct > 0.2 ? 8 : 0)
+    + (maxClientPct > 0.3 ? 15 : maxClientPct > RISK_THRESHOLDS.clientConcentrationAlert ? 8 : 0)
     + (missingDpdPct * 20)
     + validationPenalty
   ));
-  const overallStatus = (vencidaPct || 0) > 0.1 || riskScore >= 70 ? 'critical' : (vencidaPct || 0) >= 0.05 || (atrasadaPct || 0) > 0.2 || riskScore >= 40 ? 'warning' : 'good';
+  const overallStatus = (vencidaPct || 0) > RISK_THRESHOLDS.vencidaAlert || riskScore >= 70 ? 'critical' : (vencidaPct || 0) >= RISK_THRESHOLDS.vencidaWarn || (atrasadaPct || 0) > RISK_THRESHOLDS.atrasadaWarn || riskScore >= 40 ? 'warning' : 'good';
   const dataProfile = buildLoanTapeDataProfile(selectedRows, selectedMappingReport);
   const anomalySet: any = latestIsSummary ? {} : anomalies(activeOrSelected);
   const trendDirection = previousRows.length
@@ -1012,7 +1198,7 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
     ? ` Contra ${previous}, el saldo cambió ${fmtChange(total, previousTotal, 'money') || 'sin variación calculable'}, la cartera vencida ${fmtChange(vencidaPct, previousVencidaPct, 'pct') || 'sin variación calculable'} y ${anomalySet.dpd_deterioration?.length || 0} créditos deterioraron DPD por ${fmtMoney(deteriorationBalance)}.`
     : ' No existe un corte anterior comparable; la tendencia se habilitará al cargar otro periodo.';
   const concentrationText = topClient
-    ? ` El mayor cliente es ${topClient.name} con ${fmtPct(topClient.pct)} del saldo; Top 10 concentra ${fmtPct(top10Pct)}.`
+    ? ` El mayor cliente es ${topClient.name} con ${fmtPct(topClient.pct)} del saldo; los 10 clientes más grandes concentran ${fmtPct(top10ClientsPct || 0)} y los 10 créditos más grandes ${fmtPct(top10Pct || 0)}.`
     : '';
   const summaryText = latestIsSummary
     ? `Resumen agregado por producto${concentrations.by_state.length ? ' y estado' : ''}: ${latest.length} rubros por ${fmtMoney(total)}. No incluye crédito, cliente ni DPD; por eso no se calculan mora, roll-rate ni concentración por acreditado para este corte.`
@@ -1021,7 +1207,7 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
   return {
     overallStatus,
     riskScore,
-    executiveSummary: summaryText || `Cartera de ${loanCount} créditos y ${clientCount} clientes por ${fmtMoney(total)}: vigente ${fmtPct(q.vigente?.pct || 0)}, atrasada ${fmtPct(atrasadaPct || 0)}, vencida ${fmtPct(vencidaPct || 0)}${missingDpdPct ? ` y ${fmtPct(missingDpdPct)} sin DPD` : ''}.${concentrationText}${comparisonText}`,
+    executiveSummary: summaryText || `Cartera de ${loanCount} créditos y ${clientCount} clientes por ${fmtMoney(total)}: vigente ${fmtPct(q.vigente?.pct || 0)} (0-${QUALITY_RULES.vigenteMaxDpd} DPD; ${fmtPct(zeroDpdPct)} al corriente), atrasada ${fmtPct(atrasadaPct || 0)}, vencida ${fmtPct(vencidaPct || 0)}${missingDpdPct ? ` y ${fmtPct(missingDpdPct)} sin DPD` : ''}.${concentrationText}${comparisonText}`,
     trendDirection,
     portfolioQuality: q,
     dpd_distribution: dpd,
@@ -1032,14 +1218,34 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
       { name: 'Saldo total outstanding', latestValue: fmtMoney(total), previousValue: previousRows.length ? fmtMoney(previousTotal) : undefined, change: fmtChange(total, previousTotal, 'money'), trend: trend(total, previousTotal), status: overallStatus, congruent: true },
       { name: 'Numero de creditos', latestValue: loanCount === null ? 'N/D' : String(loanCount), previousValue: previousRows.length && loanCount !== null ? String(previousLoanCount) : undefined, change: loanCount === null ? undefined : fmtChange(loanCount, previousLoanCount, 'number'), trend: loanCount === null ? 'stable' : trend(loanCount, previousLoanCount), status: 'good', congruent: true },
       { name: 'Numero de clientes', latestValue: clientCount === null ? 'N/D' : String(clientCount), previousValue: previousRows.length && clientCount !== null ? String(previousClientCount) : undefined, change: clientCount === null ? undefined : fmtChange(clientCount, previousClientCount, 'number'), trend: clientCount === null ? 'stable' : trend(clientCount, previousClientCount), status: 'good', congruent: true },
-      { name: '% cartera vencida', latestValue: vencidaPct === null ? 'N/D' : fmtPct(vencidaPct), previousValue: previousRows.length && vencidaPct !== null ? fmtPct(previousVencidaPct) : undefined, change: vencidaPct === null ? undefined : fmtChange(vencidaPct, previousVencidaPct, 'pct'), trend: vencidaPct === null ? 'stable' : trend(vencidaPct, previousVencidaPct, true), status: vencidaPct !== null && vencidaPct > 0.1 ? 'critical' : vencidaPct !== null && vencidaPct >= 0.05 ? 'warning' : 'good', congruent: true },
-      { name: '% cartera atrasada', latestValue: atrasadaPct === null ? 'N/D' : fmtPct(atrasadaPct), previousValue: previousRows.length && atrasadaPct !== null ? fmtPct(previousAtrasadaPct) : undefined, change: atrasadaPct === null ? undefined : fmtChange(atrasadaPct, previousAtrasadaPct, 'pct'), trend: atrasadaPct === null ? 'stable' : trend(atrasadaPct, previousAtrasadaPct, true), status: atrasadaPct !== null && atrasadaPct > 0.2 ? 'warning' : 'good', congruent: true },
-      { name: 'Concentracion max cliente', latestValue: fmtPct(maxClientPct), previousValue: previousRows.length ? fmtPct(previousMaxClientPct) : undefined, change: fmtChange(maxClientPct, previousMaxClientPct, 'pct'), trend: trend(maxClientPct, previousMaxClientPct, true), status: maxClientPct > 0.2 ? 'critical' : maxClientPct > 0.1 ? 'warning' : 'good', congruent: true },
-      { name: 'Concentracion Top 10 creditos', latestValue: top10Pct === null ? 'N/D' : fmtPct(top10Pct), previousValue: previousRows.length && top10Pct !== null ? fmtPct(previousTop10Pct) : undefined, change: top10Pct === null ? undefined : fmtChange(top10Pct, previousTop10Pct, 'pct'), trend: top10Pct === null ? 'stable' : trend(top10Pct, previousTop10Pct, true), status: top10Pct !== null && top10Pct > 0.75 ? 'critical' : top10Pct !== null && top10Pct > 0.5 ? 'warning' : 'good', congruent: true },
-      { name: 'DPD ponderado por saldo', latestValue: weightedDpd === null ? 'N/D' : `${weightedDpd.toFixed(1)} dias`, previousValue: previousWeightedDpd === null ? undefined : `${previousWeightedDpd.toFixed(1)} dias`, change: weightedDpd !== null && previousWeightedDpd !== null ? fmtChange(weightedDpd, previousWeightedDpd, 'number') : undefined, trend: weightedDpd !== null && previousWeightedDpd !== null ? trend(weightedDpd, previousWeightedDpd, true) : 'stable', status: weightedDpd !== null && weightedDpd > 60 ? 'critical' : weightedDpd !== null && weightedDpd > 30 ? 'warning' : 'good', congruent: true },
+      { name: '% cartera vencida', latestValue: vencidaPct === null ? 'N/D' : fmtPct(vencidaPct), previousValue: previousRows.length && vencidaPct !== null ? fmtPct(previousVencidaPct) : undefined, change: vencidaPct === null ? undefined : fmtChange(vencidaPct, previousVencidaPct, 'pct'), trend: vencidaPct === null ? 'stable' : trend(vencidaPct, previousVencidaPct, true), status: vencidaPct !== null && vencidaPct > RISK_THRESHOLDS.vencidaAlert ? 'critical' : vencidaPct !== null && vencidaPct >= RISK_THRESHOLDS.vencidaWarn ? 'warning' : 'good', congruent: true },
+      { name: '% cartera atrasada', latestValue: atrasadaPct === null ? 'N/D' : fmtPct(atrasadaPct), previousValue: previousRows.length && atrasadaPct !== null ? fmtPct(previousAtrasadaPct) : undefined, change: atrasadaPct === null ? undefined : fmtChange(atrasadaPct, previousAtrasadaPct, 'pct'), trend: atrasadaPct === null ? 'stable' : trend(atrasadaPct, previousAtrasadaPct, true), status: atrasadaPct !== null && atrasadaPct > RISK_THRESHOLDS.atrasadaWarn ? 'warning' : 'good', congruent: true },
+      { name: 'Concentracion max cliente', latestValue: fmtPct(maxClientPct), previousValue: previousRows.length ? fmtPct(previousMaxClientPct) : undefined, change: fmtChange(maxClientPct, previousMaxClientPct, 'pct'), trend: trend(maxClientPct, previousMaxClientPct, true), status: maxClientPct > RISK_THRESHOLDS.clientConcentrationAlert ? 'critical' : maxClientPct > RISK_THRESHOLDS.clientConcentrationWarn ? 'warning' : 'good', congruent: true },
+      { name: 'Concentracion Top 10 clientes', latestValue: top10ClientsPct === null ? 'N/D' : fmtPct(top10ClientsPct), previousValue: undefined, change: undefined, trend: 'stable', status: top10ClientsPct !== null && top10ClientsPct > RISK_THRESHOLDS.top10Alert ? 'critical' : top10ClientsPct !== null && top10ClientsPct > RISK_THRESHOLDS.top10Warn ? 'warning' : 'good', congruent: true },
+      { name: 'Concentracion Top 10 creditos', latestValue: top10Pct === null ? 'N/D' : fmtPct(top10Pct), previousValue: previousRows.length && top10Pct !== null ? fmtPct(previousTop10Pct) : undefined, change: top10Pct === null ? undefined : fmtChange(top10Pct, previousTop10Pct, 'pct'), trend: top10Pct === null ? 'stable' : trend(top10Pct, previousTop10Pct, true), status: top10Pct !== null && top10Pct > RISK_THRESHOLDS.top10Alert ? 'critical' : top10Pct !== null && top10Pct > RISK_THRESHOLDS.top10Warn ? 'warning' : 'good', congruent: true },
+      { name: 'DPD ponderado por saldo', latestValue: weightedDpd === null ? 'N/D' : `${weightedDpd.toFixed(1)} dias`, previousValue: previousWeightedDpd === null ? undefined : `${previousWeightedDpd.toFixed(1)} dias`, change: weightedDpd !== null && previousWeightedDpd !== null ? fmtChange(weightedDpd, previousWeightedDpd, 'number') : undefined, trend: weightedDpd !== null && previousWeightedDpd !== null ? trend(weightedDpd, previousWeightedDpd, true) : 'stable', status: weightedDpd !== null && weightedDpd > RISK_THRESHOLDS.waDpdAlert ? 'critical' : weightedDpd !== null && weightedDpd > RISK_THRESHOLDS.waDpdWarn ? 'warning' : 'good', congruent: true },
       { name: 'Tasa ponderada por saldo', latestValue: weightedRate === null ? 'N/D' : fmtPct(weightedRate), previousValue: previousWeightedRate === null ? undefined : fmtPct(previousWeightedRate), change: weightedRate !== null && previousWeightedRate !== null ? `${weightedRate - previousWeightedRate >= 0 ? '+' : ''}${((weightedRate - previousWeightedRate) * 100).toFixed(1)} pp` : undefined, trend: weightedRate !== null && previousWeightedRate !== null ? trend(weightedRate, previousWeightedRate) : 'stable', status: 'good', congruent: true },
     ],
     findings,
     congruencyChecks: [],
   };
+}
+
+
+// Analyses saved before a business-rule change keep the old classification inside `_analysis`. Whenever a saved analysis
+// is read, its quality/risk fields are refreshed from the standardized rows with the CURRENT rules (portfolioRules), so
+// no screen can show a stale "vigente". The summary text and findings are regenerated too, so no stale percentage survives.
+const refreshedAnalysisCache = new WeakMap<object, StructuredLoanTapeAnalysis>();
+export function storedAnalysisFor(tape: LoanTape_DB | null | undefined): StructuredLoanTapeAnalysis | null {
+  const stored = tape?.extractedData?._analysis as StructuredLoanTapeAnalysis | undefined;
+  if (!tape || !stored) return null;
+  if (!Array.isArray(tape.extractedData?._standardized)) return stored;
+  const key = tape.extractedData as object;
+  const cached = refreshedAnalysisCache.get(key);
+  if (cached) return cached;
+  const fresh = analyzeLoanTapesLocally([tape], tape.id);
+  // Todo número y texto sale del cálculo vigente (executiveSummary y findings incluidos); solo se conserva lo que no se calcula local.
+  const merged: StructuredLoanTapeAnalysis = { ...fresh, congruencyChecks: stored.congruencyChecks?.length ? stored.congruencyChecks : fresh.congruencyChecks };
+  refreshedAnalysisCache.set(key, merged);
+  return merged;
 }

@@ -1,8 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { useClientMonitored } from '../clients/MonitoringContext';
 import { Briefcase, CheckCircle2, Clock, Mail, Pencil, Phone, Plus, Save, Star, Trash2, UserRound, UsersRound, X } from 'lucide-react';
 import { CrmActivity, CrmActivityType, CrmContact, CrmInfluence, CrmPriority, CrmRelationship, CrmTimelineItem, db } from '../../db/index';
 import { HistorialMeta, MasterOrgPipelineMeta, MonitoringLineMeta, UnderwritingMeta } from '../../lib/pipelineAnalytics';
 import { Session } from '../../services/auth';
+import { computeLineBalance } from '../../lib/lineLedger';
+import LineMovementsEditor from './LineMovementsEditor';
 
 interface Props {
   clientId: string;
@@ -150,6 +153,7 @@ const fromPercentInput = (value: string) => {
 };
 
 const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
+  const monitored = useClientMonitored();
   const [contacts, setContacts] = useState<CrmContact[]>([]);
   const [activities, setActivities] = useState<CrmActivity[]>([]);
   const [timeline, setTimeline] = useState<CrmTimelineItem[]>([]);
@@ -205,7 +209,16 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
   const addMonitoringLine = () => setPipeline(prev => ({ ...prev, monitoring: [...prev.monitoring, emptyMonitoringLine()] }));
   const removeMonitoringLine = (index: number) => setPipeline(prev => ({ ...prev, monitoring: prev.monitoring.filter((_, i) => i !== index) }));
   const updateMonitoringLine = (index: number, patch: Partial<MonitoringLineMeta>) =>
-    setPipeline(prev => ({ ...prev, monitoring: prev.monitoring.map((line, i) => (i === index ? { ...line, ...patch } : line)) }));
+    setPipeline(prev => ({
+      ...prev,
+      monitoring: prev.monitoring.map((line, i) => {
+        if (i !== index) return line;
+        const next = { ...line, ...patch };
+        if (!next.movimientos?.length) return next;
+        const bal = computeLineBalance(next);
+        return { ...next, saldoActual: bal.saldo, pctUtilizacion: bal.utilizacion };
+      }),
+    }));
 
   const addHistorial = () => setPipeline(prev => ({ ...prev, historial: [...prev.historial, emptyHistorial()] }));
   const removeHistorial = (index: number) => setPipeline(prev => ({ ...prev, historial: prev.historial.filter((_, i) => i !== index) }));
@@ -543,19 +556,27 @@ const CrmPanel: React.FC<Props> = ({ clientId, session }) => {
                       <input className={`${inputClass} !py-1.5 text-xs`} type="number" value={line.monto ?? ''} onChange={e => updateMonitoringLine(i, { monto: e.target.value === '' ? null : Number(e.target.value) })} placeholder="0.00" />
                     </label>
                     <label>
-                      <span className={labelClass}>Saldo actual</span>
-                      <input className={`${inputClass} !py-1.5 text-xs`} type="number" value={line.saldoActual ?? ''} onChange={e => updateMonitoringLine(i, { saldoActual: e.target.value === '' ? null : Number(e.target.value) })} placeholder="0.00" />
+                      <span className={labelClass}>Saldo actual {line.movimientos?.length ? '(calculado)' : ''}</span>
+                      <input
+                        className={`${inputClass} !py-1.5 text-xs ${line.movimientos?.length ? 'bg-slate-100' : ''}`}
+                        type="number"
+                        readOnly={!!line.movimientos?.length}
+                        value={line.saldoActual ?? ''}
+                        onChange={e => updateMonitoringLine(i, { saldoActual: e.target.value === '' ? null : Number(e.target.value) })}
+                        placeholder="0.00"
+                      />
                     </label>
                   </div>
+                  <LineMovementsEditor movements={line.movimientos || []} onChange={movimientos => updateMonitoringLine(i, { movimientos })} />
                   <div className="grid grid-cols-2 gap-2">
                     <label>
-                      <span className={labelClass}>Utilización (%)</span>
-                      <input className={`${inputClass} !py-1.5 text-xs`} type="number" step="0.01" min="0" value={toPercentInput(line.pctUtilizacion)} onChange={e => updateMonitoringLine(i, { pctUtilizacion: fromPercentInput(e.target.value) })} placeholder="0.00" />
+                      <span className={labelClass}>Utilización (calculada)</span>
+                      <input className={`${inputClass} !py-1.5 text-xs bg-slate-100`} readOnly value={(() => { const u = computeLineBalance(line).utilizacion; return u === null || !Number.isFinite(u) ? '' : `${(u * 100).toFixed(2)}%`; })()} placeholder="—" />
                     </label>
                     <label>
                       <span className={labelClass}>Estatus</span>
                       <select className={`${inputClass} !py-1.5 text-xs`} value={line.estatus} onChange={e => updateMonitoringLine(i, { estatus: e.target.value })}>
-                        {MONITOREO_ESTATUS.map(s => <option key={s} value={s}>{s}</option>)}
+                        {(monitored ? MONITOREO_ESTATUS : MONITOREO_ESTATUS.filter(st => !st.startsWith('Incumplimiento'))).map(s => <option key={s} value={s}>{s}</option>)}
                       </select>
                     </label>
                   </div>

@@ -1,17 +1,19 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { db, FinancialStatement_DB, Covenant_DB } from '../../db/index';
 import { Session } from '../../services/auth';
-import { AISettings, extractFinancials } from '../../services/ai';
-import { Upload, Trash2, Download, Plus, X, TrendingUp, Edit2, Check, FileText, ImageDown, Save, ChevronDown } from 'lucide-react';
-import type { DefinedConcept, VerticalBaseConfig } from '../../lib/export';
+import { AISettings, extractFinancials, settingsForTask } from '../../services/ai';
+import { assessStatementQuality, formatDuration, isQuarantined, QUALITY_LABEL, QUALITY_SETTING_KEY, type StatementQuality, type StatementQualityRecord } from '../../lib/statementQuality';
+import { Upload, Trash2, Download, Plus, X, TrendingUp, Edit2, Check, FileText, ImageDown, Save, ChevronDown, ChevronUp } from 'lucide-react';
+import type { DefinedConcept, VerticalBaseConfig, StatementReconciliation } from '../../lib/export';
 import { loadExportModule } from '../../lib/exportLoader';
 import { reserveDownloadTarget } from '../../lib/browserDownload';
 import { CartesianGrid, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { evaluateFormula, formulaLabel, standardRatios } from '../../lib/financialMetrics';
 import WorkingOverlay from '../common/WorkingOverlay';
 import { parseFinancialNumber } from '../../lib/numberParsing';
-import { classifyAccount, normalizeAccountName } from '../../lib/accountClassification';
+import { classifyAccount, normalizeAccountName, reassignAccountItems, type AccountSegment } from '../../lib/accountClassification';
 import { extractPdfText, isUsefulExtractedText, renderPdfPreviewImages } from '../../lib/documentParsing';
+import { sheetToRows } from '../../lib/sheetRows';
 
 interface Props {
   clientId: string;
@@ -48,6 +50,8 @@ interface ReviewState {
   documentType?: string;
   fileName: string;
   statements: ReviewStatement[];
+  extractionMs?: number;
+  model?: string;
 }
 
 function toBase64(file: File): Promise<string> {
@@ -204,15 +208,67 @@ const defaultManualIncomeRows = () => [
   manualRow('estado_resultados', 'Manual / Estado de Resultados', 'Utilidad neta'),
 ];
 
+const CHART_METRIC_DEFS = [
+  ['revenue', 'Ingresos', '#2563eb', 'money'],
+  ['ebitda', 'EBITDA', '#059669', 'money'],
+  ['debt_ebitda', 'Deuda/EBITDA', '#dc2626', 'ratio'],
+  ['dscr', 'DSCR', '#7c3aed', 'ratio'],
+  ['current_ratio', 'Razón Corriente', '#d97706', 'ratio'],
+  ['leverage', 'Deuda/Activo', '#0f766e', 'pct'],
+  ['roa', 'ROA', '#e11d48', 'pct'],
+  ['roe', 'ROE', '#4338ca', 'pct'],
+] as const;
+type ChartMetricFormat = typeof CHART_METRIC_DEFS[number][3];
+const SEGMENT_ORDER = ['ACTIVO', 'PASIVO', 'CAPITAL', 'Estado de Resultados', 'Flujo de Efectivo', 'Balance General sin clasificar', 'Otros'];
+const RECENT_PERIOD_PRESETS = [4, 8] as const;
+type RowLayout = { segmentOverride: Record<string, string>; order: Record<string, string[]> };
+const EMPTY_ROW_LAYOUT: RowLayout = { segmentOverride: {}, order: {} };
+
+const QUALITY_TONE: Record<string, string> = {
+  alta: 'bg-emerald-50 border-emerald-200 text-emerald-800',
+  media: 'bg-amber-50 border-amber-200 text-amber-800',
+  baja: 'bg-orange-50 border-orange-200 text-orange-800',
+  bloqueada: 'bg-rose-50 border-rose-200 text-rose-800',
+};
+const CHECK_DOT: Record<string, string> = { ok: 'bg-emerald-500', info: 'bg-slate-300', warn: 'bg-amber-500', block: 'bg-rose-600' };
+
+const QualityPanel: React.FC<{ quality?: StatementQuality }> = ({ quality }) => {
+  if (!quality) return <div className="px-4 py-2 text-[11px] font-semibold text-slate-400">Calculando calidad…</div>;
+  return (
+    <div className={`mx-4 my-3 rounded-xl border px-4 py-3 ${QUALITY_TONE[quality.level]}`}>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <p className="text-xs font-black uppercase tracking-widest">{QUALITY_LABEL[quality.level]} · {quality.score}/100</p>
+        {quality.blocking && <span className="text-[10px] font-black uppercase">No cumple la puerta de calidad</span>}
+      </div>
+      <ul className="mt-2 space-y-1">
+        {quality.checks.filter(c => c.severity !== 'ok').map(c => (
+          <li key={c.id} className="flex gap-2 text-[12px] font-semibold leading-snug"><span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${CHECK_DOT[c.severity]}`} /><span><b>{c.label}:</b> {c.detail}</span></li>
+        ))}
+        {quality.checks.every(c => c.severity === 'ok') && <li className="text-[12px] font-semibold">Todas las verificaciones pasaron.</li>}
+      </ul>
+    </div>
+  );
+};
+
 const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSettings, covenants, onStatementsChange, onCovenantsChange }) => {
   const [statements, setStatements] = useState<FinancialStatement_DB[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [review, setReview] = useState<ReviewState | null>(null);
+  const [ackQuarantine, setAckQuarantine] = useState(false);
+  const [qualityRecords, setQualityRecords] = useState<Record<string, StatementQualityRecord>>({});
+  const [reviewQuality, setReviewQuality] = useState<StatementQuality[]>([]);
   const [editingCell, setEditingCell] = useState<{ stmtId: string; itemIdx: number; field: 'name' | 'value' } | null>(null);
   const [editingRow, setEditingRow] = useState<{ key: string; name: string; statementType: StatementType } | null>(null);
+  const [selectedRowKeys, setSelectedRowKeys] = useState<Set<string>>(new Set());
+  const [merging, setMerging] = useState(false);
+  const [lastMergeSnapshot, setLastMergeSnapshot] = useState<{ id: string; rawLineItems: RawItem[] }[] | null>(null);
+  const [addingAccountOpen, setAddingAccountOpen] = useState(false);
+  const [newAccountName, setNewAccountName] = useState('');
+  const [newAccountType, setNewAccountType] = useState<StatementType>('balance_general');
+  const [addingAccount, setAddingAccount] = useState(false);
   const [editValue, setEditValue] = useState('');
-  const [exporting, setExporting] = useState<'excel' | 'pdf' | 'chart' | null>(null);
+  const [exporting, setExporting] = useState<'excel' | 'chart' | null>(null);
   const [sectionFilter, setSectionFilter] = useState<StatementType | 'all'>('all');
   const [showManualEntry, setShowManualEntry] = useState(false);
   const [savingManual, setSavingManual] = useState(false);
@@ -237,9 +293,12 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   const fileInputRef = useRef<HTMLInputElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<HTMLDivElement>(null);
+  const mergeNameInputRef = useRef<HTMLInputElement>(null);
+  const mergeTypeSelectRef = useRef<HTMLSelectElement>(null);
   const mappingStorageKey = `finmonitor_eff_mappings_${clientId}`;
   const verticalBaseStorageKey = `finmonitor_vertical_bases_${clientId}`;
   const conceptsStorageKey = `finmonitor_defined_concepts_${clientId}`;
+  const rowLayoutStorageKey = `finmonitor_row_layout_${clientId}`;
 
   const loadStatements = async () => {
     const stmts = await db.getStatements(clientId);
@@ -263,6 +322,77 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
     await loadStatements();
   };
 
+  const toggleRowSelected = (key: string) => {
+    setSelectedRowKeys(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  const mergeSelectedRows = async (targetName: string, targetStatementType: StatementType) => {
+    const keysToMerge = selectedRowKeys;
+    setMerging(true);
+    try {
+      const snapshot: { id: string; rawLineItems: RawItem[] }[] = [];
+      for (const stmt of statements) {
+        const matching = stmt.rawLineItems.filter(item => keysToMerge.has(`${item.statementType || 'otro'}||${item.name}`));
+        if (matching.length === 0) continue;
+        snapshot.push({ id: stmt.id, rawLineItems: stmt.rawLineItems });
+        const rest = stmt.rawLineItems.filter(item => !keysToMerge.has(`${item.statementType || 'otro'}||${item.name}`));
+        const mergedValue = matching.reduce((sum, item) => sum + (item.value || 0), 0);
+        const mergedItem = { ...matching[0], name: targetName, statementType: targetStatementType, value: mergedValue };
+        await db.updateStatement(stmt.id, { rawLineItems: [...rest, mergedItem] });
+      }
+      setLastMergeSnapshot(snapshot);
+      setSelectedRowKeys(new Set());
+      await loadStatements();
+    } finally {
+      setMerging(false);
+    }
+  };
+
+  const undoLastMerge = async () => {
+    if (!lastMergeSnapshot) return;
+    setMerging(true);
+    try {
+      for (const entry of lastMergeSnapshot) {
+        await db.updateStatement(entry.id, { rawLineItems: entry.rawLineItems });
+      }
+      setLastMergeSnapshot(null);
+      await loadStatements();
+    } finally {
+      setMerging(false);
+    }
+  };
+
+  const addNewAccount = async () => {
+    const trimmedName = newAccountName.trim();
+    if (!trimmedName) return;
+    const alreadyExists = statements.some(stmt => stmt.rawLineItems.some(item =>
+      (item.statementType || 'otro') === newAccountType && item.name === trimmedName
+    ));
+    if (alreadyExists) {
+      alert('Ya existe una cuenta con ese nombre y tipo.');
+      return;
+    }
+    setAddingAccount(true);
+    try {
+      await Promise.all(statements.map(stmt => {
+        const updated = [...stmt.rawLineItems, { name: trimmedName, value: 0, statementType: newAccountType }];
+        return db.updateStatement(stmt.id, { rawLineItems: updated });
+      }));
+      setNewAccountName('');
+      setAddingAccountOpen(false);
+      if (sectionFilter !== 'all' && sectionFilter !== newAccountType) setSectionFilter('all');
+      await loadStatements();
+    } catch (err: any) {
+      alert(`Error al agregar la cuenta: ${err?.message || err}`);
+    } finally {
+      setAddingAccount(false);
+    }
+  };
+
   useEffect(() => { loadStatements(); }, [clientId]);
   useEffect(() => {
     db.getClientSetting<Record<string, MappedField | ''>>(clientId, mappingStorageKey, {}).then(setAccountMappings);
@@ -273,6 +403,73 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   useEffect(() => {
     db.getClientSetting<DefinedConcept[]>(clientId, conceptsStorageKey, []).then(setConcepts);
   }, [clientId, conceptsStorageKey]);
+  useEffect(() => {
+    db.getClientSetting<RowLayout>(clientId, rowLayoutStorageKey, EMPTY_ROW_LAYOUT).then(setRowLayout);
+  }, [clientId, rowLayoutStorageKey]);
+
+  useEffect(() => {
+    db.getClientSetting<Record<string, StatementQualityRecord>>(clientId, QUALITY_SETTING_KEY, {}).then(setQualityRecords);
+  }, [clientId]);
+
+  const saveQualityRecords = (next: Record<string, StatementQualityRecord>) => {
+    setQualityRecords(next);
+    void db.setClientSetting(clientId, QUALITY_SETTING_KEY, next);
+  };
+
+  const approveStatement = (statementId: string) => {
+    const current = qualityRecords[statementId];
+    if (!current) return;
+    saveQualityRecords({ ...qualityRecords, [statementId]: { ...current, status: 'aprobado', approvedAt: new Date().toISOString() } });
+  };
+
+  // Calidad en vivo del documento que se está revisando: se recalcula con cada cambio de cuenta, valor o periodo.
+  useEffect(() => {
+    if (!review) { setReviewQuality([]); return; }
+    let active = true;
+    (async () => {
+      const mod = await loadExportModule();
+      const history = await db.getStatements(clientId);
+      const next = review.statements.map((statement, index) => {
+        const items = statement.items.filter(i => i.name.trim());
+        const probe: any = { id: `review-${index}`, clientId, period: statement.period, periodDate: statement.periodDate, fileName: statement.fileName, rawLineItems: items, mappedData: mappedForItems(items), extraAccounts: [] };
+        return assessStatementQuality(probe, history, mod.computeStatementReconciliation(probe));
+      });
+      if (active) setReviewQuality(next);
+    })().catch(() => { if (active) setReviewQuality([]); });
+    return () => { active = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [review, clientId]);
+
+  const [reconciliations, setReconciliations] = useState<StatementReconciliation[]>([]);
+  const [rowLayout, setRowLayout] = useState<RowLayout>(EMPTY_ROW_LAYOUT);
+  const persistRowLayout = (next: RowLayout) => {
+    setRowLayout(next);
+    void db.setClientSetting(clientId, rowLayoutStorageKey, next);
+  };
+  // Reasignar una cuenta cambia el DATO en todos los periodos (ratios, Excel, cuadre y tabla ven lo mismo).
+  const setRowSegment = async (key: string, segment: string) => {
+    const [statementType, ...rest] = key.split('||');
+    const name = rest.join('||');
+    try {
+      for (const stmt of statements) {
+        if (!stmt.rawLineItems.some(item => (item.statementType || 'otro') === statementType && item.name === name)) continue;
+        await db.updateStatement(stmt.id, { rawLineItems: reassignAccountItems(stmt.rawLineItems, statementType, name, segment as AccountSegment) });
+      }
+      const { [key]: _legacy, ...restOverrides } = rowLayout.segmentOverride;
+      persistRowLayout({ ...rowLayout, segmentOverride: restOverrides });
+      await loadStatements();
+    } catch (err: any) {
+      alert(`No se pudo reclasificar la cuenta: ${err?.message || 'intenta de nuevo'}`);
+    }
+  };
+  const moveRow = (segment: string, keysInSegment: string[], key: string, direction: -1 | 1) => {
+    const idx = keysInSegment.indexOf(key);
+    const targetIdx = idx + direction;
+    if (idx === -1 || targetIdx < 0 || targetIdx >= keysInSegment.length) return;
+    const reordered = [...keysInSegment];
+    [reordered[idx], reordered[targetIdx]] = [reordered[targetIdx], reordered[idx]];
+    persistRowLayout({ ...rowLayout, order: { ...rowLayout.order, [segment]: reordered } });
+  };
 
   const saveMapping = (key: string, field: MappedField | '') => {
     const next = { ...accountMappings, [key]: field };
@@ -434,6 +631,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   };
 
   const extractFile = async (file: File) => {
+    const startedAt = performance.now();
     const sourceDocumentId = '';
     let result;
     if (file.type === 'application/pdf') {
@@ -458,7 +656,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
         const buffer = await file.arrayBuffer();
         const workbook = XLSX.read(buffer, { type: 'array' });
         text = workbook.SheetNames.map(sheetName => {
-          const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, raw: true });
+          const rows = sheetToRows(XLSX, workbook.Sheets[sheetName], { header: 1, raw: true });
           return `SHEET: ${sheetName}\n${JSON.stringify(rows)}`;
         }).join('\n\n');
       } else {
@@ -476,6 +674,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
       companyName: result.companyName,
       documentType: result.documentType,
       fileName: file.name,
+      extractionMs: performance.now() - startedAt,
       statements: (result.statements || [result]).map(statement => ({
         period: statement.period,
         periodDate: statement.periodDate,
@@ -499,7 +698,10 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
       const extracted = [];
       for (const file of selected) extracted.push(await extractFile(file));
       const first = extracted[0];
+      setAckQuarantine(false);
       setReview({
+        extractionMs: extracted.reduce((sum, item) => sum + (item.extractionMs || 0), 0),
+        model: settingsForTask(aiSettings, 'financials').model,
         companyName: first.companyName,
         documentType: selected.length === 1 ? first.documentType : `${selected.length} archivos`,
         fileName: selected.length === 1 ? first.fileName : `${selected.length} archivos`,
@@ -530,8 +732,13 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
         if (!proceed) return;
       }
     }
+    if (reviewQuality.some(q => q.blocking) && !ackQuarantine) {
+      alert('Este estado tiene problemas que bloquean su uso. Marca la casilla para guardarlo EN REVISIÓN (queda fuera de ratios hasta que lo apruebes) o corrige las cuentas.');
+      return;
+    }
     try {
       const existingStatements = await db.getStatements(clientId);
+      const savedIds: string[] = [];
       for (const statement of review.statements) {
         const existing = existingStatements.find(saved => saved.periodDate === statement.periodDate);
         if (existing) {
@@ -549,6 +756,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
           const updatedExisting = { ...existing, rawLineItems, fileName: joinUnique([existing.fileName, statement.fileName || review.fileName]) };
           const index = existingStatements.findIndex(saved => saved.id === existing.id);
           if (index >= 0) existingStatements[index] = updatedExisting;
+          savedIds.push(existing.id);
           continue;
         }
         const rawLineItems = mergeRawItems(statement.items);
@@ -565,7 +773,23 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
           extraAccounts: [],
         });
         existingStatements.push(created);
+        savedIds.push(created.id);
       }
+      const records = { ...qualityRecords };
+      review.statements.forEach((statement, i) => {
+        const quality = reviewQuality[i];
+        if (!quality || !savedIds[i]) return;
+        records[savedIds[i]] = {
+          ...quality,
+          status: quality.blocking ? 'en_revision' : 'ok',
+          items: statement.items.length,
+          evaluatedAt: new Date().toISOString(),
+          extractionMs: review.extractionMs,
+          model: review.model,
+          fileName: statement.fileName || review.fileName,
+        };
+      });
+      saveQualityRecords(records);
       setReview(null);
       await loadStatements();
     } catch (err: any) {
@@ -593,16 +817,16 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
     await loadStatements();
   };
 
-  const handleExport = async (format: 'excel' | 'pdf') => {
-    setExporting(format);
+  const handleExport = async () => {
+    setExporting('excel');
     const downloadTarget = reserveDownloadTarget();
     try {
       const { exportEstadosFinancieros } = await loadExportModule();
       await exportEstadosFinancieros(
-        statements,
+        visibleStatements,
         clientName,
-        format,
-        format === 'pdf' ? panelRef.current ?? undefined : undefined,
+        'excel',
+        undefined,
         covenants,
         verticalBaseOverrides,
         concepts,
@@ -630,18 +854,60 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   };
 
   // Build pivot table: all unique names × periods
-  const allNames: string[] = [];
-  const nameSet = new Set<string>();
-  for (const stmt of statements) {
-    for (const item of stmt.rawLineItems) {
-      const key = `${item.statementType || 'otro'}||${item.name}`;
-      if (!nameSet.has(key)) { nameSet.add(key); allNames.push(key); }
+  const allNames = useMemo(() => {
+    const names: string[] = [];
+    const nameSet = new Set<string>();
+    for (const stmt of statements) {
+      for (const item of stmt.rawLineItems) {
+        const key = `${item.statementType || 'otro'}||${item.name}`;
+        if (!nameSet.has(key)) { nameSet.add(key); names.push(key); }
+      }
     }
-  }
-  const visibleNames = sectionFilter === 'all' ? allNames : allNames.filter(k => k.startsWith(`${sectionFilter}||`));
-  const visibleStatements = statements.filter(s => !hiddenPeriodIds[s.id]);
-  const latest = visibleStatements.at(-1) || statements.at(-1);
-  const latestRatios = latest ? standardRatios(latest) : [];
+    return names;
+  }, [statements]);
+  // O(1) lookup for "a sample raw item with this key" — avoids re-flattening every
+  // statement's line items for every row on every render (was the main slowdown).
+  const sampleByKey = useMemo(() => {
+    const map = new Map<string, RawItem>();
+    for (const stmt of statements) {
+      for (const item of stmt.rawLineItems) {
+        const key = `${item.statementType || 'otro'}||${item.name}`;
+        if (!map.has(key)) map.set(key, item);
+      }
+    }
+    return map;
+  }, [statements]);
+  const visibleNames = useMemo(() => (
+    sectionFilter === 'all' ? allNames : allNames.filter(k => k.startsWith(`${sectionFilter}||`))
+  ), [allNames, sectionFilter]);
+  const visibleStatements = useMemo(() => (
+    statements.filter(s => !hiddenPeriodIds[s.id])
+  ), [statements, hiddenPeriodIds]);
+  // Cuadre (Activo = Pasivo + Capital) per visible period — same check already used in
+  // the Auditoría tab (computeStatementReconciliation), surfaced here so the user doesn't
+  // have to switch tabs to know if a period balances.
+  useEffect(() => {
+    let active = true;
+    loadExportModule().then(mod => {
+      if (!active) return;
+      setReconciliations(visibleStatements.map(stmt => mod.computeStatementReconciliation(stmt, verticalBaseOverrides, concepts)));
+    });
+    return () => { active = false; };
+  }, [visibleStatements, verticalBaseOverrides, concepts]);
+  const reconciliationByStatementId = useMemo(() => (
+    new Map(reconciliations.map(r => [r.statementId, r]))
+  ), [reconciliations]);
+  // Estados en revisión (no pasaron la puerta de calidad) quedan fuera de ratios y gráficas hasta que se aprueben.
+  const ratioStatements = useMemo(() => visibleStatements.filter(st => !isQuarantined(qualityRecords[st.id])), [visibleStatements, qualityRecords]);
+  const computedQuality = useMemo(() => {
+    const out: Record<string, StatementQuality> = {};
+    visibleStatements.forEach(stmt => {
+      out[stmt.id] = assessStatementQuality(stmt, statements.filter(other => other.id !== stmt.id), reconciliationByStatementId.get(stmt.id));
+    });
+    return out;
+  }, [visibleStatements, statements, reconciliationByStatementId]);
+  const latest = ratioStatements.at(-1) || visibleStatements.at(-1) || statements.at(-1);
+  const latestRatios = latest ? standardRatios(latest, statements) : [];
   const uploadedFiles = new Set(statements.map(s => s.fileName).filter(Boolean));
   const conceptLabels: Record<string, string> = {};
   allNames.forEach(key => {
@@ -649,19 +915,8 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
     conceptLabels[`account:${statementType}::${name}`] = name;
   });
   const conceptFormula = conceptTokens.length ? `expr:${JSON.stringify(conceptTokens)}` : '';
-  const chartMetricDefs = [
-    ['revenue', 'Ingresos', '#2563eb', 'money'],
-    ['ebitda', 'EBITDA', '#059669', 'money'],
-    ['debt_ebitda', 'Deuda/EBITDA', '#dc2626', 'ratio'],
-    ['dscr', 'DSCR', '#7c3aed', 'ratio'],
-    ['current_ratio', 'Razón Corriente', '#d97706', 'ratio'],
-    ['leverage', 'Deuda/Activo', '#0f766e', 'pct'],
-    ['roa', 'ROA', '#e11d48', 'pct'],
-    ['roe', 'ROE', '#4338ca', 'pct'],
-  ] as const;
-  type ChartMetricFormat = typeof chartMetricDefs[number][3];
-  const chartMetricFormat = Object.fromEntries(chartMetricDefs.map(([key, , , format]) => [key, format])) as Record<string, typeof chartMetricDefs[number][3]>;
-  const selectedChartMetricDefs = chartMetricDefs.filter(([key]) => chartMetrics[key]);
+  const chartMetricFormat = Object.fromEntries(CHART_METRIC_DEFS.map(([key, , , format]) => [key, format])) as Record<string, ChartMetricFormat>;
+  const selectedChartMetricDefs = CHART_METRIC_DEFS.filter(([key]) => chartMetrics[key]);
   const chartHasMoney = selectedChartMetricDefs.some(([, , , format]) => format === 'money');
   const chartHasRatio = selectedChartMetricDefs.some(([, , , format]) => format === 'ratio');
   const chartHasPct = selectedChartMetricDefs.some(([, , , format]) => format === 'pct');
@@ -679,12 +934,12 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
     if (format === 'ratio') return fmtRatio(value);
     return fmtNum(value);
   };
-  const chartData = visibleStatements.map(stmt => {
-    const ratios = standardRatios(stmt);
+  const chartData = useMemo(() => ratioStatements.map(stmt => {
+    const ratios = standardRatios(stmt, statements);
     const row: Record<string, string | number | null> = { period: stmt.period };
-    chartMetricDefs.forEach(([key]) => { row[key] = ratios.find(r => r.key === key)?.value ?? null; });
+    CHART_METRIC_DEFS.forEach(([key]) => { row[key] = ratios.find(r => r.key === key)?.value ?? null; });
     return row;
-  });
+  }), [ratioStatements, statements]);
   const previous = visibleStatements.length > 1 ? visibleStatements.at(-2) : undefined;
   const valueFor = (stmt: FinancialStatement_DB | undefined, key: string) => {
     if (!stmt) return null;
@@ -698,8 +953,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
   };
   const segmentForKey = (key: string) => {
     const [statementType, name] = key.split('||');
-    const sample = statements.flatMap(s => s.rawLineItems).find(i => `${i.statementType || 'otro'}||${i.name}` === key);
-    return classifyAccount(statementType, name, sample?.sectionPath);
+    return classifyAccount(statementType, name, sampleByKey.get(key)?.sectionPath);
   };
   const verticalBase = (stmt: FinancialStatement_DB | undefined, statementType: string, segment?: string) => {
     if (!stmt) return null;
@@ -722,23 +976,53 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
     if (statementType === 'estado_resultados') return find(['total ingresos', 'ingresos', 'ventas']);
     return null;
   };
-  const analysisRows = visibleNames
+  const segmentFor = (key: string) => {
+    const override = rowLayout.segmentOverride[key];
+    if (override) return override;
+    const [statementType, name] = key.split('||');
+    return classifyAccount(statementType, name, sampleByKey.get(key)?.sectionPath);
+  };
+  const orderKeysForSegment = (segment: string, defaultKeys: string[]) => {
+    const storedOrder = rowLayout.order[segment];
+    if (!storedOrder || !storedOrder.length) return defaultKeys;
+    const rank = new Map<string, number>(storedOrder.map((k, i) => [k, i]));
+    return [...defaultKeys].sort((a, b) => {
+      const ra = rank.has(a) ? rank.get(a)! : Number.MAX_SAFE_INTEGER;
+      const rb = rank.has(b) ? rank.get(b)! : Number.MAX_SAFE_INTEGER;
+      return ra !== rb ? ra - rb : defaultKeys.indexOf(a) - defaultKeys.indexOf(b);
+    });
+  };
+  const analysisRows = useMemo(() => visibleNames
     .map(key => {
       const [statementType, name] = key.split('||');
       const latestValue = valueFor(latest, key);
       const previousValue = valueFor(previous, key);
-      const sample = statements.flatMap(s => s.rawLineItems).find(i => `${i.statementType || 'otro'}||${i.name}` === key);
-      const segment = classifyAccount(statementType, name, sample?.sectionPath);
+      const segment = segmentFor(key);
       const base = verticalBase(latest, statementType, segment);
       const vertical = latestValue !== null && base ? latestValue / base : null;
       const horizontal = latestValue !== null && previousValue !== null && previousValue !== 0 ? (latestValue - previousValue) / Math.abs(previousValue) : null;
       return { key, statementType, name, segment, latestValue, previousValue, vertical, horizontal };
     })
-    .filter(r => visibleStatements.some(s => valueFor(s, r.key) !== null));
-  const segmentOrder = ['ACTIVO', 'PASIVO', 'CAPITAL', 'Estado de Resultados', 'Flujo de Efectivo', 'Balance General sin clasificar', 'Otros'];
-  const groupedAnalysisRows = segmentOrder
-    .map(segment => ({ segment, rows: analysisRows.filter(r => r.segment === segment) }))
-    .filter(group => group.rows.length > 0);
+    .filter(r => visibleStatements.some(s => valueFor(s, r.key) !== null)),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [visibleNames, sampleByKey, latest, previous, visibleStatements, verticalBaseOverrides, concepts, rowLayout]);
+  const groupedAnalysisRows = useMemo(() => SEGMENT_ORDER
+    .map(segment => {
+      const rows = analysisRows.filter(r => r.segment === segment);
+      const orderedKeys = orderKeysForSegment(segment, rows.map(r => r.key));
+      const byKey = new Map(rows.map(r => [r.key, r]));
+      return { segment, rows: orderedKeys.map(k => byKey.get(k)!) };
+    })
+    .filter(group => group.rows.length > 0),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [analysisRows, rowLayout]);
+  const groupedPivotRows = useMemo(() => SEGMENT_ORDER
+    .map(segment => {
+      const defaultKeys = visibleNames.filter(key => segmentFor(key) === segment);
+      const keys = orderKeysForSegment(segment, defaultKeys);
+      return { segment, keys };
+    })
+    .filter(group => group.keys.length > 0), [visibleNames, sampleByKey, rowLayout]);
 
   if (loading) {
     return (
@@ -781,20 +1065,12 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
           {statements.length > 0 && (
             <>
               <button
-                onClick={() => handleExport('excel')}
+                onClick={() => handleExport()}
                 disabled={!!exporting}
                 className="flex items-center gap-1.5 bg-white border border-slate-200 text-slate-600 font-bold px-3 py-2 rounded-xl text-xs hover:bg-slate-50 disabled:opacity-50 transition-all"
               >
                 {exporting === 'excel' ? <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg> : <Download className="w-3.5 h-3.5" />}
                 Excel
-              </button>
-              <button
-                onClick={() => handleExport('pdf')}
-                disabled={!!exporting}
-                className="flex items-center gap-1.5 bg-white border border-slate-200 text-slate-600 font-bold px-3 py-2 rounded-xl text-xs hover:bg-slate-50 disabled:opacity-50 transition-all"
-              >
-                {exporting === 'pdf' ? <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg> : <FileText className="w-3.5 h-3.5" />}
-                PDF
               </button>
             </>
           )}
@@ -974,7 +1250,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
               <div className="mt-5">
                 <p className="text-xs font-black text-slate-600 uppercase tracking-widest mb-2">¿Qué quieres ver en la gráfica?</p>
                 <div className="flex flex-wrap gap-2">
-                  {chartMetricDefs.map(([key, label]) => (
+                  {CHART_METRIC_DEFS.map(([key, label]) => (
                     <button
                       key={key}
                       onClick={() => setChartMetrics(p => ({ ...p, [key]: !p[key] }))}
@@ -1068,7 +1344,26 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
         </div>
 
         <div className="bg-white border border-slate-200 rounded-2xl p-4">
-          <p className="text-xs font-black text-slate-600 uppercase tracking-widest mb-3">Mostrar / ocultar periodos</p>
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+            <p className="text-xs font-black text-slate-600 uppercase tracking-widest">Mostrar / ocultar periodos</p>
+            <div className="flex gap-1.5">
+              {RECENT_PERIOD_PRESETS.map(n => (
+                <button
+                  key={n}
+                  onClick={() => setHiddenPeriodIds(Object.fromEntries(statements.map((s, i) => [s.id, i < statements.length - n])))}
+                  className="px-2.5 py-1.5 rounded-lg text-[11px] font-black bg-slate-100 text-slate-600 hover:bg-slate-200"
+                >
+                  Últimos {n}
+                </button>
+              ))}
+              <button
+                onClick={() => setHiddenPeriodIds({})}
+                className="px-2.5 py-1.5 rounded-lg text-[11px] font-black bg-slate-100 text-slate-600 hover:bg-slate-200"
+              >
+                Todos
+              </button>
+            </div>
+          </div>
           <div className="flex flex-wrap gap-2">
             {statements.map(s => (
               <button
@@ -1285,13 +1580,130 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
           </div>
         )}
 
+        <div className="bg-white border border-slate-200 rounded-2xl p-4">
+          <button
+            onClick={() => {
+              setAddingAccountOpen(o => {
+                const next = !o;
+                if (next && sectionFilter !== 'all') setNewAccountType(sectionFilter);
+                return next;
+              });
+            }}
+            className="flex items-center gap-2 text-xs font-black text-indigo-600 hover:text-indigo-700"
+          >
+            <Plus className="w-4 h-4" />
+            Agregar cuenta
+          </button>
+          {addingAccountOpen && (
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <input
+                value={newAccountName}
+                onChange={e => setNewAccountName(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') addNewAccount(); }}
+                placeholder="Nombre de la cuenta"
+                autoFocus
+                className="flex-1 min-w-[180px] bg-white border border-slate-200 rounded px-2 py-1.5 text-xs"
+              />
+              <select
+                value={newAccountType}
+                onChange={e => setNewAccountType(e.target.value as StatementType)}
+                className="bg-white border border-slate-200 rounded px-2 py-1.5 text-xs font-bold"
+              >
+                <option value="balance_general">Balance General</option>
+                <option value="estado_resultados">Estado de Resultados</option>
+                <option value="flujo_efectivo">Flujo de Efectivo</option>
+                <option value="otro">Otro</option>
+              </select>
+              <button
+                onClick={addNewAccount}
+                disabled={addingAccount || !newAccountName.trim()}
+                className="px-3 py-1.5 rounded-lg text-xs font-black bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {addingAccount ? 'Agregando…' : 'Agregar'}
+              </button>
+              <p className="w-full text-[11px] text-slate-400">
+                Se agrega con valor 0 en todos los períodos cargados — luego haz clic en cada celda para capturar el valor real de cada periodo.
+              </p>
+            </div>
+          )}
+        </div>
+
+        {lastMergeSnapshot && (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 flex flex-wrap items-center gap-3">
+            <p className="text-xs font-black text-emerald-900">
+              Fusión aplicada a {lastMergeSnapshot.length} período(s). Si te equivocaste, puedes deshacerla y volver a intentar con otras cuentas.
+            </p>
+            <button
+              onClick={undoLastMerge}
+              disabled={merging}
+              className="px-3 py-1.5 rounded-lg text-xs font-black bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+            >
+              {merging ? 'Deshaciendo…' : 'Deshacer fusión'}
+            </button>
+            <button
+              onClick={() => setLastMergeSnapshot(null)}
+              className="px-3 py-1.5 rounded-lg text-xs font-black bg-white text-slate-500 border border-slate-200 hover:bg-slate-50"
+            >
+              Cerrar
+            </button>
+          </div>
+        )}
+
+        {selectedRowKeys.size >= 2 && (() => {
+          const keysArr: string[] = Array.from(selectedRowKeys);
+          const [defaultType, defaultName] = keysArr[0].split('||');
+          return (
+            <div className="bg-indigo-50 border border-indigo-200 rounded-2xl p-4 flex flex-wrap items-center gap-3">
+              <p className="text-xs font-black text-indigo-900">{selectedRowKeys.size} cuentas seleccionadas — fusiónalas en una sola:</p>
+              <input
+                ref={mergeNameInputRef}
+                key={keysArr.join(',')}
+                defaultValue={defaultName}
+                className="flex-1 min-w-[160px] bg-white border border-indigo-200 rounded px-2 py-1 text-xs"
+                placeholder="Nombre final de la cuenta"
+              />
+              <select
+                ref={mergeTypeSelectRef}
+                key={`type-${keysArr.join(',')}`}
+                defaultValue={defaultType}
+                className="bg-white border border-indigo-200 rounded px-2 py-1 text-xs font-bold"
+              >
+                <option value="balance_general">Balance General</option>
+                <option value="estado_resultados">Estado de Resultados</option>
+                <option value="flujo_efectivo">Flujo de Efectivo</option>
+                <option value="otro">Otro</option>
+              </select>
+              <button
+                onClick={() => mergeSelectedRows(
+                  mergeNameInputRef.current?.value || defaultName,
+                  (mergeTypeSelectRef.current?.value as StatementType) || (defaultType as StatementType)
+                )}
+                disabled={merging}
+                className="px-3 py-1.5 rounded-lg text-xs font-black bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {merging ? 'Fusionando…' : 'Fusionar'}
+              </button>
+              <button
+                onClick={() => setSelectedRowKeys(new Set())}
+                className="px-3 py-1.5 rounded-lg text-xs font-black bg-white text-slate-500 border border-slate-200 hover:bg-slate-50"
+              >
+                Cancelar
+              </button>
+            </div>
+          );
+        })()}
+
         <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-slate-900 text-white">
                   <th className="text-left px-5 py-3 text-xs font-black uppercase tracking-wider sticky left-0 bg-slate-900 min-w-[220px]">Cuenta</th>
-                  {visibleStatements.map(s => (
+                  {visibleStatements.map(s => {
+                    const recon = reconciliationByStatementId.get(s.id);
+                    const descuadre = recon && recon.balanceCheck.diferencia !== null ? Math.abs(recon.balanceCheck.diferencia) : null;
+                    const cuadra = descuadre !== null && descuadre <= 1000;
+                    return (
                     <th key={s.id} className="text-right px-4 py-3 text-xs font-black uppercase tracking-wider whitespace-nowrap min-w-[120px]">
                       <div className="flex items-center justify-end gap-2">
                         <span>{s.period}</span>
@@ -1304,50 +1716,121 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
                         </button>
                       </div>
                       <div className="text-[10px] font-normal text-slate-400 mt-0.5">{s.fileName}</div>
+                      {recon && (
+                        <div className={`mt-1 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[9px] font-black normal-case tracking-normal ${descuadre === null ? 'bg-slate-500/20 text-slate-300' : cuadra ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
+                          {descuadre === null ? 'Sin totales para cuadrar' : cuadra ? '✓ Cuadra' : `⚠ Descuadre ${fmtNum(descuadre)}`}
+                        </div>
+                      )}
+                      {(() => {
+                        const record = qualityRecords[s.id];
+                        const q = computedQuality[s.id];
+                        if (!q) return null;
+                        const level = record?.status === 'en_revision' ? 'bloqueada' : q.level;
+                        const tone = level === 'alta' ? 'bg-emerald-500/20 text-emerald-300' : level === 'media' ? 'bg-amber-500/20 text-amber-300' : level === 'baja' ? 'bg-orange-500/20 text-orange-300' : 'bg-rose-500/20 text-rose-300';
+                        const issues = q.checks.filter(c => c.severity === 'warn' || c.severity === 'block').map(c => `${c.label}: ${c.detail}`).join('\n');
+                        return (
+                          <div className="mt-1 flex flex-col items-end gap-0.5 normal-case tracking-normal">
+                            <span className={`inline-flex rounded px-1.5 py-0.5 text-[9px] font-black ${tone}`} title={issues || 'Todas las verificaciones pasaron'}>
+                              {record?.status === 'en_revision' ? 'EN REVISIÓN' : QUALITY_LABEL[q.level]} · {q.score}
+                            </span>
+                            {record?.extractionMs !== undefined && <span className="text-[9px] font-semibold text-slate-400">Extraído en {formatDuration(record.extractionMs)}</span>}
+                            {record?.status === 'en_revision' && (
+                              <button onClick={() => approveStatement(s.id)} className="rounded bg-white/10 px-1.5 py-0.5 text-[9px] font-black text-white hover:bg-white/20">Aprobar</button>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </th>
-                  ))}
+                  )})}
                 </tr>
               </thead>
               <tbody>
-                {visibleNames.map((key, rowIdx) => {
+                {groupedPivotRows.map(group => (
+                  <React.Fragment key={group.segment}>
+                    <tr className="bg-indigo-50">
+                      <td colSpan={visibleStatements.length + 1} className="p-0 bg-indigo-50">
+                        <div className="sticky left-0 w-fit px-5 py-1.5 text-[10px] font-black uppercase tracking-widest text-indigo-900">
+                          {group.segment}
+                        </div>
+                      </td>
+                    </tr>
+                    {group.keys.map((key, rowIdx) => {
                   const [statementType, name] = key.split('||');
                   return (
                   <tr key={key} className={rowIdx % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
                     <td className="px-5 py-2.5 text-xs font-semibold text-slate-700 sticky left-0 bg-inherit">
-                      {editingRow?.key === key ? (
-                        <div className="space-y-1">
-                          <select
-                            value={editingRow.statementType}
-                            onChange={e => setEditingRow({ ...editingRow, statementType: e.target.value as StatementType })}
-                            className="w-full bg-white border border-indigo-200 rounded px-2 py-1 text-[10px] font-bold"
+                      <div className="flex items-start gap-1.5">
+                        <input
+                          type="checkbox"
+                          checked={selectedRowKeys.has(key)}
+                          onChange={() => toggleRowSelected(key)}
+                          className="mt-1 w-3 h-3 accent-indigo-600 shrink-0"
+                          title="Seleccionar para fusionar con otra cuenta"
+                        />
+                        <div className="flex flex-col shrink-0 pt-0.5">
+                          <button
+                            onClick={() => moveRow(group.segment, group.keys, key, -1)}
+                            disabled={rowIdx === 0}
+                            className="text-slate-300 hover:text-indigo-600 disabled:opacity-20 disabled:hover:text-slate-300"
+                            title="Subir"
                           >
-                            <option value="balance_general">Balance General</option>
-                            <option value="estado_resultados">Estado de Resultados</option>
-                            <option value="flujo_efectivo">Flujo de Efectivo</option>
-                            <option value="otro">Otro</option>
-                          </select>
-                          <div className="flex gap-1">
-                            <input
-                              value={editingRow.name}
-                              onChange={e => setEditingRow({ ...editingRow, name: e.target.value })}
-                              onKeyDown={e => { if (e.key === 'Enter') commitRowEdit(); if (e.key === 'Escape') setEditingRow(null); }}
-                              className="flex-1 bg-white border border-indigo-200 rounded px-2 py-1 text-xs"
-                              autoFocus
-                            />
-                            <button onClick={commitRowEdit} className="text-emerald-600"><Check className="w-3.5 h-3.5" /></button>
-                          </div>
+                            <ChevronUp className="w-3 h-3" />
+                          </button>
+                          <button
+                            onClick={() => moveRow(group.segment, group.keys, key, 1)}
+                            disabled={rowIdx === group.keys.length - 1}
+                            className="text-slate-300 hover:text-indigo-600 disabled:opacity-20 disabled:hover:text-slate-300"
+                            title="Bajar"
+                          >
+                            <ChevronDown className="w-3 h-3" />
+                          </button>
                         </div>
-                      ) : (
-                        <button
-                          onClick={() => setEditingRow({ key, name, statementType: (statementType as StatementType) || 'otro' })}
-                          className="text-left w-full hover:text-indigo-600"
-                          title="Editar sección / cuenta"
-                        >
-                          <span className="block text-[9px] font-black uppercase tracking-wider text-indigo-500">{typeLabel[(statementType as StatementType) || 'otro'] || statementType}</span>
-                          {name}
-                          <Edit2 className="inline-block ml-1 w-2.5 h-2.5 opacity-40" />
-                        </button>
-                      )}
+                        <div className="flex-1 min-w-0">
+                          {editingRow?.key === key ? (
+                            <div className="space-y-1">
+                              <select
+                                value={editingRow.statementType}
+                                onChange={e => setEditingRow({ ...editingRow, statementType: e.target.value as StatementType })}
+                                className="w-full bg-white border border-indigo-200 rounded px-2 py-1 text-[10px] font-bold"
+                              >
+                                <option value="balance_general">Balance General</option>
+                                <option value="estado_resultados">Estado de Resultados</option>
+                                <option value="flujo_efectivo">Flujo de Efectivo</option>
+                                <option value="otro">Otro</option>
+                              </select>
+                              <div className="flex gap-1">
+                                <input
+                                  value={editingRow.name}
+                                  onChange={e => setEditingRow({ ...editingRow, name: e.target.value })}
+                                  onKeyDown={e => { if (e.key === 'Enter') commitRowEdit(); if (e.key === 'Escape') setEditingRow(null); }}
+                                  className="flex-1 bg-white border border-indigo-200 rounded px-2 py-1 text-xs"
+                                  autoFocus
+                                />
+                                <button onClick={commitRowEdit} className="text-emerald-600"><Check className="w-3.5 h-3.5" /></button>
+                              </div>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => setEditingRow({ key, name, statementType: (statementType as StatementType) || 'otro' })}
+                              className="text-left w-full hover:text-indigo-600"
+                              title="Editar sección / cuenta"
+                            >
+                              <span className="block text-[9px] font-black uppercase tracking-wider text-indigo-500">{typeLabel[(statementType as StatementType) || 'otro'] || statementType}</span>
+                              {name}
+                              <Edit2 className="inline-block ml-1 w-2.5 h-2.5 opacity-40" />
+                            </button>
+                          )}
+                          <select
+                            value={group.segment}
+                            onChange={e => setRowSegment(key, e.target.value)}
+                            onClick={e => e.stopPropagation()}
+                            className="mt-1 w-full bg-slate-50 border border-slate-200 rounded px-1 py-0.5 text-[9px] font-bold text-slate-400 hover:text-slate-600"
+                            title="Mover a otra sección (cambia el dato en todos los periodos)"
+                          >
+                            {SEGMENT_ORDER.filter(seg => seg !== 'Balance General sin clasificar').map(seg => <option key={seg} value={seg}>{seg}</option>)}
+                          </select>
+                        </div>
+                      </div>
                     </td>
                     {visibleStatements.map(s => {
                       const found = s.rawLineItems.find(i => `${i.statementType || 'otro'}||${i.name}` === key);
@@ -1386,6 +1869,8 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
                     })}
                   </tr>
                 )})}
+                  </React.Fragment>
+                ))}
                 {visibleNames.length === 0 && (
                   <tr>
                     <td colSpan={visibleStatements.length + 1} className="px-5 py-8 text-center text-slate-400 text-sm">
@@ -1442,6 +1927,10 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
                 )}
               </div>
 
+              {review.extractionMs !== undefined && (
+                <p className="text-[11px] font-bold text-slate-500">Extracción: {formatDuration(review.extractionMs)}{review.model ? ` · modelo ${review.model}` : ''} · {review.statements.reduce((sum, st) => sum + st.items.length, 0)} cuentas</p>
+              )}
+
               {review.statements.map((statement, statementIndex) => (
                 <div key={statementIndex} className="border border-slate-200 rounded-xl overflow-hidden">
                   <div className="bg-slate-100 p-4 grid grid-cols-2 gap-4">
@@ -1473,6 +1962,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
                       />
                     </div>
                   </div>
+                  <QualityPanel quality={reviewQuality[statementIndex]} />
                   <div className="flex items-center justify-between px-4 py-3 bg-white">
                     <div>
                       <p className="text-xs font-black text-slate-700 uppercase tracking-widest">Cuentas Extraídas</p>
@@ -1573,6 +2063,14 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
               ))}
             </div>
 
+            <div className="px-6 pt-4">
+            {reviewQuality.some(q => q.blocking) && (
+                <label className="flex w-full items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-[12px] font-bold text-rose-800">
+                  <input type="checkbox" checked={ackQuarantine} onChange={e => setAckQuarantine(e.target.checked)} className="mt-0.5" />
+                  Entiendo el riesgo: guardar EN REVISIÓN (queda fuera de ratios, covenants y dashboards hasta que lo apruebe).
+                </label>
+              )}
+            </div>
             <div className="flex gap-3 p-6 border-t border-slate-100">
               <button
                 onClick={() => setReview(null)}
@@ -1582,7 +2080,7 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
               </button>
               <button
                 onClick={handleSaveReview}
-                disabled={review.statements.some(s => !s.period)}
+                disabled={review.statements.some(s => !s.period) || (reviewQuality.some(q => q.blocking) && !ackQuarantine)}
                 className="flex-1 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm font-black transition-all"
               >
                 Guardar {review.statements.length} periodo(s)

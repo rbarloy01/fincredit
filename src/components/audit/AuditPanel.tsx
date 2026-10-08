@@ -1,34 +1,15 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { db, FinancialStatement_DB } from '../../db/index';
-import { classifyAccount } from '../../lib/accountClassification';
+import { MANUAL_PATH_PREFIX, manualSegmentPath, segmentToStatementType, type AccountSegment } from '../../lib/accountClassification';
 import { loadExportModule } from '../../lib/exportLoader';
 import type { StatementReconciliation } from '../../lib/export';
-import { AlertTriangle, CheckCircle2, X } from 'lucide-react';
-
-type StatementType = 'balance_general' | 'estado_resultados' | 'flujo_efectivo' | 'otro';
-type Segment = 'ACTIVO' | 'PASIVO' | 'CAPITAL' | 'Estado de Resultados' | 'Flujo de Efectivo' | 'Otros';
+import { AlertTriangle, CheckCircle2, Info } from 'lucide-react';
 
 interface Props {
   clientId: string;
   statements: FinancialStatement_DB[];
   onStatementsChange: (statements: FinancialStatement_DB[]) => void;
 }
-
-const segmentToType = (segment: Segment): StatementType => {
-  if (segment === 'Estado de Resultados') return 'estado_resultados';
-  if (segment === 'Flujo de Efectivo') return 'flujo_efectivo';
-  if (segment === 'Otros') return 'otro';
-  return 'balance_general';
-};
-
-const pathFor = (segment: Segment) => {
-  if (segment === 'ACTIVO') return 'Manual Auditoría > ACTIVO';
-  if (segment === 'PASIVO') return 'Manual Auditoría > PASIVO';
-  if (segment === 'CAPITAL') return 'Manual Auditoría > CAPITAL';
-  if (segment === 'Estado de Resultados') return 'Manual Auditoría > Estado de Resultados';
-  if (segment === 'Flujo de Efectivo') return 'Manual Auditoría > Flujo de Efectivo';
-  return 'Manual Auditoría > Otros';
-};
 
 function money(value: number | null): string {
   if (value === null || !Number.isFinite(value)) return 'N/A';
@@ -78,39 +59,51 @@ const AuditPanel: React.FC<Props> = ({ clientId, statements, onStatementsChange 
 
   const selectedReconciliation = reconciliations.find(r => r.statementId === selectedStatementId);
 
-  const rows = statements.flatMap(stmt => stmt.rawLineItems.map((item, idx) => {
-    const key = `${stmt.id}::${idx}`;
-    const current = classifyAccount(item.statementType || 'otro', item.name, item.sectionPath);
-    return { key, stmt, idx, item, current };
-  }));
+  const manualMoves = useMemo(() => {
+    const map = new Map<string, { key: string; name: string; statementType: string; segment: string; periods: number }>();
+    statements.forEach(stmt => stmt.rawLineItems.forEach(item => {
+      if (!item.sectionPath?.startsWith(MANUAL_PATH_PREFIX)) return;
+      const key = `${item.statementType || 'otro'}||${item.name}`;
+      const cur = map.get(key) || { key, name: item.name, statementType: item.statementType || 'otro', segment: item.sectionPath!.split('>').pop()!.trim(), periods: 0 };
+      cur.periods += 1;
+      map.set(key, cur);
+    }));
+    return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [statements]);
 
-  const update = async (stmt: FinancialStatement_DB, idx: number, segment: Segment) => {
-    setSaving(`${stmt.id}::${idx}`);
-    const rawLineItems = stmt.rawLineItems.map((item, i) => i === idx
-      ? { ...item, statementType: segmentToType(segment), sectionPath: pathFor(segment) }
-      : item);
-    await db.updateStatement(stmt.id, { rawLineItems });
-    const next = statements.map(s => s.id === stmt.id ? { ...s, rawLineItems } : s);
+  const revertManual = async (statementType: string, name: string) => {
+    setSaving(`${statementType}||${name}`);
+    const next: FinancialStatement_DB[] = [];
+    for (const stmt of statements) {
+      if (!stmt.rawLineItems.some(i => (i.statementType || 'otro') === statementType && i.name === name && i.sectionPath?.startsWith(MANUAL_PATH_PREFIX))) { next.push(stmt); continue; }
+      const rawLineItems = stmt.rawLineItems.map(i => ((i.statementType || 'otro') === statementType && i.name === name && i.sectionPath?.startsWith(MANUAL_PATH_PREFIX)) ? { ...i, sectionPath: null } : i);
+      await db.updateStatement(stmt.id, { rawLineItems });
+      next.push({ ...stmt, rawLineItems });
+    }
     onStatementsChange(next);
     setSaving(null);
   };
 
-  const clearPath = async (stmt: FinancialStatement_DB, idx: number) => {
-    setSaving(`${stmt.id}::${idx}`);
-    const rawLineItems = stmt.rawLineItems.map((item, i) => i === idx
-      ? { ...item, sectionPath: null }
-      : item);
+  const applySuggestion = async (sg: StatementReconciliation['suggestions'][number]) => {
+    const stmt = statements.find(st => st.id === selectedStatementId);
+    if (!stmt) return;
+    let rawLineItems = stmt.rawLineItems;
+    for (const account of sg.accounts) {
+      rawLineItems = rawLineItems.map(item => (item.name === account.name && (item.statementType || 'otro') === account.statementType)
+        ? { ...item, statementType: segmentToStatementType(sg.to as AccountSegment), sectionPath: manualSegmentPath(sg.to as AccountSegment) }
+        : item);
+    }
+    setSaving(`${stmt.id}::suggestion`);
     await db.updateStatement(stmt.id, { rawLineItems });
-    const next = statements.map(s => s.id === stmt.id ? { ...s, rawLineItems } : s);
-    onStatementsChange(next);
+    onStatementsChange(statements.map(st => (st.id === stmt.id ? { ...st, rawLineItems } : st)));
     setSaving(null);
   };
 
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-lg font-black text-slate-900">Auditoría de Cuentas</h2>
-        <p className="text-sm text-slate-500 mt-1">Reclasifica cualquier cuenta extraída. Esto modifica el entendimiento usado por análisis y export Excel.</p>
+        <h2 className="text-lg font-black text-slate-900">Conciliación</h2>
+        <p className="text-sm text-slate-500 mt-1">Control de cuadre de los estados financieros (solo lectura). Para mover una cuenta de sección usa Estados Financieros: ahí el cambio afecta el dato real.</p>
       </div>
 
       <div className="bg-white border border-slate-200 rounded-2xl p-6">
@@ -118,8 +111,7 @@ const AuditPanel: React.FC<Props> = ({ clientId, statements, onStatementsChange 
           <div>
             <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest">Reconciliación: Extraído vs. Sumado</h3>
             <p className="text-xs text-slate-500 font-bold mt-1">
-              Compara el total reportado por el EFF de origen contra la suma en vivo de las cuentas detalle que quedaron clasificadas en cada sección, para el periodo seleccionado.
-            </p>
+              Reglas de cuadre: (1) una cuenta vive en una sola sección (la del encabezado más específico del estado); (2) el total de cada sección sale de la identidad Activo = Pasivo + Capital; (3) los subtotales se detectan por valor y no se suman dos veces; (4) si hay diferencia, se muestra cuánto falta o sobra y, cuando una cuenta mal ubicada la explica, se propone moverla.</p>
           </div>
           {sortedStatements.length > 0 && (
             <select
@@ -157,14 +149,21 @@ const AuditPanel: React.FC<Props> = ({ clientId, statements, onStatementsChange 
                       <td className="px-4 py-3 font-black text-slate-800">{section.section}</td>
                       <td className="px-4 py-3 text-right font-mono font-black text-slate-900">{money(section.extractedTotal)}</td>
                       <td className="px-4 py-3 text-right font-mono font-black text-slate-700">{section.computedSum === null ? 'Sin detalle' : money(section.computedSum)}</td>
-                      <td className={`px-4 py-3 text-right font-mono font-black ${section.trustworthy ? 'text-emerald-700' : 'text-rose-700'}`}>
+                      <td className={`px-4 py-3 text-right font-mono font-black ${section.status === 'ok' ? 'text-emerald-700' : section.status === 'divergence' ? 'text-rose-700' : 'text-amber-700'}`}>
                         {section.gap === null ? 'N/A' : money(section.gap)}
                       </td>
                       <td className="px-4 py-3 text-center">
                         {section.computedSum === null ? (
                           <span className="text-[10px] font-black uppercase text-slate-400">Sin cuentas detalle</span>
-                        ) : section.trustworthy ? (
+                        ) : section.status === 'ok' ? (
                           <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase text-emerald-700"><CheckCircle2 className="w-3.5 h-3.5" />Coincide</span>
+                        ) : section.status === 'unverifiable' ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-[10px] font-black uppercase text-amber-700"
+                            title={section.gap !== null && section.gap > 0 ? 'Faltan cuentas del detalle (o hay cuentas en otra sección) por este monto.' : 'Sobran cuentas en el detalle (subtotales o duplicados) por este monto.'}
+                          >
+                            <AlertTriangle className="w-3.5 h-3.5" />{section.gap !== null && section.gap > 0 ? 'Faltan' : 'Sobran'} {money(Math.abs(section.gap ?? 0))}
+                          </span>
                         ) : (
                           <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase text-rose-700"><AlertTriangle className="w-3.5 h-3.5" />Divergencia</span>
                         )}
@@ -174,6 +173,22 @@ const AuditPanel: React.FC<Props> = ({ clientId, statements, onStatementsChange 
                 </tbody>
               </table>
             </div>
+
+            {selectedReconciliation.suggestions.length > 0 && (
+              <div className="mb-4 rounded-xl border border-indigo-200 bg-indigo-50 p-4">
+                <p className="text-[11px] font-black uppercase tracking-widest text-indigo-700">La diferencia se explica por cuentas mal ubicadas</p>
+                {selectedReconciliation.suggestions.map((sg, i) => (
+                  <div key={i} className="mt-2 flex flex-wrap items-center justify-between gap-2 text-sm text-slate-700">
+                    <span>Mover <b>{sg.accounts.map(a => `${a.name} (${money(a.value)})`).join(' + ')}</b> de <b>{sg.from}</b> a <b>{sg.to}</b> — {money(sg.amount)}</span>
+                    <button
+                      onClick={() => applySuggestion(sg)}
+                      disabled={!!saving}
+                      className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-black text-white hover:bg-indigo-500 disabled:opacity-50"
+                    >Aplicar reclasificación</button>
+                  </div>
+                ))}
+              </div>
+            )}
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <div className="rounded-xl bg-slate-50 p-4">
@@ -193,60 +208,25 @@ const AuditPanel: React.FC<Props> = ({ clientId, statements, onStatementsChange 
         )}
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
-        <div className="overflow-x-auto max-h-[70vh]">
+      {manualMoves.length > 0 && (
+        <div className="bg-white border border-slate-200 rounded-2xl p-6">
+          <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest">Cuentas reclasificadas a mano</h3>
+          <p className="text-xs text-slate-500 font-bold mt-1 mb-3">Quedan registradas aquí para que el cuadre sea trazable. Revertir devuelve la cuenta a la clasificación automática.</p>
           <table className="w-full text-xs">
-            <thead className="sticky top-0 bg-slate-900 text-white z-10">
-              <tr>
-                <th className="text-left px-4 py-3 font-black uppercase tracking-wider">Periodo</th>
-                <th className="text-left px-4 py-3 font-black uppercase tracking-wider">Cuenta</th>
-                <th className="text-left px-4 py-3 font-black uppercase tracking-wider">Ruta detectada</th>
-                <th className="text-left px-4 py-3 font-black uppercase tracking-wider">Clasificación</th>
-                <th className="px-4 py-3" />
-              </tr>
-            </thead>
+            <thead><tr className="text-left text-slate-500"><th className="py-1.5 font-black uppercase">Cuenta</th><th className="py-1.5 font-black uppercase">Sección</th><th className="py-1.5 font-black uppercase">Periodos</th><th /></tr></thead>
             <tbody>
-              {rows.map(row => (
-                <tr key={row.key} className="border-t border-slate-100">
-                  <td className="px-4 py-2 font-bold text-slate-500 whitespace-nowrap">{row.stmt.period}</td>
-                  <td className="px-4 py-2 font-semibold text-slate-900">{row.item.name}</td>
-                  <td className="px-4 py-2 text-slate-500">
-                    <span className={row.item.sectionPath?.includes('Manual Auditoría') ? 'font-bold text-indigo-600' : ''}>
-                      {row.item.sectionPath || 'Sin ruta visual'}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2">
-                    <select
-                      disabled={saving === row.key}
-                      value={row.current === 'Balance General sin clasificar' ? 'Otros' : row.current}
-                      onChange={e => update(row.stmt, row.idx, e.target.value as Segment)}
-                      className="bg-white border border-slate-200 rounded-lg px-2 py-1.5 w-56 disabled:opacity-50"
-                    >
-                      <option value="ACTIVO">ACTIVO</option>
-                      <option value="PASIVO">PASIVO</option>
-                      <option value="CAPITAL">CAPITAL</option>
-                      <option value="Estado de Resultados">Estado de Resultados</option>
-                      <option value="Flujo de Efectivo">Flujo de Efectivo</option>
-                      <option value="Otros">Otros</option>
-                    </select>
-                  </td>
-                  <td className="px-4 py-2 text-right">
-                    <button
-                      onClick={() => clearPath(row.stmt, row.idx)}
-                      disabled={saving === row.key || !row.item.sectionPath}
-                      className="inline-flex items-center gap-1 text-[11px] font-black text-slate-400 hover:text-rose-600 disabled:opacity-30"
-                      title="Quitar ruta detectada"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                      Quitar ruta
-                    </button>
-                  </td>
+              {manualMoves.map(m => (
+                <tr key={m.key} className="border-t border-slate-100">
+                  <td className="py-1.5 font-semibold text-slate-800">{m.name}</td>
+                  <td className="py-1.5 text-indigo-700 font-bold">{m.segment}</td>
+                  <td className="py-1.5 text-slate-500">{m.periods}</td>
+                  <td className="py-1.5 text-right"><button onClick={() => revertManual(m.statementType, m.name)} disabled={!!saving} className="text-[11px] font-black text-slate-400 hover:text-rose-600 disabled:opacity-40">Revertir</button></td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-      </div>
+      )}
     </div>
   );
 };

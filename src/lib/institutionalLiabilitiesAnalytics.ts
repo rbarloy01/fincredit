@@ -166,6 +166,17 @@ export function buildLiabilitiesInsights(liabilities: InstitutionalLiability_DB[
     });
   }
 
+  const today = new Date().toISOString().slice(0, 10);
+  const overdue = liabilities.filter(l => l.maturityDate && l.maturityDate < today && (l.currentBalance ?? 0) > 0);
+  if (overdue.length) {
+    insights.push({
+      severity: 'critical',
+      title: 'Facilities con vencimiento pasado',
+      detail: `${overdue.length} facility(ies) con fecha de vencimiento ya cumplida y saldo ${formatMoney(sumBy(overdue, l => l.currentBalance))}: ${overdue.map(l => l.lenderName).join(', ')}.`,
+      recommendation: 'Confirmar si se renovaron (actualizar fecha) o si hay un incumplimiento con el fondeador.',
+    });
+  }
+
   if (summary.missingMaturityCount || summary.missingRateCount) {
     insights.push({
       severity: 'info',
@@ -342,4 +353,311 @@ export function parseLiabilitiesRows(rows: Record<string, unknown>[]): { parsed:
     .filter((r): r is ParsedLiabilityRow => r !== null);
 
   return { parsed, unmatchedFields };
+}
+
+// ── Cockpit / reporte (espejo del análisis de loan tapes) ────────────────────
+// A diferencia del loan tape no hay cortes históricos: todo se calcula sobre el
+// listado vigente de facilities, a la fecha `asOf`. El calendario proyectado
+// asume amortización lineal de capital hasta el vencimiento según el texto de
+// `amortization`; sin esquema reconocible (o línea revolvente) se trata como
+// bullet, que es el supuesto conservador para riesgo de refinanciamiento.
+
+export type AmortizationScheme = 'bullet' | 'mensual' | 'trimestral' | 'semestral' | 'anual';
+
+export function amortizationScheme(l: InstitutionalLiability_DB): AmortizationScheme {
+  const n = normalizeHeader(l.amortization || '');
+  if (/mensual/.test(n)) return 'mensual';
+  if (/trimes/.test(n)) return 'trimestral';
+  if (/semes/.test(n)) return 'semestral';
+  if (/anual/.test(n)) return 'anual';
+  return 'bullet';
+}
+
+const SCHEME_STEP: Record<AmortizationScheme, number> = { bullet: 0, mensual: 1, trimestral: 3, semestral: 6, anual: 12 };
+
+function monthsUntil(asOf: Date, date?: string): number | null {
+  if (!date) return null;
+  const d = new Date(date);
+  if (!Number.isFinite(d.getTime())) return null;
+  return (d.getTime() - asOf.getTime()) / (86400000 * 30.44);
+}
+
+export interface LenderRow {
+  lender: string;
+  facilities: number;
+  originalAmount: number;
+  currentBalance: number;
+  pctOfTotal: number;
+  cumPct: number;
+  waRate: number | null;
+  annualInterest: number;
+  utilization: number | null;
+  nextMaturity: string | null;
+}
+
+export interface BucketRow { label: string; count: number; currentBalance: number; pctOfTotal: number; waRate: number | null }
+
+export interface ScheduleRow { label: string; principal: number; endingBalance: number; pctOfTotal: number }
+
+export interface FacilityRow {
+  liability: InstitutionalLiability_DB;
+  typeLabel: string;
+  utilization: number | null;
+  available: number | null;
+  remainingMonths: number | null;
+  annualInterest: number | null;
+  scheme: AmortizationScheme;
+  status: 'vigente' | 'vence_12m' | 'vencida' | 'sin_fecha';
+}
+
+export interface DataGap { lender: string; missing: string[] }
+
+export interface LiabilitiesKpis {
+  totalBalance: number;
+  totalOriginal: number;
+  available: number;
+  utilization: number | null;
+  waRate: number | null;
+  annualInterest: number;
+  waRemainingMonths: number | null;
+  due12mBalance: number;
+  due12mPct: number;
+  overdueBalance: number;
+  top1Pct: number;
+  top3Pct: number;
+  hhi: number;
+  lenders: number;
+  facilities: number;
+  fxPct: number;
+}
+
+export interface LiabilitiesAnalysis {
+  asOf: string;
+  kpi: LiabilitiesKpis;
+  lenders: LenderRow[];
+  topN: Array<{ label: string; currentBalance: number; pctOfTotal: number }>;
+  byType: BucketRow[];
+  byCurrency: BucketRow[];
+  byGuarantee: BucketRow[];
+  byScheme: BucketRow[];
+  rateBuckets: BucketRow[];
+  termBuckets: BucketRow[];
+  maturityByYear: BucketRow[];
+  maturityByQuarter: ScheduleRow[];
+  monthlySchedule: ScheduleRow[];
+  facilities: FacilityRow[];
+  dataGaps: DataGap[];
+  unscheduledBalance: number;
+}
+
+function bucketize(
+  liabilities: InstitutionalLiability_DB[],
+  defs: Array<{ label: string; test: (l: InstitutionalLiability_DB) => boolean }>,
+  total: number,
+): BucketRow[] {
+  return defs.map(def => {
+    const members = liabilities.filter(def.test);
+    const bal = sumBy(members, l => l.currentBalance);
+    const rated = members.filter(l => l.interestRate !== null && (l.currentBalance ?? 0) > 0);
+    const rw = sumBy(rated, l => l.currentBalance);
+    return {
+      label: def.label,
+      count: members.length,
+      currentBalance: bal,
+      pctOfTotal: total > 0 ? bal / total : 0,
+      waRate: rw > 0 ? rated.reduce((s, l) => s + (l.currentBalance as number) * (l.interestRate as number), 0) / rw : null,
+    };
+  }).filter(b => b.count > 0);
+}
+
+function groupBuckets(liabilities: InstitutionalLiability_DB[], keyOf: (l: InstitutionalLiability_DB) => string, total: number): BucketRow[] {
+  const keys = Array.from(new Set(liabilities.map(l => keyOf(l) || 'Sin dato')));
+  return bucketize(liabilities, keys.map(k => ({ label: k, test: l => (keyOf(l) || 'Sin dato') === k })), total)
+    .sort((a, b) => b.currentBalance - a.currentBalance);
+}
+
+// Principal due per month (index 0 = vencido/mes en curso) for the next `horizon` months.
+function projectPrincipal(l: InstitutionalLiability_DB, asOf: Date, horizon: number): number[] | null {
+  const bal = l.currentBalance ?? 0;
+  const out = Array(horizon).fill(0);
+  if (bal <= 0) return out;
+  const remaining = monthsUntil(asOf, l.maturityDate);
+  if (remaining === null) return null;
+  const lastIdx = Math.max(0, Math.ceil(remaining));
+  const step = SCHEME_STEP[amortizationScheme(l)];
+  if (!step || lastIdx === 0) {
+    if (lastIdx < horizon) out[lastIdx] += bal;
+    return out;
+  }
+  const payments: number[] = [];
+  for (let m = lastIdx; m >= 1; m -= step) payments.push(m);
+  const each = bal / payments.length;
+  payments.forEach(m => { if (m < horizon) out[m] += each; });
+  return out;
+}
+
+const MONTHS_ES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+
+export function analyzeLiabilities(liabilities: InstitutionalLiability_DB[], asOf: Date = new Date()): LiabilitiesAnalysis {
+  const total = sumBy(liabilities, l => l.currentBalance);
+  const summary = buildLiabilitiesSummary(liabilities);
+
+  const facilities: FacilityRow[] = liabilities.map((l): FacilityRow => {
+    const remainingMonths = monthsUntil(asOf, l.maturityDate);
+    const hasOriginal = l.originalAmount !== null && l.originalAmount > 0;
+    return {
+      liability: l,
+      typeLabel: LIABILITY_TYPE_LABELS[l.liabilityType] || l.liabilityType,
+      utilization: hasOriginal && l.currentBalance !== null ? l.currentBalance / (l.originalAmount as number) : null,
+      available: hasOriginal && l.liabilityType === 'linea_credito' && l.currentBalance !== null ? Math.max(0, (l.originalAmount as number) - l.currentBalance) : null,
+      remainingMonths,
+      annualInterest: l.currentBalance !== null && l.interestRate !== null ? l.currentBalance * l.interestRate : null,
+      scheme: amortizationScheme(l),
+      status: remainingMonths === null ? 'sin_fecha' : remainingMonths < 0 ? 'vencida' : remainingMonths <= 12 ? 'vence_12m' : 'vigente',
+    };
+  }).sort((a, b) => (b.liability.currentBalance ?? 0) - (a.liability.currentBalance ?? 0));
+
+  // Lenders
+  const lenderMap = new Map<string, InstitutionalLiability_DB[]>();
+  liabilities.forEach(l => {
+    const key = l.lenderName.trim();
+    lenderMap.set(key, [...(lenderMap.get(key) || []), l]);
+  });
+  let cum = 0;
+  const lenders: LenderRow[] = Array.from(lenderMap.entries())
+    .map(([lender, rows]) => {
+      const bal = sumBy(rows, l => l.currentBalance);
+      const orig = sumBy(rows, l => l.originalAmount);
+      const rated = rows.filter(l => l.interestRate !== null && (l.currentBalance ?? 0) > 0);
+      const rw = sumBy(rated, l => l.currentBalance);
+      const maturities = rows.map(l => l.maturityDate).filter(Boolean).sort() as string[];
+      return {
+        lender, facilities: rows.length, originalAmount: orig, currentBalance: bal,
+        pctOfTotal: total > 0 ? bal / total : 0, cumPct: 0,
+        waRate: rw > 0 ? rated.reduce((s, l) => s + (l.currentBalance as number) * (l.interestRate as number), 0) / rw : null,
+        annualInterest: sumBy(rows, l => (l.currentBalance !== null && l.interestRate !== null ? l.currentBalance * l.interestRate : null)),
+        utilization: orig > 0 ? bal / orig : null,
+        nextMaturity: maturities[0] || null,
+      };
+    })
+    .sort((a, b) => b.currentBalance - a.currentBalance)
+    .map(r => { cum += r.pctOfTotal; return { ...r, cumPct: cum }; });
+
+  const topN = [1, 3, 5, 10].filter(n => n === 1 || lenders.length > n - 1).map(n => {
+    const bal = lenders.slice(0, n).reduce((s, r) => s + r.currentBalance, 0);
+    return { label: `Top ${n}`, currentBalance: bal, pctOfTotal: total > 0 ? bal / total : 0 };
+  });
+  const hhi = lenders.reduce((s, r) => s + r.pctOfTotal ** 2, 0);
+
+  const rateBuckets = bucketize(liabilities, [
+    { label: '< 10%', test: l => l.interestRate !== null && l.interestRate < 0.10 },
+    { label: '10% – 12%', test: l => l.interestRate !== null && l.interestRate >= 0.10 && l.interestRate < 0.12 },
+    { label: '12% – 14%', test: l => l.interestRate !== null && l.interestRate >= 0.12 && l.interestRate < 0.14 },
+    { label: '14% – 16%', test: l => l.interestRate !== null && l.interestRate >= 0.14 && l.interestRate < 0.16 },
+    { label: '16% – 18%', test: l => l.interestRate !== null && l.interestRate >= 0.16 && l.interestRate < 0.18 },
+    { label: '≥ 18%', test: l => l.interestRate !== null && l.interestRate >= 0.18 },
+    { label: 'Sin tasa', test: l => l.interestRate === null },
+  ], total);
+
+  const rem = (l: InstitutionalLiability_DB) => monthsUntil(asOf, l.maturityDate);
+  const termBuckets = bucketize(liabilities, [
+    { label: 'Vencida', test: l => { const m = rem(l); return m !== null && m < 0; } },
+    { label: '0 – 6 meses', test: l => { const m = rem(l); return m !== null && m >= 0 && m <= 6; } },
+    { label: '6 – 12 meses', test: l => { const m = rem(l); return m !== null && m > 6 && m <= 12; } },
+    { label: '1 – 2 años', test: l => { const m = rem(l); return m !== null && m > 12 && m <= 24; } },
+    { label: '2 – 3 años', test: l => { const m = rem(l); return m !== null && m > 24 && m <= 36; } },
+    { label: '3 – 5 años', test: l => { const m = rem(l); return m !== null && m > 36 && m <= 60; } },
+    { label: '> 5 años', test: l => { const m = rem(l); return m !== null && m > 60; } },
+    { label: 'Sin fecha', test: l => rem(l) === null },
+  ], total);
+
+  const maturityByYear = buildMaturityLadder(liabilities).map(b => ({
+    label: b.year === 0 ? 'Sin fecha' : String(b.year), count: b.count, currentBalance: b.currentBalance,
+    pctOfTotal: total > 0 ? b.currentBalance / total : 0, waRate: null,
+  }));
+
+  // Projected principal runoff (36 months)
+  const HORIZON = 37;
+  const monthly = Array(HORIZON).fill(0);
+  let unscheduledBalance = 0;
+  liabilities.forEach(l => {
+    const p = projectPrincipal(l, asOf, HORIZON);
+    if (!p) { unscheduledBalance += l.currentBalance ?? 0; return; }
+    p.forEach((v, i) => { monthly[i] += v; });
+  });
+  let running = total;
+  const monthlySchedule: ScheduleRow[] = monthly.map((principal, i) => {
+    running -= principal;
+    const d = new Date(asOf.getFullYear(), asOf.getMonth() + i, 1);
+    return {
+      label: i === 0 ? `Vencido / ${MONTHS_ES[d.getMonth()]}-${String(d.getFullYear()).slice(2)}` : `${MONTHS_ES[d.getMonth()]}-${String(d.getFullYear()).slice(2)}`,
+      principal, endingBalance: Math.max(0, running), pctOfTotal: total > 0 ? principal / total : 0,
+    };
+  });
+  const maturityByQuarter: ScheduleRow[] = [];
+  for (let q = 0; q < 8; q++) {
+    const slice = monthly.slice(q === 0 ? 0 : q * 3 + 1, q * 3 + 4);
+    const principal = slice.reduce((s, v) => s + v, 0);
+    const end = monthlySchedule[Math.min(q * 3 + 3, HORIZON - 1)].endingBalance;
+    const d = new Date(asOf.getFullYear(), asOf.getMonth() + q * 3 + 1, 1);
+    maturityByQuarter.push({ label: `T${q + 1} (${MONTHS_ES[d.getMonth()]}-${String(d.getFullYear()).slice(2)})`, principal, endingBalance: end, pctOfTotal: total > 0 ? principal / total : 0 });
+  }
+
+  const byScheme = groupBuckets(liabilities, l => {
+    const s = amortizationScheme(l);
+    return s === 'bullet' ? (l.amortization ? 'Bullet / al vencimiento' : 'Sin esquema (bullet supuesto)') : s.charAt(0).toUpperCase() + s.slice(1);
+  }, total);
+
+  const dataGaps: DataGap[] = liabilities.map(l => ({
+    lender: l.lenderName,
+    missing: [
+      l.currentBalance === null ? 'saldo' : '',
+      l.originalAmount === null ? 'monto original' : '',
+      l.interestRate === null && !l.rateDescription ? 'tasa' : '',
+      !l.maturityDate ? 'vencimiento' : '',
+      !l.amortization ? 'amortización' : '',
+      !l.guarantee ? 'garantía' : '',
+    ].filter(Boolean),
+  })).filter(g => g.missing.length);
+
+  const withTerm = facilities.filter(f => f.remainingMonths !== null && (f.liability.currentBalance ?? 0) > 0);
+  const termWeight = withTerm.reduce((s, f) => s + (f.liability.currentBalance as number), 0);
+  const ratedOriginal = liabilities.filter(l => l.originalAmount !== null && l.originalAmount > 0 && l.currentBalance !== null);
+  const origForUtil = sumBy(ratedOriginal, l => l.originalAmount);
+
+  return {
+    asOf: asOf.toISOString().slice(0, 10),
+    kpi: {
+      totalBalance: total,
+      totalOriginal: summary.totalOriginalAmount,
+      available: facilities.reduce((s, f) => s + (f.available ?? 0), 0),
+      utilization: origForUtil > 0 ? sumBy(ratedOriginal, l => l.currentBalance) / origForUtil : null,
+      waRate: summary.weightedAverageRate,
+      annualInterest: facilities.reduce((s, f) => s + (f.annualInterest ?? 0), 0),
+      waRemainingMonths: termWeight > 0 ? withTerm.reduce((s, f) => s + Math.max(0, f.remainingMonths as number) * (f.liability.currentBalance as number), 0) / termWeight : null,
+      due12mBalance: summary.shortTermBalance,
+      due12mPct: total > 0 ? summary.shortTermBalance / total : 0,
+      overdueBalance: facilities.filter(f => f.status === 'vencida').reduce((s, f) => s + (f.liability.currentBalance ?? 0), 0),
+      top1Pct: lenders[0]?.pctOfTotal ?? 0,
+      top3Pct: topN.find(t => t.label === 'Top 3')?.pctOfTotal ?? lenders.reduce((s, r) => s + r.pctOfTotal, 0),
+      hhi,
+      lenders: lenders.length,
+      facilities: liabilities.length,
+      fxPct: total > 0 ? summary.foreignCurrencyBalance / total : 0,
+    },
+    lenders,
+    topN,
+    byType: groupBuckets(liabilities, l => LIABILITY_TYPE_LABELS[l.liabilityType] || l.liabilityType, total),
+    byCurrency: groupBuckets(liabilities, l => l.currency || 'MXN', total),
+    byGuarantee: groupBuckets(liabilities, l => (l.guarantee || '').trim() || 'Sin garantía registrada', total),
+    byScheme,
+    rateBuckets,
+    termBuckets,
+    maturityByYear,
+    maturityByQuarter,
+    monthlySchedule,
+    facilities,
+    dataGaps,
+    unscheduledBalance,
+  };
 }

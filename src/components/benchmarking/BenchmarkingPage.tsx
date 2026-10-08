@@ -480,7 +480,12 @@ function splitBenchmarkValue(rawValue: string, key: BenchmarkFilterKey) {
   const value = canonicalBenchmarkValue(rawValue, key);
   if (value === 'Sin dato') return ['Sin dato'];
   if (['operatingAge', 'ticketRange', 'statementType', 'financialYears', 'creditGranted'].includes(key)) return [value];
-  const parts = value
+  const withoutSplittingParens = value
+    .replace(/\(([^)]*)\)/g, (match, inner) => (/[,;/]|\by\b|\be\b/i.test(inner) ? ' ' : match))
+    .replace(/\s+/g, ' ')
+    .trim();
+  const source = withoutSplittingParens || value;
+  const parts = source
     .split(/\s*(?:,|;|\||\/|\+|\by\b|\be\b)\s*/i)
     .map(part => canonicalBenchmarkValue(part, key))
     .filter(part => part && part !== 'Sin dato');
@@ -598,24 +603,10 @@ function emptyMetricMap(): RatioMetricMap {
   return Object.fromEntries(ratioKeys.map(key => [key, null])) as RatioMetricMap;
 }
 
-function metricMap(stmt: FinancialStatement_DB | undefined): RatioMetricMap {
+function metricMap(stmt: FinancialStatement_DB | undefined, siblings: FinancialStatement_DB[] = []): RatioMetricMap {
   if (!stmt) return emptyMetricMap();
-  const ratios = new Map(standardRatios(stmt).map(ratio => [ratio.key, ratio.value]));
+  const ratios = new Map(standardRatios(stmt, siblings).map(ratio => [ratio.key, ratio.value]));
   return Object.fromEntries(ratioKeys.map(key => [key, ratios.get(key) ?? null])) as RatioMetricMap;
-}
-
-function weightedAverageFromMetrics(rows: BenchRow[], key: string, getMetrics: (row: BenchRow) => RatioMetricMap) {
-  let num = 0;
-  let den = 0;
-  rows.forEach(row => {
-    const value = getMetrics(row)[key];
-    const weight = row.client.totalCreditValue || 1;
-    if (value !== null && Number.isFinite(value)) {
-      num += value * weight;
-      den += weight;
-    }
-  });
-  return den ? num / den : null;
 }
 
 function ratioValuesFromMetrics(rows: BenchRow[], key: string, getMetrics: (row: BenchRow) => RatioMetricMap) {
@@ -623,10 +614,22 @@ function ratioValuesFromMetrics(rows: BenchRow[], key: string, getMetrics: (row:
 }
 
 function ratioStats(rows: BenchRow[], getMetrics: (row: BenchRow) => RatioMetricMap) {
+  // Calls getMetrics exactly once per row (was: twice per ratioKey per row, ~28x
+  // redundant calls), each reused across every ratioKey's weightedAverage/average/median.
+  const perRow = rows.map(row => ({ metrics: getMetrics(row), weight: row.client.totalCreditValue || 1 }));
   return Object.fromEntries(ratioKeys.map(key => {
-    const values = ratioValuesFromMetrics(rows, key, getMetrics);
+    const values = perRow.map(r => r.metrics[key]);
+    let num = 0;
+    let den = 0;
+    perRow.forEach(r => {
+      const value = r.metrics[key];
+      if (value !== null && Number.isFinite(value)) {
+        num += value * r.weight;
+        den += r.weight;
+      }
+    });
     return [key, {
-      weightedAverage: weightedAverageFromMetrics(rows, key, getMetrics),
+      weightedAverage: den ? num / den : null,
       average: average(values),
       median: percentile(values, 0.5),
       observations: values.filter(value => value !== null).length,
@@ -773,6 +776,9 @@ function apiClient(row: any): Client {
     lastPeriod: row.last_period || '',
     logoLeft: row.logo_left,
     logoRight: row.logo_right,
+    eligibilityCriteria: row.eligibility_criteria || [],
+    fiscalBuroStatus: row.fiscal_buro_status || {},
+    operationsNotes: row.operations_notes || '',
   };
 }
 
@@ -905,6 +911,12 @@ const BenchmarkingPage: React.FC = () => {
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
   const [keyRatioChartKeys, setKeyRatioChartKeys] = useState<string[]>(DEFAULT_KEY_RATIO_CHART_KEYS);
   const [trendChartKeys, setTrendChartKeys] = useState<string[]>(DEFAULT_TREND_RATIO_KEYS);
+  const [statMode, setStatMode] = useState<'median' | 'average'>('median');
+  const statLabel = statMode === 'average' ? 'promedio' : 'mediana';
+  const statLabelCap = statMode === 'average' ? 'Promedio' : 'Mediana';
+  const pickStat = useCallback((stat: { median: number | null; average: number | null }) => (
+    statMode === 'average' ? stat.average : stat.median
+  ), [statMode]);
 
   const loadBenchmarkRows = useCallback(async (active = () => true) => {
     try {
@@ -972,7 +984,7 @@ const BenchmarkingPage: React.FC = () => {
 
   const statementMetrics = useMemo(() => {
     const cache = new Map<string, RatioMetricMap>();
-    rows.forEach(row => row.statements.forEach(stmt => cache.set(stmt.id, metricMap(stmt))));
+    rows.forEach(row => row.statements.forEach(stmt => cache.set(stmt.id, metricMap(stmt, row.statements))));
     return cache;
   }, [rows]);
 
@@ -981,9 +993,22 @@ const BenchmarkingPage: React.FC = () => {
     return statementMetrics.get(stmt.id) || metricMap(stmt);
   }, [statementMetrics]);
 
+  // O(1) lookup for "the statement matching the current period filter" per client —
+  // avoids re-filtering each row's full statement list on every one of the ~40 calls
+  // per row that groups/ratioAnalysis/periodTypeBreakdowns used to make per render.
+  const periodStatementByRowId = useMemo(() => {
+    const cache = new Map<string, FinancialStatement_DB | undefined>();
+    rows.forEach(row => {
+      cache.set(row.client.id, selectedBenchmarkStatement(row, period, periodTypeFilter, selectedFinancialYear));
+    });
+    return cache;
+  }, [rows, period, periodTypeFilter, selectedFinancialYear]);
+
   const getPeriodStatement = useCallback((row: BenchRow, overridePeriodType: PeriodComparabilityFilter = periodTypeFilter) => (
-    selectedBenchmarkStatement(row, period, overridePeriodType, selectedFinancialYear)
-  ), [period, periodTypeFilter, selectedFinancialYear]);
+    overridePeriodType === periodTypeFilter
+      ? periodStatementByRowId.get(row.client.id)
+      : selectedBenchmarkStatement(row, period, overridePeriodType, selectedFinancialYear)
+  ), [periodStatementByRowId, period, periodTypeFilter, selectedFinancialYear]);
 
   const getPeriodMetrics = useCallback((row: BenchRow) => (
     getStatementMetrics(getPeriodStatement(row))
@@ -993,15 +1018,20 @@ const BenchmarkingPage: React.FC = () => {
     const map = new Map<string, BenchRow[]>();
     filtered.forEach(row => {
       const key = segmentKey(row, dims);
-      map.set(key, [...(map.get(key) || []), row]);
+      const bucket = map.get(key);
+      if (bucket) bucket.push(row);
+      else map.set(key, [row]);
     });
-    return Array.from(map.entries()).map(([name, groupRows]) => ({
-      name,
-      rows: groupRows,
-      exposure: groupRows.reduce((s, r) => s + (r.client.totalCreditValue || 0), 0),
-      ratios: Object.fromEntries(ratioKeys.map(key => [key, weightedAverageFromMetrics(groupRows, key, getPeriodMetrics)])),
-      ratioStats: ratioStats(groupRows, getPeriodMetrics),
-    })).sort((a, b) => b.exposure - a.exposure);
+    return Array.from(map.entries()).map(([name, groupRows]) => {
+      const stats = ratioStats(groupRows, getPeriodMetrics);
+      return {
+        name,
+        rows: groupRows,
+        exposure: groupRows.reduce((s, r) => s + (r.client.totalCreditValue || 0), 0),
+        ratios: Object.fromEntries(ratioKeys.map(key => [key, stats[key].weightedAverage])),
+        ratioStats: stats,
+      };
+    }).sort((a, b) => b.exposure - a.exposure);
   }, [filtered, dims, getPeriodMetrics]);
 
   const buildFurtherAnalysisRows = useCallback(() => filtered.flatMap(row => {
@@ -1052,7 +1082,7 @@ const BenchmarkingPage: React.FC = () => {
   const ratioAnalysis = useMemo(() => {
     const exposure = filtered.reduce((sum, row) => sum + (row.client.totalCreditValue || 0), 0);
     const latestMetrics = filtered.map(getPeriodMetrics);
-    const medians = Object.fromEntries(ratioKeys.map(key => [key, percentile(latestMetrics.map(m => m[key]), 0.5)])) as Record<string, number | null>;
+    const medians = Object.fromEntries(ratioKeys.map(key => [key, statMode === 'average' ? average(latestMetrics.map(m => m[key])) : percentile(latestMetrics.map(m => m[key]), 0.5)])) as Record<string, number | null>;
     const topSegments = groups.map(group => ({
       name: group.name,
       clients: group.rows.length,
@@ -1067,18 +1097,18 @@ const BenchmarkingPage: React.FC = () => {
         : 'El filtro seleccionado no tiene clientes comparables.',
       medians.debt_ebitda !== null
         ? medians.debt_ebitda > 4
-          ? `La mediana Deuda/EBITDA es alta (${formatMetric(medians.debt_ebitda, 'debt_ebitda')}x), por lo que la cohorte luce más apalancada.`
-          : `La mediana Deuda/EBITDA es ${formatMetric(medians.debt_ebitda, 'debt_ebitda')}x, útil como referencia de apalancamiento del filtro.`
+          ? `La ${statLabel} Deuda/EBITDA es alta (${formatMetric(medians.debt_ebitda, 'debt_ebitda')}x), por lo que la cohorte luce más apalancada.`
+          : `La ${statLabel} Deuda/EBITDA es ${formatMetric(medians.debt_ebitda, 'debt_ebitda')}x, útil como referencia de apalancamiento del filtro.`
         : 'No hay datos suficientes para calcular Deuda/EBITDA en esta cohorte.',
       medians.dscr !== null
         ? medians.dscr < 1.2
-          ? `El DSCR mediano (${formatMetric(medians.dscr, 'dscr')}x) sugiere presión de servicio de deuda dentro del filtro.`
-          : `El DSCR mediano (${formatMetric(medians.dscr, 'dscr')}x) muestra holgura relativa frente al servicio de deuda.`
+          ? `El DSCR ${statMode === 'average' ? 'promedio' : 'mediano'} (${formatMetric(medians.dscr, 'dscr')}x) sugiere presión de servicio de deuda dentro del filtro.`
+          : `El DSCR ${statMode === 'average' ? 'promedio' : 'mediano'} (${formatMetric(medians.dscr, 'dscr')}x) muestra holgura relativa frente al servicio de deuda.`
         : 'No hay datos suficientes para calcular DSCR en esta cohorte.',
       medians.current_ratio !== null
         ? medians.current_ratio < 1
-          ? `La razón corriente mediana (${formatMetric(medians.current_ratio, 'current_ratio')}x) apunta a presión de liquidez.`
-          : `La razón corriente mediana (${formatMetric(medians.current_ratio, 'current_ratio')}x) funciona como benchmark de liquidez del filtro.`
+          ? `La razón corriente ${statLabel} (${formatMetric(medians.current_ratio, 'current_ratio')}x) apunta a presión de liquidez.`
+          : `La razón corriente ${statLabel} (${formatMetric(medians.current_ratio, 'current_ratio')}x) funciona como benchmark de liquidez del filtro.`
         : 'No hay datos suficientes para calcular razón corriente en esta cohorte.',
       topSegments[0]
         ? `El segmento con más participantes es "${topSegments[0].name}" con ${topSegments[0].clients} cliente${topSegments[0].clients === 1 ? '' : 's'} en la cohorte filtrada.`
@@ -1097,7 +1127,7 @@ const BenchmarkingPage: React.FC = () => {
       topSegments,
       observations,
     };
-  }, [filtered, getPeriodMetrics, groups, period, periodOptions]);
+  }, [filtered, getPeriodMetrics, groups, period, periodOptions, statMode, statLabel]);
 
   const segmentChartData = useMemo(() => [...ratioAnalysis.topSegments]
     .sort((a, b) => b.clients - a.clients || b.exposure - a.exposure)
@@ -1127,13 +1157,14 @@ const BenchmarkingPage: React.FC = () => {
       key,
       ratio: ratioLabels[key],
       value: value === null ? 0 : isPercent ? value * 100 : value,
+      valuePct: value !== null && isPercent ? value * 100 : null,
+      valueX: value !== null && !isPercent ? value : null,
       formatted: formatBenchmarkMetric(value, key),
       unit: isPercent ? '%' : 'x',
       hasData: value !== null,
     };
   }).filter(item => item.hasData), [keyRatioChartKeys, ratioAnalysis.medians]);
   const keyRatioUnits = Array.from(new Set(keyRatioChartData.map(item => item.unit))) as Array<'%' | 'x'>;
-  const keyRatioAxisUnit: '%' | 'x' | 'mixed' = keyRatioUnits.length === 1 ? keyRatioUnits[0] : 'mixed';
 
   const dataCoverageChartData = useMemo(() => ratioKeys.map(key => ({
     ratio: ratioLabels[key],
@@ -1146,23 +1177,23 @@ const BenchmarkingPage: React.FC = () => {
     ), 0),
   })).sort((a, b) => b.coverage - a.coverage).slice(0, 8), [filtered.length, ratioAnalysis.topSegments]);
 
-  const periodTrendChartData = useMemo(() => periodOptions.map(option => {
+  const periodTrendChartData = useMemo(() => periodOptions.slice(-24).map(option => {
     const metrics = filtered.map(row => getStatementMetrics(
       selectedBenchmarkStatement(row, option.value, periodTypeFilter, selectedFinancialYear),
     ));
     return {
       period: option.label,
       periodKey: option.value,
-      ...Object.fromEntries(trendChartKeys.map(key => [key, percentile(metrics.map(metric => metric[key]), 0.5)])),
+      ...Object.fromEntries(trendChartKeys.map(key => [key, statMode === 'average' ? average(metrics.map(metric => metric[key])) : percentile(metrics.map(metric => metric[key]), 0.5)])),
     };
-  }).filter(item => trendChartKeys.some(key => item[key as keyof typeof item] !== null)).slice(-12), [filtered, getStatementMetrics, periodOptions, periodTypeFilter, selectedFinancialYear, trendChartKeys]);
+  }).filter(item => trendChartKeys.some(key => item[key as keyof typeof item] !== null)).slice(-12), [filtered, getStatementMetrics, periodOptions, periodTypeFilter, selectedFinancialYear, trendChartKeys, statMode]);
   const trendHasPercent = trendChartKeys.some(key => percentRatioKeys.has(key));
   const trendHasRatio = trendChartKeys.some(key => !percentRatioKeys.has(key));
 
   const riskScatterData = useMemo(() => ratioAnalysis.topSegments.map(segment => ({
     name: segment.name,
-    debt: segment.ratioStats.debt_ebitda.median,
-    dscr: segment.ratioStats.dscr.median,
+    debt: pickStat(segment.ratioStats.debt_ebitda),
+    dscr: pickStat(segment.ratioStats.dscr),
     exposure: segment.exposure,
     exposureCompact: formatMoneyCompact(segment.exposure),
     clients: segment.clients,
@@ -1173,7 +1204,7 @@ const BenchmarkingPage: React.FC = () => {
     exposure: number;
     exposureCompact: string;
     clients: number;
-  } => item.debt !== null && item.dscr !== null), [ratioAnalysis.topSegments]);
+  } => item.debt !== null && item.dscr !== null), [ratioAnalysis.topSegments, pickStat]);
 
   const exportExcel = async () => {
     setExporting(true);
@@ -1387,7 +1418,7 @@ const BenchmarkingPage: React.FC = () => {
   const primaryFilters = BENCHMARK_FILTERS.filter(filter => PRIMARY_FILTER_KEYS.includes(filter.key));
   const advancedFilters = BENCHMARK_FILTERS.filter(filter => !PRIMARY_FILTER_KEYS.includes(filter.key));
   const segmentationLabel = activeDims.length ? activeDims.map(dim => dim.label).join(' + ') : 'Sin segmentación (vista global)';
-  const segmentationDiagnostics = activeDims.map(filter => {
+  const segmentationDiagnostics = useMemo(() => activeDims.map(filter => {
     const values = filtered.map(row => segmentValueLabel(row, filter.key));
     const missing = values.filter(value => value === 'Sin dato' || value.includes('Sin dato')).length;
     const uniqueValues = Array.from(new Set(values)).filter(Boolean);
@@ -1399,10 +1430,10 @@ const BenchmarkingPage: React.FC = () => {
       unique: uniqueValues.length,
       topValues: uniqueValues.slice(0, 3),
     };
-  });
+  }), [activeDims, filtered]);
   const ratiosWithData = ratioKeys.filter(key => ratioAnalysis.medians[key] !== null).length;
   const periodTypeLabel = PERIOD_COMPARABILITY_OPTIONS.find(option => option.value === periodTypeFilter)?.label || 'Mensual + acumulado';
-  const periodTransparencyRows = filtered.map(row => {
+  const periodTransparencyRows = useMemo(() => filtered.map(row => {
     const stmt = getPeriodStatement(row);
     const standardized = periodStandardization(stmt);
     return {
@@ -1411,19 +1442,19 @@ const BenchmarkingPage: React.FC = () => {
       standardized: standardized?.periodo_estandarizado || 'Sin interpretar',
       type: standardized?.tipo_periodo || 'Sin clasificar',
     };
-  });
-  const periodTransparencyCounts = periodTransparencyRows.reduce((acc, item) => {
+  }), [filtered, getPeriodStatement]);
+  const periodTransparencyCounts = useMemo(() => periodTransparencyRows.reduce((acc, item) => {
     acc[item.type] = (acc[item.type] || 0) + 1;
     return acc;
-  }, {} as Record<string, number>);
+  }, {} as Record<string, number>), [periodTransparencyRows]);
   const mixedPeriodTypes = Object.keys(periodTransparencyCounts).filter(type => type === 'mensual' || type === 'acumulado').length > 1;
-  const mixedSegments = groups
+  const mixedSegments = useMemo(() => groups
     .map(group => {
       const types = Array.from(new Set(group.rows.map(row => periodStandardization(getPeriodStatement(row))?.tipo_periodo).filter(Boolean)));
       return { name: group.name, types };
     })
-    .filter(item => item.types.length > 1);
-  const periodTypeBreakdowns = (['mensual', 'acumulado'] as BenchmarkPeriodType[]).map(type => {
+    .filter(item => item.types.length > 1), [groups, getPeriodStatement]);
+  const periodTypeBreakdowns = useMemo(() => (['mensual', 'acumulado'] as BenchmarkPeriodType[]).map(type => {
     const typeRows = cohortFiltered.filter(row => selectedBenchmarkStatement(row, period, type, selectedFinancialYear));
     const typeStats = ratioStats(typeRows, row => getStatementMetrics(selectedBenchmarkStatement(row, period, type, selectedFinancialYear)));
     return {
@@ -1431,11 +1462,11 @@ const BenchmarkingPage: React.FC = () => {
       label: type === 'mensual' ? 'Benchmark mensual' : 'Benchmark acumulado/YTD',
       rows: typeRows,
       stats: typeStats,
-      debtMedian: typeStats.debt_ebitda.median,
-      dscrMedian: typeStats.dscr.median,
-      liquidityMedian: typeStats.current_ratio.median,
+      debtMedian: pickStat(typeStats.debt_ebitda),
+      dscrMedian: pickStat(typeStats.dscr),
+      liquidityMedian: pickStat(typeStats.current_ratio),
     };
-  });
+  }), [cohortFiltered, period, selectedFinancialYear, getStatementMetrics]);
 
   return (
     <div className="flex-1 bg-slate-50 min-h-screen p-8">
@@ -1446,6 +1477,24 @@ const BenchmarkingPage: React.FC = () => {
           <p className="text-slate-500 text-sm mt-1">Promedios ponderados y segmentación del portafolio.</p>
         </div>
         <div className="flex items-center gap-2">
+          <div className="flex items-center bg-white border border-slate-200 rounded-xl p-1 text-sm">
+            <button
+              type="button"
+              onClick={() => setStatMode('median')}
+              title="Mediana: más resistente a valores extremos, recomendado para comparar razones financieras"
+              className={`px-3 py-1.5 rounded-lg font-bold ${statMode === 'median' ? 'bg-slate-900 text-white' : 'text-slate-500 hover:bg-slate-50'}`}
+            >
+              Mediana
+            </button>
+            <button
+              type="button"
+              onClick={() => setStatMode('average')}
+              title="Promedio simple: sensible a valores extremos (ej. un EBITDA cercano a cero puede disparar el promedio)"
+              className={`px-3 py-1.5 rounded-lg font-bold ${statMode === 'average' ? 'bg-slate-900 text-white' : 'text-slate-500 hover:bg-slate-50'}`}
+            >
+              Promedio
+            </button>
+          </div>
           <button onClick={exportReportPdf} disabled={loading || exporting || Boolean(loadError)} className="flex items-center gap-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 font-bold px-4 py-2.5 rounded-xl text-sm disabled:opacity-50">
             <FileText className="w-4 h-4" /> Reporte PDF
           </button>
@@ -1639,7 +1688,7 @@ const BenchmarkingPage: React.FC = () => {
             <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
               <p className="text-xs font-black text-amber-800 uppercase tracking-widest">Alerta de comparabilidad</p>
               <p className="text-sm font-bold text-amber-900 mt-1">
-                Esta cohorte mezcla benchmarking mensual y acumulado/YTD. Usa “Solo mensual” o “Solo acumulado”, o revisa los segmentos marcados antes de tomar la mediana como comparable.
+                Esta cohorte mezcla benchmarking mensual y acumulado/YTD. Usa “Solo mensual” o “Solo acumulado”, o revisa los segmentos marcados antes de tomar la {statLabel} como comparable.
               </p>
               {mixedSegments.length > 0 && (
                 <p className="text-xs font-bold text-amber-800 mt-2">
@@ -1790,7 +1839,7 @@ const BenchmarkingPage: React.FC = () => {
           <div className="mb-4">
             <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
               <div>
-                <p className="text-xs font-black text-slate-400 uppercase tracking-widest">Medianas clave</p>
+                <p className="text-xs font-black text-slate-400 uppercase tracking-widest">{statLabelCap}s clave</p>
                 <h3 className="text-lg font-black text-slate-900 mt-1">Ratios ejecutivos de la cohorte</h3>
               </div>
               <button
@@ -1820,17 +1869,32 @@ const BenchmarkingPage: React.FC = () => {
 	                <BarChart data={keyRatioChartData} margin={{ top: 10, right: 12, left: 8, bottom: 28 }}>
 	                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
 	                  <XAxis dataKey="ratio" tick={{ fontSize: 11, fill: '#64748b' }} interval={0} angle={-12} textAnchor="end" height={48} />
-	                  <YAxis tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={value => formatBenchmarkAxisValue(Number(value), keyRatioAxisUnit)} width={58} />
+	                  <YAxis
+	                    yAxisId="pct"
+	                    hide={!keyRatioUnits.includes('%')}
+	                    tick={{ fontSize: 11, fill: '#64748b' }}
+	                    tickFormatter={value => formatBenchmarkAxisValue(Number(value), '%')}
+	                    width={58}
+	                  />
+	                  <YAxis
+	                    yAxisId="x"
+	                    orientation="right"
+	                    hide={!keyRatioUnits.includes('x')}
+	                    tick={{ fontSize: 11, fill: '#64748b' }}
+	                    tickFormatter={value => formatBenchmarkAxisValue(Number(value), 'x')}
+	                    width={52}
+	                  />
 	                  <Tooltip
-	                    formatter={(_value: any, _name: any, item: any) => [item.payload.formatted, 'Mediana']}
+	                    formatter={(_value: any, _name: any, item: any) => [item.payload.formatted, statLabelCap]}
 	                    labelFormatter={label => String(label)}
 	                    contentStyle={benchmarkTooltipStyle}
 	                  />
-                  <Bar dataKey="value" radius={[8, 8, 0, 0]} fill="#4f46e5" />
+                  <Bar yAxisId="pct" stackId="median" dataKey="valuePct" radius={[8, 8, 0, 0]} fill="#4f46e5" />
+                  <Bar yAxisId="x" stackId="median" dataKey="valueX" radius={[8, 8, 0, 0]} fill="#d97706" />
                 </BarChart>
               </ResponsiveContainer>
             ) : (
-              <div className="h-full flex items-center justify-center text-sm font-bold text-slate-400">Sin medianas suficientes para graficar.</div>
+              <div className="h-full flex items-center justify-center text-sm font-bold text-slate-400">Sin {statLabel}s suficientes para graficar.</div>
             )}
           </div>
         </div>
@@ -1840,7 +1904,7 @@ const BenchmarkingPage: React.FC = () => {
             <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
               <div>
                 <p className="text-xs font-black text-slate-400 uppercase tracking-widest">Evolución histórica</p>
-                <h3 className="text-lg font-black text-slate-900 mt-1">Medianas por periodo</h3>
+                <h3 className="text-lg font-black text-slate-900 mt-1">{statLabelCap}s por periodo</h3>
               </div>
               <button
                 type="button"
@@ -1990,7 +2054,7 @@ const BenchmarkingPage: React.FC = () => {
               </div>
               <h2 className="mt-5 text-4xl font-black tracking-tight">Mini estudio de cohorte</h2>
               <p className="mt-3 text-[15px] leading-relaxed text-slate-200">
-                Resumen ejecutivo de la cohorte filtrada: calidad de información, medianas clave, concentración y segmentos que deben revisarse antes de comité.
+                Resumen ejecutivo de la cohorte filtrada: calidad de información, {statLabel}s clave, concentración y segmentos que deben revisarse antes de comité.
               </p>
             </div>
             <div className="w-[310px] rounded-xl border border-white/15 bg-white/10 p-4 text-sm text-slate-100">
@@ -2032,7 +2096,7 @@ const BenchmarkingPage: React.FC = () => {
               <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
                 <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">Alerta de comparabilidad</p>
                 <p className="mt-1 text-xs font-bold leading-relaxed text-amber-900">
-                  La cohorte mezcla periodos mensuales y acumulados/YTD. Usa el Excel para validar segmentos antes de comparar medianas finas.
+                  La cohorte mezcla periodos mensuales y acumulados/YTD. Usa el Excel para validar segmentos antes de comparar {statLabel}s finas.
                 </p>
               </div>
             )}
