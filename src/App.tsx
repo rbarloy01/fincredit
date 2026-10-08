@@ -4,7 +4,7 @@ import LoginPage from './components/auth/LoginPage';
 import ClientList from './components/clients/ClientList';
 import { Client, CustomField, db, RolloutGuardFeature, RolloutGuardResult } from './db/index';
 import { AISettings, loadAISettings } from './services/ai';
-import { Activity, AlertTriangle, BarChart3, Building2, ClipboardList, Inbox, Layers3, LayoutDashboard, Settings, LogOut, RefreshCw, ShieldAlert, ShieldCheck, Moon, Sun, Sparkles, HelpCircle } from 'lucide-react';
+import { Activity, AlertTriangle, BarChart3, Building2, ClipboardList, Inbox, LayoutDashboard, Settings, LogOut, RefreshCw, ShieldAlert, ShieldCheck, Moon, Sun, Sparkles, HelpCircle } from 'lucide-react';
 import { isSupabaseConfigured, supabaseConfigError } from './lib/supabase';
 import { lazyWithChunkRetry, resetChunkRetryStateForCurrentBuild } from './lib/lazyWithChunkRetry';
 import { logDiag } from './lib/telemetry';
@@ -334,7 +334,6 @@ const App: React.FC = () => {
     { id: 'clients' as Route, label: 'Clientes', icon: Building2 },
     { id: 'crm' as Route, label: 'CRM', icon: ClipboardList },
     { id: 'benchmarking' as Route, label: 'Benchmarking', icon: BarChart3 },
-    { id: 'consolidation' as Route, label: 'Consolidación', icon: Layers3 },
     { id: 'lifecycle' as Route, label: 'Línea de vida', icon: Activity },
     { id: 'zscore' as Route, label: 'Z-Score', icon: ShieldAlert },
     ...(session.role === 'manager' ? [{ id: 'ingestion' as Route, label: 'Ingestion', icon: Inbox }] : []),
