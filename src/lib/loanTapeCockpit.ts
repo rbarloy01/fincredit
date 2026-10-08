@@ -22,6 +22,12 @@ import type { StructuredLoanTapeAnalysis } from '../services/ai';
 import { DPD_BUCKET_DEFS, classifyDpd } from './portfolioRules';
 import { inferLoanIds } from './loanIdentity';
 
+// push(...arr) revienta la pila con cientos de miles de filas (archivos que declaran A1:…1048576).
+function appendAll<T>(target: T[], items: T[]) {
+  for (const item of items) target.push(item);
+}
+
+
 export const DPD_BUCKETS = DPD_BUCKET_DEFS.map(b => b.bucket) as unknown as readonly ['0 dias', '1-30', '31-60', '61-89', '90-180', '>180'];
 
 export interface CockpitPeriodPoint {
@@ -108,7 +114,7 @@ function rowsStandardized(tape: LoanTape_DB): StandardLoan[] {
 
 function flatten(tapes: LoanTape_DB[]): StandardLoan[] {
   const all: StandardLoan[] = [];
-  for (const tape of tapes) all.push(...rowsStandardized(tape));
+  for (const tape of tapes) appendAll(all, rowsStandardized(tape));
   return all;
 }
 

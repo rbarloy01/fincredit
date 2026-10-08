@@ -23,6 +23,12 @@ import {
 import { loanStatusFromDpd, DPD_PROXY_DAYS } from './portfolioRules';
 import { inferLoanIds } from './loanIdentity';
 
+// push(...arr) revienta la pila con cientos de miles de filas (archivos que declaran A1:…1048576).
+function appendAll<T>(target: T[], items: T[]) {
+  for (const item of items) target.push(item);
+}
+
+
 export type SheetInput = { name: string; rows: any[][] };
 
 type Field =
@@ -589,14 +595,14 @@ export function importLoanTapeSheets(sheets: SheetInput[], fileName: string, opt
 
     if (matched) {
       const { std, notes } = extractWithProfile(rows, matched.headerIdx, matched.profile, sheetDate);
-      allStd.push(...std); allNotes.push(...notes);
+      appendAll(allStd, std); allNotes.push(...notes);
       reports.push({ name: sheet.name, profile: matched.profile.name, dataRows, mappedRows: std.length, status: std.length > 0 ? 'ok' : 'unmapped' });
       continue;
     }
 
     const bucketResult = extractDpdBucketBreakdown(rows, fileName, sheetDate);
     if (bucketResult.std.length > 0) {
-      allStd.push(...bucketResult.std); allNotes.push(...bucketResult.notes);
+      appendAll(allStd, bucketResult.std); allNotes.push(...bucketResult.notes);
       summary = bucketResult.summary;
       reports.push({ name: sheet.name, profile: 'COFINE_DPD_BUCKET_SUMMARY', dataRows, mappedRows: bucketResult.std.length, status: 'fallback' });
       continue;
@@ -608,7 +614,7 @@ export function importLoanTapeSheets(sheets: SheetInput[], fileName: string, opt
       const rowsToAdd = hasBucketRows
         ? summaryResult.std.filter(row => !allStd.some(existing => normalize(existing.loan_type) === normalize(row.loan_type)))
         : summaryResult.std;
-      allStd.push(...rowsToAdd);
+      appendAll(allStd, rowsToAdd);
       allNotes.push(...summaryResult.notes);
       summary = summaryResult.summary;
       reports.push({ name: sheet.name, profile: hasBucketRows ? 'COFINE_PRODUCT_SUMMARY_CONTEXT' : 'COFINE_PRODUCT_SUMMARY', dataRows, mappedRows: rowsToAdd.length, status: 'fallback' });
@@ -633,13 +639,13 @@ export function importLoanTapeSheets(sheets: SheetInput[], fileName: string, opt
 
   const kept = selectGenericSheets(genericCandidates);
   for (const c of genericCandidates) {
-    if (kept.keep.includes(c)) { allStd.push(...c.std); allNotes.push(...c.notes); continue; }
+    if (kept.keep.includes(c)) { appendAll(allStd, c.std); allNotes.push(...c.notes); continue; }
     const rep = reports.find(r => r.name === c.name && r.status === 'fallback');
     if (rep) { rep.status = 'ignored'; rep.mappedRows = 0; }
   }
   const { std: cleanStd, rateFixes, dpdFixes } = sanitizeLoans(allStd);
   const identity = inferLoanIds(cleanStd);
-  allStd.length = 0; allStd.push(...identity.rows);
+  allStd.length = 0; appendAll(allStd, identity.rows);
 
   const profile = buildLoanTapeDataProfile(allStd, allNotes);
   const totalBalance = allStd.reduce((a, s) => a + (s.outstanding_balance || 0), 0);
