@@ -19,7 +19,7 @@ import {
 } from './loanTapeAnalytics';
 import type { StructuredLoanTapeAnalysis } from '../services/ai';
 
-import { DPD_BUCKET_DEFS, classifyDpd } from './portfolioRules';
+import { DPD_BUCKET_DEFS, classifyDpd, liveLoansDetail } from './portfolioRules';
 import { inferLoanIds } from './loanIdentity';
 
 // push(...arr) revienta la pila con cientos de miles de filas (archivos que declaran A1:…1048576).
@@ -34,7 +34,8 @@ export interface CockpitPeriodPoint {
   period: string;          // 'YYYY-MM-DD'
   label: string;           // 'jun 24'
   saldo: number;
-  creditos: number;
+  creditos: number;        // créditos VIVOS (sin liquidados)
+  registros: number;       // filas del archivo en ese corte (vivos + liquidados)
   clientes: number;
   wa_rate: number | null;
   vig: number; atr: number; ven: number; sinDato: number;
@@ -157,6 +158,8 @@ export function buildCockpitData(tapes: LoanTape_DB[]): CockpitData {
     else rowsByPeriod.set(row.file_date, [row]);
   }
   const byPeriod = (p: string) => rowsByPeriod.get(p) || [];
+  const registrosByPeriod = new Map<string, number>();
+  for (const row of all) if (row.file_date) registrosByPeriod.set(row.file_date, (registrosByPeriod.get(row.file_date) || 0) + 1);
 
   const series: CockpitPeriodPoint[] = periods.map((p, i) => {
     const rows = byPeriod(p);
@@ -172,6 +175,7 @@ export function buildCockpitData(tapes: LoanTape_DB[]): CockpitData {
       period: p, label: labels[i],
       saldo: total,
       creditos: isSummary ? 0 : rows.length,
+      registros: isSummary ? 0 : registrosByPeriod.get(p) || rows.length,
       clientes: isSummary ? 0 : new Set(rows.map(clientKey)).size,
       wa_rate: weightedAverage(rows, 'interest_rate'),
       vig: cl.vig, atr: cl.atr, ven: cl.ven, sinDato: cl.sinDato,
@@ -301,11 +305,11 @@ export function buildCockpitNarrative(data: CockpitData, selectedPeriods?: strin
     lines.push(`Saldo: ${money(first.saldo)} → ${money(last.saldo)} (${dPct >= 0 ? '+' : ''}${(dPct * 100).toFixed(1)}%).`);
     lines.push(`Cartera vencida (>90d): ${pctS(first.venPct)} → ${pctS(last.venPct)} (${pp(last.venPct, first.venPct)}).`);
     lines.push(`Cartera atrasada (1-90d): ${pctS(first.atrPct)} → ${pctS(last.atrPct)} (${pp(last.atrPct, first.atrPct)}).`);
-    lines.push(`Créditos activos: ${first.creditos} → ${last.creditos}. Clientes: ${first.clientes} → ${last.clientes}.`);
+    lines.push(`Créditos vivos: ${first.creditos} → ${last.creditos}. Clientes: ${first.clientes} → ${last.clientes}.`);
     const runoffs = sel.map(s => s.runoff).filter((v): v is number => v !== null);
     if (runoffs.length) lines.push(`Variación mensual de saldo (runoff) promedio: ${(runoffs.reduce((a, b) => a + b, 0) / runoffs.length * 100).toFixed(1)}%.`);
   } else {
-    lines.push(`Saldo: ${money(last.saldo)} en ${last.creditos} créditos y ${last.clientes} clientes.`);
+    lines.push(`Saldo: ${money(last.saldo)} en ${last.creditos} créditos vivos (${liveLoansDetail(last.registros, last.creditos)}) y ${last.clientes} clientes.`);
     lines.push(`Vigente ${pctS(last.vigPct)} · atrasada ${pctS(last.atrPct)} · vencida (>90d) ${pctS(last.venPct)}.`);
   }
   const topName = (() => {

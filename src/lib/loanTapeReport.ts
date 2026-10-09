@@ -8,7 +8,7 @@ import type { CockpitData } from './loanTapeCockpit';
 import { AXC, type ChartKind, type ChartGrouping, type ChartSpec } from './xlsxCharts';
 import { buildEconomicGroups, type EconomicGroup, type GroupOverrides } from './economicGroups';
 import { buildMigrationMatrix, type MigrationMatrix } from './loanTapeMigration';
-import { DPD_BUCKET_DEFS, QUALITY_DEFINITION_LINES, QUALITY_LABELS, QUALITY_RULES, RISK_THRESHOLDS, classifyDpd, reconcileQuality } from './portfolioRules';
+import { liveLoansDetail, DPD_BUCKET_DEFS, QUALITY_DEFINITION_LINES, QUALITY_LABELS, QUALITY_RULES, RISK_THRESHOLDS, classifyDpd, reconcileQuality } from './portfolioRules';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -33,7 +33,7 @@ export interface PortfolioAnalysis {
   prevRows: StandardLoan[];
   prevLabel: string | null;
   kpi: {
-    saldo: number; creditos: number; clientes: number; montoOriginal: number; amortizadoPct: number | null;
+    saldo: number; creditos: number; registros: number; clientes: number; montoOriginal: number; amortizadoPct: number | null;
     waRate: number | null; simpleRate: number | null; minRate: number | null; maxRate: number | null; p25Rate: number | null; medianRate: number | null; p75Rate: number | null;
     waTermMonths: number | null; waRemainingMonths: number | null; waDpd: number | null;
     avgTicket: number; maxLoan: number; maxLoanPct: number; waAgeMonths: number | null;
@@ -286,7 +286,7 @@ export function analyzePortfolio(data: CockpitData, focusPeriod: string, groupOv
   return {
     focusPeriod: point.period, focusLabel: point.label, isSummary, rows, prevRows, prevLabel: prevPoint?.label || null,
     kpi: {
-      saldo: total, creditos: isSummary ? 0 : rows.length, clientes: isSummary ? 0 : clientMap.size, montoOriginal,
+      saldo: total, creditos: isSummary ? 0 : rows.length, registros: isSummary ? 0 : data.allRows.filter(r => r.file_date === point.period).length, clientes: isSummary ? 0 : clientMap.size, montoOriginal,
       amortizadoPct: montoOriginal > 0 ? Math.max(0, 1 - total / montoOriginal) : null,
       waRate: weightedAverage(rows, 'interest_rate'), simpleRate: avg(rates),
       minRate: rates.length ? Math.min(...rates) : null, maxRate: rates.length ? Math.max(...rates) : null,
@@ -415,7 +415,7 @@ export function buildLoanTapeInsights(a: PortfolioAnalysis, data: CockpitData, a
     const d = (k.saldo - a.prevKpi.saldo) / a.prevKpi.saldo;
     add('Saldo', Math.abs(d) > 0.15 ? 'warn' : 'info', `Saldo ${moneyM(a.prevKpi.saldo)} → ${moneyM(k.saldo)} (${d >= 0 ? '+' : ''}${(d * 100).toFixed(1)}%); créditos ${a.prevKpi.creditos} → ${k.creditos}; clientes ${a.prevKpi.clientes} → ${k.clientes}.`);
   } else {
-    add('Saldo', 'info', `Saldo ${moneyM(k.saldo)} en ${k.creditos} créditos y ${k.clientes} clientes (${a.focusLabel}). Sin corte previo para comparar.`);
+    add('Saldo', 'info', `Saldo ${moneyM(k.saldo)} en ${k.creditos} créditos vivos (${liveLoansDetail(k.registros, k.creditos)}) y ${k.clientes} clientes (${a.focusLabel}). Sin corte previo para comparar.`);
   }
   const gaps = a.coverage.filter(c => c.pct < 0.95);
   if (gaps.length) add('Calidad del dato', gaps.some(g => g.pct < 0.5) ? 'warn' : 'info', `Campos incompletos: ${gaps.map(g => `${g.field} ${pctS(g.pct, 0)}`).join(' · ')}. Lo que falta limita los análisis que dependen de ese campo.`);
@@ -518,7 +518,8 @@ export function buildLoanTapeReportSheets(clientName: string, selectedPeriods: s
     s.blank();
     const kp: Array<[string, number | null, ColFmt, number | null]> = [
       ['Saldo total', k.saldo, 'money', a.prevKpi?.saldo ?? null],
-      ['Créditos', k.creditos, 'int', a.prevKpi?.creditos ?? null],
+      ['Créditos vivos (sin liquidados)', k.creditos, 'int', a.prevKpi?.creditos ?? null],
+      ['   Registros en el archivo (incluye liquidados)', k.registros, 'int', null],
       ['Clientes', k.clientes, 'int', a.prevKpi?.clientes ?? null],
       ['Monto original colocado', k.montoOriginal, 'money', null],
       ['% amortizado', k.amortizadoPct, 'pct', null],

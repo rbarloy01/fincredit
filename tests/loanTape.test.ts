@@ -162,7 +162,7 @@ test('COFINE profile maps real portfolio headers without confusing money columns
     extractedData: { _standardized: res.standardized, _mappingReport: res.mappingReport },
   } as any], 'lt-cofine');
 
-  assert.equal(analysis.metrics.find(item => item.name === 'Numero de creditos')?.latestValue, '2');
+  assert.equal(analysis.metrics.find(item => item.name === 'Créditos vivos (sin liquidados)')?.latestValue, '2');
   assert.equal(analysis.metrics.find(item => item.name === 'DPD ponderado por saldo')?.latestValue, '41.2 dias');
 });
 
@@ -240,7 +240,7 @@ test('COFINE summarized breakdown imports product and state workflow without fak
   assert.equal(profile.highValidationCount, 0);
   assert.ok(profile.availableAnalyses.some(item => item.key === 'product_mix'));
   assert.ok(profile.blockedAnalyses.some(item => item.key === 'dpd_quality'));
-  assert.equal(analysis.metrics.find(item => item.name === 'Numero de creditos')?.latestValue, 'N/D');
+  assert.equal(analysis.metrics.find(item => item.name === 'Créditos vivos (sin liquidados)')?.latestValue, 'N/D');
   assert.equal(analysis.metrics.find(item => item.name === 'DPD ponderado por saldo')?.latestValue, 'N/D');
   assert.equal(analysis.concentrations.by_state?.[0]?.name, 'Nuevo León');
 });

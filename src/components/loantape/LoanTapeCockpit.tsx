@@ -12,6 +12,7 @@ import {
 import { loadExportModule } from '../../lib/exportLoader';
 import { reserveDownloadTarget } from '../../lib/browserDownload';
 import { analyzePortfolio, buildLoanTapeInsights, type Insight } from '../../lib/loanTapeReport';
+import { liveLoansDetail } from '../../lib/portfolioRules';
 import ChartCard from './ChartCard';
 import LoanTapePortfolioCharts from './LoanTapePortfolioCharts';
 
@@ -276,7 +277,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
             { k: 'Saldo', v: moneyM(focusPoint.saldo), d: kpiDelta(focusPoint.saldo, prevPoint?.saldo ?? null, false, n => moneyM(n)) },
             { k: 'Vencida >90d', v: focusPoint.isSummary ? 'N/D' : pctS(focusPoint.venPct), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.venPct, prevPoint?.venPct ?? null, true, n => `${(n * 100).toFixed(1)}pp`) },
             { k: 'Atrasada 1-90d', v: focusPoint.isSummary ? 'N/D' : pctS(focusPoint.atrPct), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.atrPct, prevPoint?.atrPct ?? null, true, n => `${(n * 100).toFixed(1)}pp`) },
-            { k: 'Créditos', v: focusPoint.isSummary ? 'N/D' : `${focusPoint.creditos}`, d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.creditos, prevPoint?.creditos ?? null) },
+            { k: 'Créditos vivos', v: focusPoint.isSummary ? 'N/D' : `${focusPoint.creditos}`, d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : <span>{kpiDelta(focusPoint.creditos, prevPoint?.creditos ?? null)}{focusPoint.registros > focusPoint.creditos && <span className="block text-slate-400 font-semibold">{liveLoansDetail(focusPoint.registros, focusPoint.creditos)}</span>}</span> },
             { k: 'Concentración Top-1', v: focusPoint.isSummary ? 'N/D' : pctS(focusPoint.top1), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.top1, prevPoint?.top1 ?? null, true, n => `${(n * 100).toFixed(1)}pp`) },
             { k: 'HHI', v: focusPoint.isSummary ? 'N/D' : focusPoint.hhi.toFixed(3), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.hhi, prevPoint?.hhi ?? null, true, n => n.toFixed(3)) },
           ].map(t => (

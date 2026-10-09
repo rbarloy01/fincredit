@@ -468,8 +468,14 @@ async function callAIResilient(settings: AISettings, systemPrompt: string, userP
     : attempts[0]?.error || 'No se pudo procesar el documento.');
 }
 
-async function callAI(settings: AISettings, systemPrompt: string, userPrompt: string, media?: AIMedia | AIMedia[]): Promise<string> {
+// chat = respuesta conversacional del asistente: texto normal (no JSON), salida corta y ruteo por latencia.
+// La extracción de documentos sigue en modo JSON con salida larga.
+interface CallOptions { chat?: boolean }
+const CHAT_MAX_TOKENS = 2048;
+
+async function callAI(settings: AISettings, systemPrompt: string, userPrompt: string, media?: AIMedia | AIMedia[], opts: CallOptions = {}): Promise<string> {
   const { provider, apiKey } = settings;
+  const maxTokens = opts.chat ? CHAT_MAX_TOKENS : 8192;
   const mediaItems = media ? (Array.isArray(media) ? media : [media]).filter(item => item.base64 && item.mimeType) : [];
 
   if (provider === 'gemini') {
@@ -481,7 +487,9 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
       contents: [{ parts }],
       // gemini-flash-latest ahora apunta a un modelo de "pensamiento" que RECHAZA thinkingBudget:0
       // (400 INVALID_ARGUMENT). 128 es el mínimo aceptado → mantiene el pensamiento al mínimo sin romper.
-      generationConfig: { temperature: 0.0, maxOutputTokens: 16384, responseMimeType: 'application/json', thinkingConfig: { thinkingBudget: 128 } },
+      generationConfig: opts.chat
+        ? { temperature: 0.2, maxOutputTokens: CHAT_MAX_TOKENS, thinkingConfig: { thinkingBudget: 128 } }
+        : { temperature: 0.0, maxOutputTokens: 16384, responseMimeType: 'application/json', thinkingConfig: { thinkingBudget: 128 } },
     };
     let res = await fetchAIWithRetry('/api/gemini', { apiKey, model: settings.model || GEMINI_MODEL, payload });
     let data = await readAIResponseJson(res, 'Gemini');
@@ -519,7 +527,7 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
     }
     const payload = {
       model: settings.model || 'claude-sonnet-4-6',
-      max_tokens: 8192,
+      max_tokens: maxTokens,
       system: systemPrompt,
       messages: [{ role: 'user', content: userContent }],
     };
@@ -541,7 +549,7 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
     }
     const payload = {
       model: settings.model || 'gpt-4o',
-      max_output_tokens: 8192,
+      max_output_tokens: maxTokens,
       instructions: systemPrompt,
       input: [{ role: 'user', content: userContent }],
     };
@@ -556,6 +564,7 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
 
   if (provider === 'openrouter') {
     const payload = buildOpenRouterPayload(settings, systemPrompt, userPrompt, mediaItems);
+    if (opts.chat) { payload.max_tokens = CHAT_MAX_TOKENS; payload.provider = { sort: 'latency' }; }
     const model = String(payload.model || payload.models?.[0] || settings.model || OPENROUTER_MODEL);
     const res = await fetchAIWithRetry('/api/bytez', { provider: 'openrouter', apiKey, payload });
     const data = await readAIResponseJson(res, 'OpenRouter');
@@ -589,7 +598,7 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
           { role: 'user', content: [...pages.map(item => ({ type: 'image_url', image_url: { url: `data:${item.mimeType};base64,${item.base64}` } })), { type: 'text', text: userPrompt }] },
         ],
         temperature: 0,
-        max_tokens: 8192,
+        max_tokens: maxTokens,
       };
       const nimRes = await fetchAIWithRetry('/api/bytez', { provider, apiKey, payload: nimPayload });
       const nimData = await readAIResponseJson(nimRes, 'NVIDIA NIM');
@@ -603,7 +612,7 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
         { role: 'user', content: userPrompt },
       ],
       temperature: 0,
-      max_tokens: 8192,
+      max_tokens: maxTokens,
     };
     const res = await fetchAIWithRetry('/api/bytez', { provider, apiKey, payload });
     const data = await readAIResponseJson(res, provider === 'bytez' ? 'Bytez' : 'NVIDIA NIM');
@@ -647,7 +656,7 @@ async function fetchAIWithRetry(url: string, body: unknown): Promise<Response> {
       await new Promise(resolve => window.setTimeout(resolve, 1400));
     } catch (error: any) {
       if (error?.name === 'AbortError') {
-        throw new Error('El análisis tardó demasiado. El contrato quedó guardado; intenta analizarlo nuevamente o usa otro proveedor.');
+        throw new Error('La IA tardó más de 60 segundos en responder. Los modelos gratuitos se saturan seguido: intenta de nuevo o usa otro proveedor (Configuración → Motor de IA). Si estabas subiendo un documento, ya quedó guardado.');
       }
       if (attempt === 1) {
         throw new Error('Se perdió la conexión al recibir el análisis. Reintenta: el PDF ya se procesa en modo compacto y no necesitas volver a cargar otra API.');
@@ -1237,5 +1246,5 @@ export async function askClientAssistant(
   settings = settingsForTask(settings, 'assistant');
   const previous = history.slice(-6).map(m => `${m.role === 'user' ? 'USUARIO' : 'ASISTENTE'}: ${m.content}`).join('\n\n');
   const prompt = `${contextLabel}\n${contextText}\n\n${previous ? `CONVERSACIÓN PREVIA\n${previous}\n\n` : ''}PREGUNTA ACTUAL\n${question}`;
-  return callAI(settings, systemPrompt, prompt);
+  return callAI(settings, systemPrompt, prompt, undefined, { chat: true });
 }

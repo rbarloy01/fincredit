@@ -1,5 +1,5 @@
 import { LoanTape_DB } from '../db/index';
-import { DPD_BUCKET_DEFS, DPD_CONSISTENCY, QUALITY_RULES, RISK_THRESHOLDS, checkDpdConsistency, classifyDpd, dpdRangeFromText, isStrongDpdText, resolveDpd, type DpdConsistency, type DpdSource } from './portfolioRules';
+import { liveLoansDetail, DPD_BUCKET_DEFS, DPD_CONSISTENCY, QUALITY_RULES, RISK_THRESHOLDS, checkDpdConsistency, classifyDpd, dpdRangeFromText, isStrongDpdText, resolveDpd, type DpdConsistency, type DpdSource } from './portfolioRules';
 import { StructuredLoanTapeAnalysis } from '../services/ai';
 import { parseNullableFinancialNumber } from './numberParsing';
 
@@ -1139,6 +1139,8 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
   const total = sum(latest);
   const previousTotal = sum(previousRows);
   const loanCount = latestIsSummary ? null : new Set(latest.map(r => r.loan_id).filter(Boolean)).size;
+  const latestPeriod = latest[0]?.file_date || null;
+  const registrosLatest = new Set(analysisRows.filter(r => r.file_date === latestPeriod).map(r => r.loan_id).filter(Boolean)).size;
   const previousLoanCount = new Set(previousRows.map(r => r.loan_id).filter(Boolean)).size;
   const clientCount = latestIsSummary ? null : new Set(latest.map(r => r.client).filter(Boolean)).size;
   const previousClientCount = new Set(previousRows.map(r => r.client).filter(Boolean)).size;
@@ -1207,7 +1209,7 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
   return {
     overallStatus,
     riskScore,
-    executiveSummary: summaryText || `Cartera de ${loanCount} créditos y ${clientCount} clientes por ${fmtMoney(total)}: vigente ${fmtPct(q.vigente?.pct || 0)} (0-${QUALITY_RULES.vigenteMaxDpd} DPD; ${fmtPct(zeroDpdPct)} al corriente), atrasada ${fmtPct(atrasadaPct || 0)}, vencida ${fmtPct(vencidaPct || 0)}${missingDpdPct ? ` y ${fmtPct(missingDpdPct)} sin DPD` : ''}.${concentrationText}${comparisonText}`,
+    executiveSummary: summaryText || `Cartera de ${loanCount} créditos vivos (${liveLoansDetail(Math.max(registrosLatest, loanCount || 0), loanCount || 0)}) y ${clientCount} clientes por ${fmtMoney(total)}: vigente ${fmtPct(q.vigente?.pct || 0)} (0-${QUALITY_RULES.vigenteMaxDpd} DPD; ${fmtPct(zeroDpdPct)} al corriente), atrasada ${fmtPct(atrasadaPct || 0)}, vencida ${fmtPct(vencidaPct || 0)}${missingDpdPct ? ` y ${fmtPct(missingDpdPct)} sin DPD` : ''}.${concentrationText}${comparisonText}`,
     trendDirection,
     portfolioQuality: q,
     dpd_distribution: dpd,
@@ -1216,7 +1218,7 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
     validation,
     metrics: [
       { name: 'Saldo total outstanding', latestValue: fmtMoney(total), previousValue: previousRows.length ? fmtMoney(previousTotal) : undefined, change: fmtChange(total, previousTotal, 'money'), trend: trend(total, previousTotal), status: overallStatus, congruent: true },
-      { name: 'Numero de creditos', latestValue: loanCount === null ? 'N/D' : String(loanCount), previousValue: previousRows.length && loanCount !== null ? String(previousLoanCount) : undefined, change: loanCount === null ? undefined : fmtChange(loanCount, previousLoanCount, 'number'), trend: loanCount === null ? 'stable' : trend(loanCount, previousLoanCount), status: 'good', congruent: true },
+      { name: 'Créditos vivos (sin liquidados)', latestValue: loanCount === null ? 'N/D' : String(loanCount), previousValue: previousRows.length && loanCount !== null ? String(previousLoanCount) : undefined, change: loanCount === null ? undefined : fmtChange(loanCount, previousLoanCount, 'number'), trend: loanCount === null ? 'stable' : trend(loanCount, previousLoanCount), status: 'good', congruent: true },
       { name: 'Numero de clientes', latestValue: clientCount === null ? 'N/D' : String(clientCount), previousValue: previousRows.length && clientCount !== null ? String(previousClientCount) : undefined, change: clientCount === null ? undefined : fmtChange(clientCount, previousClientCount, 'number'), trend: clientCount === null ? 'stable' : trend(clientCount, previousClientCount), status: 'good', congruent: true },
       { name: '% cartera vencida', latestValue: vencidaPct === null ? 'N/D' : fmtPct(vencidaPct), previousValue: previousRows.length && vencidaPct !== null ? fmtPct(previousVencidaPct) : undefined, change: vencidaPct === null ? undefined : fmtChange(vencidaPct, previousVencidaPct, 'pct'), trend: vencidaPct === null ? 'stable' : trend(vencidaPct, previousVencidaPct, true), status: vencidaPct !== null && vencidaPct > RISK_THRESHOLDS.vencidaAlert ? 'critical' : vencidaPct !== null && vencidaPct >= RISK_THRESHOLDS.vencidaWarn ? 'warning' : 'good', congruent: true },
       { name: '% cartera atrasada', latestValue: atrasadaPct === null ? 'N/D' : fmtPct(atrasadaPct), previousValue: previousRows.length && atrasadaPct !== null ? fmtPct(previousAtrasadaPct) : undefined, change: atrasadaPct === null ? undefined : fmtChange(atrasadaPct, previousAtrasadaPct, 'pct'), trend: atrasadaPct === null ? 'stable' : trend(atrasadaPct, previousAtrasadaPct, true), status: atrasadaPct !== null && atrasadaPct > RISK_THRESHOLDS.atrasadaWarn ? 'warning' : 'good', congruent: true },

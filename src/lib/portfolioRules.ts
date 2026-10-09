@@ -241,3 +241,11 @@ export function statusDpdConflicts(rows: StandardLoan[]): { count: number; balan
     statuses: [...new Set(hits.map(r => String(r.loan_status)))],
   };
 }
+
+// ── Cómo se cuentan los créditos ───────────────────────────────────────────────────────────────────────────────────
+// "Créditos" en toda la app = créditos VIVOS (excluye liquidados/saldados). El archivo puede traer más registros
+// (Red Girasol sep-26: 817 registros = 808 vivos + 9 liquidados). Siempre decirlo así para no confundir.
+export function liveLoansDetail(registros: number, vivos: number): string {
+  const liquidados = registros - vivos;
+  return liquidados > 0 ? `${registros.toLocaleString('es-MX')} registros − ${liquidados.toLocaleString('es-MX')} liquidados` : `${registros.toLocaleString('es-MX')} registros en el archivo`;
+}

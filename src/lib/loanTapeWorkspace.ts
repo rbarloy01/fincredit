@@ -1,5 +1,5 @@
 import { StructuredLoanTapeAnalysis } from '../services/ai';
-import { MappingNote, StandardLoan, buildLoanTapeDataProfile } from './loanTapeAnalytics';
+import { MappingNote, StandardLoan, buildLoanTapeDataProfile, activeRows } from './loanTapeAnalytics';
 import { classifyDpd } from './portfolioRules';
 
 export type LoanTapeBlockType = 'kpi' | 'table' | 'bar' | 'line' | 'pie';
@@ -228,7 +228,7 @@ export function createLoanTapeWorkspaceBlock(
   const clients = new Set(latest.map(row => row.client).filter(Boolean)).size;
   return block(prompt, 'Resumen de cartera', analysis?.executiveSummary || 'Vista ejecutiva del último corte.', 'kpi', [
     { label: 'Saldo total', value: balance, format: 'money' },
-    { label: 'Créditos', value: latest.length, format: 'number' },
+    { label: 'Créditos vivos', value: activeRows(latest).length, format: 'number' },
     { label: 'Clientes', value: clients, format: 'number' },
     { label: 'Mora', value: balance ? overdue / balance : 0, format: 'pct' },
     { label: 'Vencida >90', value: balance ? severe / balance : 0, format: 'pct' },
