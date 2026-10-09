@@ -237,6 +237,7 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
               statements={analysisStatements}
               covenants={covenants}
               loanTapes={loanTapes}
+              userId={session.userId}
             />
           )}
           {activeTab === 'crm' && (

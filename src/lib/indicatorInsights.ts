@@ -5,7 +5,7 @@
 //  - The formula map shows, for the latest statement, every input of every formula and its value. A formula input without data is
 //    evaluated as 0 (that is how custom formulas work), so the map says so explicitly instead of letting a wrong ratio pass.
 
-import type { Covenant_DB, FinancialStatement_DB } from '../db/index';
+import { db, type Covenant_DB, type FinancialStatement_DB } from '../db/index';
 import {
   annualizedStandardKey, covenantDirection, covenantPerformanceHistory, evaluateFormula, formulaLabel, getMetric, metricLabels, resolveCovenantThreshold,
   type CovenantPeriodPerformance,
@@ -18,6 +18,16 @@ export const favoritesDefaultKey = (userId: string) => `finmonitor_fav_default_$
 
 const plain = (v: string) => v.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
 export const indicatorKey = (cov: Pick<Covenant_DB, 'name'>) => `name:${plain(cov.name)}`;
+
+// Favoritos del analista para un cliente: lo guardado para ese cliente → su default en este navegador → su default de la
+// organización (otro dispositivo / tour de bienvenida). Misma lógica en Indicadores Financieros y en Underwriting.
+export async function loadFavoriteKeys(clientId: string, userId: string): Promise<string[]> {
+  const stored = await db.getClientSetting<string[] | null>(clientId, favoritesSettingKey(userId), null).catch(() => null);
+  if (Array.isArray(stored)) return stored;
+  try { const d = JSON.parse(localStorage.getItem(favoritesDefaultKey(userId)) || 'null'); if (Array.isArray(d)) return d; } catch { /* no default yet */ }
+  const org = await db.getOrgSetting<string[] | null>(userId, favoritesDefaultKey(userId), null).catch(() => null);
+  return Array.isArray(org) ? org : [];
+}
 
 export function toggleFavorite(favorites: string[], key: string): string[] {
   return favorites.includes(key) ? favorites.filter(k => k !== key) : [...favorites, key];

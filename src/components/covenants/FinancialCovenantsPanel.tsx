@@ -12,7 +12,7 @@ import { normalizeFinancialNumberString, parseNullableFinancialNumber } from '..
 import CovenantBuilder, { type CovenantBuilderSave } from './CovenantBuilder';
 import { thresholdToStore } from '../../lib/covenantBuilder';
 import { parseFormulaText } from '../../lib/formulaText';
-import { buildFavoriteInsights, buildFavoritesPrompt, explainFormula, favoritesDefaultKey, favoritesSettingKey, indicatorKey, summarizeFavorites, toggleFavorite, type FavoriteInsight } from '../../lib/indicatorInsights';
+import { buildFavoriteInsights, buildFavoritesPrompt, explainFormula, favoritesDefaultKey, favoritesSettingKey, indicatorKey, loadFavoriteKeys, summarizeFavorites, toggleFavorite, type FavoriteInsight } from '../../lib/indicatorInsights';
 
 const FavButton: React.FC<{ active: boolean; onClick: () => void; size?: string }> = ({ active, onClick, size = 'w-4 h-4' }) => (
   <button
@@ -231,19 +231,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
   // Favorites belong to the analyst: stored per user, with the last choice as default for clients where none was set yet.
   useEffect(() => {
     let active = true;
-    (async () => {
-      const stored = await db.getClientSetting<string[] | null>(clientId, favoritesSettingKey(session.userId), null);
-      let favs: string[] | null = Array.isArray(stored) ? stored : null;
-      if (!favs) {
-        try { const d = JSON.parse(localStorage.getItem(favoritesDefaultKey(session.userId)) || 'null'); if (Array.isArray(d)) favs = d; } catch { /* no default yet */ }
-      }
-      if (!favs) {
-        // Another device, or the choice made in the onboarding tour: the analyst's default is saved with the organization.
-        const org = await db.getOrgSetting<string[] | null>(session.userId, favoritesDefaultKey(session.userId), null).catch(() => null);
-        if (Array.isArray(org)) favs = org;
-      }
-      if (active) setFavorites(favs || []);
-    })().catch(() => undefined);
+    loadFavoriteKeys(clientId, session.userId).then(favs => { if (active) setFavorites(favs); }).catch(() => undefined);
     return () => { active = false; };
   }, [clientId, session.userId]);
 

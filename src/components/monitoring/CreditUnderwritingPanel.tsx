@@ -1,11 +1,12 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { isClientMonitored } from '../../lib/clientStatus';
 import { Client, Covenant_DB, FinancialStatement_DB, LoanTape_DB, Transaction } from '../../db/index';
 import { AlertTriangle, ArrowDownRight, ArrowUpRight, Brain, CheckCircle, Circle, FileClock, Gauge, Landmark, Lock, Minus, ShieldCheck, FileSpreadsheet, Scale, TrendingUp } from 'lucide-react';
-import { evaluateCovenantAuto, evaluateCovenantForStatement, isPercentCovenant, resolveCovenantThreshold, standardRatios } from '../../lib/financialMetrics';
+import { evaluateCovenantAuto, isPercentCovenant, resolveCovenantThreshold, standardRatios } from '../../lib/financialMetrics';
 import { predictCreditRisk, CREDIT_RISK_DISCLAIMER } from '../../lib/creditRiskModel';
 import { forecastCovenants } from '../../lib/covenantForecastModel';
 import { loanTapePeriodDate, sortLoanTapesByPeriod, storedAnalysisFor } from '../../lib/loanTapeAnalytics';
+import { indicatorKey, loadFavoriteKeys } from '../../lib/indicatorInsights';
 
 interface Props {
   client: Client;
@@ -13,6 +14,7 @@ interface Props {
   statements: FinancialStatement_DB[];
   covenants: Covenant_DB[];
   loanTapes: LoanTape_DB[];
+  userId?: string;
 }
 
 const Step = ({ done, label }: { done: boolean; label: string; key?: string }) => (
@@ -102,22 +104,15 @@ function covenantValueLabel(value: number | null, covenant: Covenant_DB) {
   return value.toLocaleString('es-MX', { maximumFractionDigits: 2 });
 }
 
-function covenantRequirementLabel(covenant: Covenant_DB) {
-  if (covenant.operator === 'none' || !covenant.threshold) return 'Sin umbral';
-  const threshold = resolveCovenantThreshold(covenant);
-  const value = threshold === null ? covenant.threshold : covenantValueLabel(threshold, covenant);
-  return `${covenantOperatorLabel(covenant.operator)} ${value}`;
-}
 
-function covenantHeadroom(value: number | null, covenant: Covenant_DB) {
-  const threshold = resolveCovenantThreshold(covenant);
-  if (value === null || threshold === null || covenant.operator === 'none') return null;
-  if (covenant.operator === 'gte' || covenant.operator === 'gt') return value - threshold;
-  if (covenant.operator === 'lte' || covenant.operator === 'lt') return threshold - value;
-  return null;
-}
-
-const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statements, covenants, loanTapes }) => {
+const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statements, covenants, loanTapes, userId }) => {
+  // Solo los indicadores favoritos del analista (★ en Indicadores Financieros).
+  const [favorites, setFavorites] = useState<string[]>([]);
+  useEffect(() => {
+    let active = true;
+    if (userId) loadFavoriteKeys(client.id, userId).then(f => { if (active) setFavorites(f); }).catch(() => undefined);
+    return () => { active = false; };
+  }, [client.id, userId]);
   const sortedStatements = [...statements].sort((a, b) => a.periodDate.localeCompare(b.periodDate));
   const latestStatement = sortedStatements.at(-1);
   const previousStatement = sortedStatements.at(-2);
@@ -148,14 +143,21 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
   // Dormant / cerrado: sin incumplimientos ni alertas.
   const breaches = monitored ? covenantResults.filter(r => r.status === 'incumple') : [];
   const warnings = monitored ? covenantResults.filter(r => r.status === 'alerta') : [];
-  const priorityCovenants = covenantResults
-    .sort((a, b) => {
+  // Incumplimientos primero (lo usan los hallazgos de abajo).
+  covenantResults.sort((a, b) => {
       const rank: Record<string, number> = { incumple: 0, alerta: 1, cumple: 2 };
       return rank[a.status] - rank[b.status] || a.covenant.name.localeCompare(b.covenant.name);
     });
-  const covenantStatementWindow = sortedStatements.slice(-6);
   const uploadedFinancialFiles = new Set(statements.map(s => s.fileName).filter(Boolean));
   const testedCovenants = covenantResults.filter(r => r.value !== null || r.mode === 'manual').length;
+  // Favorito = covenant del contrato (con umbral y estatus) o, si no existe, el indicador estándar con el mismo nombre.
+  const favoriteRows = favorites.map(key => {
+    const cov = covenantResults.find(r => indicatorKey(r.covenant) === key);
+    if (cov) return { key, name: cov.covenant.name, value: cov.value, status: cov.status as string, detail: `${cov.mode === 'manual' ? 'Manual' : cov.covenant.formula || 'Sin fórmula'} · ${cov.covenant.operator} ${cov.covenant.threshold}`, covenant: cov.covenant };
+    const std = latestRatios.find(r => indicatorKey({ name: r.label }) === key);
+    if (std) return { key, name: std.label, value: std.value, status: 'estándar', detail: std.formula, covenant: null };
+    return null;
+  }).filter((r): r is NonNullable<typeof r> => r !== null);
   const complianceScore = covenantResults.length === 0 ? null : Math.round(((covenantResults.length - breaches.length - warnings.length * 0.5) / covenantResults.length) * 100);
   const primaryTransaction = transactions[0];
   const facilityAmount = primaryTransaction?.originalAmount || client.totalCreditValue || 0;
@@ -476,98 +478,30 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
             <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest flex items-center gap-2">
               <Scale className="w-4 h-4 text-indigo-600" />Indicadores financieros
             </h3>
-            <span className="text-xs font-black text-slate-500">{testedCovenants}/{covenantResults.length}</span>
+            <span className="text-xs font-black text-slate-500">★ {favoriteRows.length} favorito{favoriteRows.length === 1 ? '' : 's'}</span>
           </div>
           <div className="space-y-3">
-            {covenantResults.slice(0, 6).map(row => (
-              <div key={row.covenant.id} className={`border rounded-xl px-4 py-3 ${statusClass(row.status)}`}>
+            {favoriteRows.map(row => (
+              <div key={row.key} className={`border rounded-xl px-4 py-3 ${row.covenant ? statusClass(row.status as any) : 'bg-slate-50 border-slate-200 text-slate-700'}`}>
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="text-sm font-black truncate">{row.covenant.name}</p>
-                    <p className="text-[10px] font-bold opacity-75 mt-0.5">{row.mode === 'manual' ? 'Manual' : row.covenant.formula || 'Sin fórmula'} · {row.covenant.operator} {row.covenant.threshold || 'N/A'}</p>
+                    <p className="text-sm font-black truncate">{row.name}</p>
+                    <p className="text-[10px] font-bold opacity-75 mt-0.5 truncate">{row.detail}</p>
                   </div>
                   <span className="text-[10px] font-black uppercase">{row.status}</span>
                 </div>
-                <p className="font-mono font-black text-right mt-2">{compactNumber(row.value)}</p>
+                <p className="font-mono font-black text-right mt-2">{row.covenant ? covenantValueLabel(row.value, row.covenant) : compactNumber(row.value)}</p>
               </div>
             ))}
-            {covenantResults.length === 0 && (
+            {favoriteRows.length === 0 && (
               <p className="text-sm text-slate-400 font-bold bg-slate-50 border border-slate-100 rounded-xl px-4 py-5 text-center">
-                Sin indicadores financieros configurados.
+                Sin favoritos. Marca con ★ los indicadores que quieres ver aquí en la pestaña Indicadores Financieros.
               </p>
             )}
           </div>
         </div>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
-        <div className="px-6 py-5 border-b border-slate-100 flex flex-col xl:flex-row xl:items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 text-indigo-600" />Covenants vs estados financieros
-            </h3>
-            <p className="text-xs text-slate-500 font-bold mt-1">
-              Lectura directa de requisito, valor, estatus y holgura por periodo cargado.
-            </p>
-          </div>
-          <div className="flex gap-2 text-[10px] font-black uppercase">
-            <span className="rounded-full bg-emerald-100 text-emerald-800 px-2.5 py-1">Cumple</span>
-            <span className="rounded-full bg-amber-100 text-amber-800 px-2.5 py-1">Cerca</span>
-            <span className="rounded-full bg-rose-100 text-rose-800 px-2.5 py-1">Incumple</span>
-          </div>
-        </div>
-
-        {priorityCovenants.length > 0 && covenantStatementWindow.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead className="bg-slate-50">
-                <tr>
-                  <th className="text-left px-4 py-3 font-black text-slate-500 uppercase tracking-widest min-w-[220px]">Covenant</th>
-                  <th className="text-left px-4 py-3 font-black text-slate-500 uppercase tracking-widest">Requisito</th>
-                  <th className="text-right px-4 py-3 font-black text-slate-500 uppercase tracking-widest">Actual</th>
-                  <th className="text-right px-4 py-3 font-black text-slate-500 uppercase tracking-widest">Holgura</th>
-                  {covenantStatementWindow.map(stmt => (
-                    <th key={stmt.id} className="text-center px-3 py-3 font-black text-slate-500 uppercase tracking-widest whitespace-nowrap">{stmt.period}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {priorityCovenants.map(row => {
-                  const latestHeadroom = covenantHeadroom(row.value, row.covenant);
-                  return (
-                    <tr key={row.covenant.id} className="border-t border-slate-100">
-                      <td className="px-4 py-3">
-                        <p className="font-black text-slate-900">{row.covenant.name}</p>
-                        <p className="text-[10px] font-bold text-slate-400 truncate max-w-[260px]">{row.covenant.formula || row.covenant.description || 'Sin fórmula'}</p>
-                      </td>
-                      <td className="px-4 py-3 font-mono font-black text-slate-700 whitespace-nowrap">{covenantRequirementLabel(row.covenant)}</td>
-                      <td className="px-4 py-3 text-right font-mono font-black text-slate-900">{covenantValueLabel(row.value, row.covenant)}</td>
-                      <td className={`px-4 py-3 text-right font-mono font-black ${latestHeadroom !== null && latestHeadroom < 0 ? 'text-rose-700' : latestHeadroom !== null ? 'text-emerald-700' : 'text-slate-400'}`}>
-                        {latestHeadroom === null ? 'N/A' : covenantValueLabel(latestHeadroom, row.covenant)}
-                      </td>
-                      {covenantStatementWindow.map(stmt => {
-                        const result = evaluateCovenantForStatement(row.covenant, stmt, statements);
-                        return (
-                          <td key={stmt.id} className="px-3 py-3 text-center">
-                            <div className={`inline-flex min-w-20 flex-col items-center rounded-lg border px-2.5 py-1.5 ${result.value === null ? 'bg-slate-50 text-slate-400 border-slate-200' : strongStatusClass(result.status)}`}>
-                              <span className="font-mono font-black">{covenantValueLabel(result.value, row.covenant)}</span>
-                              <span className="text-[9px] font-black uppercase opacity-80">{result.value === null ? 'N/D' : result.status}</span>
-                            </div>
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <p className="px-6 py-8 text-sm text-slate-400 font-bold text-center">
-            Configura covenants con umbral y carga estados financieros para activar la matriz de cumplimiento.
-          </p>
-        )}
-      </div>
 
       <div className="bg-white border border-slate-200 rounded-2xl p-6">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-5">
