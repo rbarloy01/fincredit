@@ -85,8 +85,11 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
   const togglePeriod = (p: string) => setSelected(prev => {
     if (prev.length === 1 && prev[0] === p) return data.periods;
     const next = prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p].sort();
-    if (next.includes(p)) setFocus(p);
-    return next.length ? next : data.periods;
+    const kept = next.length ? next : data.periods;
+    // El foco (portada, concentraciones, calidad del reporte) es SIEMPRE el corte más reciente de la selección,
+    // no el último botón presionado: seleccionar jun/jul/ago debe reportar agosto. "Mes foco" permite cambiarlo a mano.
+    setFocus(kept[kept.length - 1]);
+    return kept;
   });
   const isolatePeriod = (period: string) => {
     if (selected.length === 1 && selected[0] === period) {

@@ -424,13 +424,19 @@ export function buildLoanTapeInsights(a: PortfolioAnalysis, data: CockpitData, a
 
 // ── Excel sheet builder ───────────────────────────────────────────────────────
 
-export type Cell = string | number | null | { __fmtNum: true; raw: string | number | null; fmt: string };
+export type Cell = string | number | null | { __fmtNum: true; raw: string | number | null; fmt: string; result?: number | string | null };
 type Kind = 'title' | 'subheading' | 'headers' | 'data' | 'total' | 'blank' | 'pad';
 export const F = (raw: string | number | null, fmt: string): Cell => ({ __fmtNum: true, raw, fmt });
 export const FMT = { money: '$#,##0;[Red]($#,##0);-', int: '#,##0', pct: '0.0%', pct2: '0.00%', dec1: '0.0', dec2: '0.00', text: '' };
 export type ColFmt = keyof typeof FMT | undefined;
 
 export interface TableRef { sub: number; header: number; first: number; last: number; raw: any[][]; headers: string[] }
+
+function colLetter(n: number): string {
+  let out = '';
+  while (n > 0) { const m = (n - 1) % 26; out = String.fromCharCode(65 + m) + out; n = Math.floor((n - 1) / 26); }
+  return out;
+}
 
 export class SheetBuilder {
   rows: Cell[][] = [];
@@ -449,16 +455,48 @@ export class SheetBuilder {
   blank() { this.push([], 'blank'); }
   text(t: string) { this.push([t], 'data'); }
   ensure(rowCount: number) { while (this.rows.length < rowCount) this.push([], 'pad'); }
-  table(title: string, headers: string[], raw: any[][], fmts: ColFmt[], total?: any[]): TableRef {
+  // Celda con la base de los porcentajes (p. ej. saldo total de la cartera) para que los % sean fórmula viva.
+  baseCell(label: string, value: number, fmt: ColFmt = 'money'): string {
+    this.push([label, F(value, FMT[fmt || 'money'])], 'data');
+    return `$B$${this.rows.length}`;
+  }
+  // formulas: sum = columnas cuyo TOTAL es =SUM; pct = [col, colBase] → col = base/total (o /baseRef si se da);
+  // cum = [col, colBase] → % acumulado. Cada fórmula lleva su valor calculado como respaldo para visores sin Excel.
+  table(title: string, headers: string[], raw: any[][], fmts: ColFmt[], total?: any[], formulas?: { sum?: number[]; pct?: Array<[number, number]>; cum?: Array<[number, number]>; baseRef?: string }): TableRef {
     const sub = this.next;
     this.sub(title);
     const header = this.next;
     this.push(headers, 'headers');
     const first = this.next;
-    const wrap = (r: any[]) => r.map((c, i) => (typeof c === 'number' && fmts[i] ? F(c, FMT[fmts[i]!]) : c));
-    raw.forEach(r => this.push(wrap(r), 'data'));
-    const last = this.next - 1;
-    if (total) this.push(wrap(total), 'total');
+    const last = first + raw.length - 1;
+    const totalRow = total ? last + 1 : null;
+    const L = (c: number) => colLetter(c + 1);
+    const wrap = (r: any[], rowNum: number | null) => r.map((c, i) => {
+      const fmt = fmts[i] ? FMT[fmts[i]!] : null;
+      if (formulas && rowNum !== null && raw.length) {
+        const pct = formulas.pct?.find(([col]) => col === i);
+        if (pct && typeof c === 'number') {
+          const base = formulas.baseRef || (totalRow ? `$${L(pct[1])}$${totalRow}` : `SUM($${L(pct[1])}$${first}:$${L(pct[1])}$${last})`);
+          return { __fmtNum: true as const, raw: `=IFERROR(${L(pct[1])}${rowNum}/${base},0)`, fmt: fmt || FMT.pct, result: c };
+        }
+        const cum = formulas.cum?.find(([col]) => col === i);
+        if (cum && typeof c === 'number') {
+          const base = formulas.baseRef || `SUM($${L(cum[1])}$${first}:$${L(cum[1])}$${last})`;
+          return { __fmtNum: true as const, raw: `=IFERROR(SUM($${L(cum[1])}$${first}:${L(cum[1])}${rowNum})/${base},0)`, fmt: fmt || FMT.pct, result: c };
+        }
+      }
+      if (formulas && rowNum === null && formulas.sum?.includes(i) && typeof c === 'number' && raw.length) {
+        return { __fmtNum: true as const, raw: `=SUM(${L(i)}${first}:${L(i)}${last})`, fmt: fmt || FMT.int, result: c };
+      }
+      if (formulas && rowNum === null && totalRow && formulas.pct?.some(([col]) => col === i) && typeof c === 'number' && raw.length) {
+        const [, baseCol] = formulas.pct!.find(([col]) => col === i)!;
+        const base = formulas.baseRef || `${L(baseCol)}${totalRow}`;
+        return { __fmtNum: true as const, raw: `=IFERROR(${L(baseCol)}${totalRow}/${base},0)`, fmt: fmt || FMT.pct, result: c };
+      }
+      return typeof c === 'number' && fmt ? F(c, fmt) : c;
+    });
+    raw.forEach((r, k) => this.push(wrap(r, first + k), 'data'));
+    if (total) this.push(wrap(total, null), 'total');
     return { sub, header, first, last, raw, headers };
   }
   chart(t: TableRef, o: {
@@ -547,11 +585,11 @@ export function buildLoanTapeReportSheets(clientName: string, selectedPeriods: s
     // quality + dpd tables feed the two charts next to the KPIs
     const qt = s.table(`CALIDAD DE CARTERA (convención 0-${QUALITY_RULES.vigenteMaxDpd} / ${QUALITY_RULES.vigenteMaxDpd + 1}-${QUALITY_RULES.atrasadaMaxDpd} / ${QUALITY_RULES.atrasadaMaxDpd + 1}+ DPD)`, ['Clasificación', 'Créditos', 'Saldo', '% saldo'],
       a.quality.map(c => [c.label, c.count, c.balance, c.pct]), [undefined, 'int', 'money', 'pct'],
-      ['TOTAL', k.creditos, k.saldo, 1]);
+      ['TOTAL', k.creditos, k.saldo, 1], { sum: [1, 2], pct: [[3, 2]] });
     s.chart(qt, { title: 'Calidad de cartera (% del saldo)', kind: 'doughnut', series: [{ col: 3, labels: true, pointColors: QUALITY_COLORS, fmt: '0.0%' }] });
     s.blank();
     const dt = s.table('DISTRIBUCIÓN POR DÍAS DE ATRASO (DPD)', ['Bucket DPD', 'Créditos', 'Saldo', '% saldo'], a.dpd.map(d => [d.bucket, d.count, d.balance, d.pct]), [undefined, 'int', 'money', 'pct'],
-      ['TOTAL', a.dpd.reduce((x, d) => x + d.count, 0), a.dpd.reduce((x, d) => x + d.balance, 0), a.dpd.reduce((x, d) => x + d.pct, 0)]);
+      ['TOTAL', a.dpd.reduce((x, d) => x + d.count, 0), a.dpd.reduce((x, d) => x + d.balance, 0), a.dpd.reduce((x, d) => x + d.pct, 0)], { sum: [1, 2], pct: [[3, 2]] });
     s.chart(dt, { title: 'Saldo por bucket DPD', kind: 'column', series: [{ col: 2, labels: true, pointColors: SEMANTIC_DPD, fmt: '$#,##0' }], yFmt: '$#,##0' });
     sheets.push(s.done({ freezeRows: 0 }));
   }
@@ -577,25 +615,27 @@ export function buildLoanTapeReportSheets(clientName: string, selectedPeriods: s
   {
     const s = new SheetBuilder('Concentraciones', [34, 12, 18, 12, 14, 14, 14]);
     s.title(`CONCENTRACIONES — ${a.focusLabel}`);
+    s.text('Los % son fórmulas: saldo del renglón ÷ saldo total de la cartera (celda B3). Los TOTAL son =SUMA.');
+    const base = s.baseCell('Saldo total de la cartera (base de los %)', k.saldo);
     s.blank();
     if (a.clients.length) {
-      const ct = s.table('POR CLIENTE (Top 20)', ['Cliente', 'Créditos', 'Saldo', '% saldo', '% acumulado', '% vencida del cliente'], a.clients.map(c => [c.name, c.count, c.balance, c.pct, c.cumPct, c.venPct]), [undefined, 'int', 'money', 'pct', 'pct', 'pct']);
+      const ct = s.table('POR CLIENTE (Top 20)', ['Cliente', 'Créditos', 'Saldo', '% saldo', '% acumulado', '% vencida del cliente'], a.clients.map(c => [c.name, c.count, c.balance, c.pct, c.cumPct, c.venPct]), [undefined, 'int', 'money', 'pct', 'pct', 'pct'], undefined, { pct: [[3, 2]], cum: [[4, 2]], baseRef: base });
       s.chart(ct, { title: 'Concentración por cliente', kind: 'bar', series: [{ col: 2, labels: false, color: AXC.deep, fmt: '$#,##0' }], yFmt: '$#,##0', rows: Math.max(17, a.clients.length + 4) });
       s.blank();
-      const tt = s.table('ACUMULADO TOP-N CLIENTES', ['Grupo', 'Créditos', 'Saldo', '% saldo', 'Monto original'], a.topN.map(t => [t.label, t.count, t.balance, t.pct, t.original]), [undefined, 'int', 'money', 'pct', 'money']);
+      const tt = s.table('ACUMULADO TOP-N CLIENTES', ['Grupo', 'Créditos', 'Saldo', '% saldo', 'Monto original'], a.topN.map(t => [t.label, t.count, t.balance, t.pct, t.original]), [undefined, 'int', 'money', 'pct', 'money'], undefined, { pct: [[3, 2]], baseRef: base });
       s.chart(tt, { title: 'Concentración acumulada Top-N', kind: 'column', series: [{ col: 3, labels: true, color: AXC.blue, fmt: '0.0%' }], yFmt: '0%' });
       s.blank();
     }
     if (a.groups.length) {
       const top = a.groups.slice(0, 15);
       const gt = s.table('POR GRUPO ECONÓMICO (Top 15; se infiere por nombre)', ['Grupo', 'Acreditados', 'Créditos', 'Saldo', '% saldo', 'Confianza', 'Miembros'],
-        top.map(g => [g.name, g.members.length, g.loans, g.balance, g.pct, g.inferred ? g.confidence : 'individual', g.members.slice(0, 4).map(m => m.name).join(' + ')]), [undefined, 'int', 'int', 'money', 'pct']);
+        top.map(g => [g.name, g.members.length, g.loans, g.balance, g.pct, g.inferred ? g.confidence : 'individual', g.members.slice(0, 4).map(m => m.name).join(' + ')]), [undefined, 'int', 'int', 'money', 'pct'], undefined, { pct: [[4, 3]], baseRef: base });
       s.chart(gt, { title: 'Concentración por grupo económico', kind: 'bar', series: [{ col: 3, color: AXC.deep, fmt: '$#,##0' }], yFmt: '$#,##0', rows: Math.max(15, top.length + 4) });
       s.blank();
     }
     const grp = (title: string, list: GroupRow[], chartTitle: string, color: string) => {
       if (!list.length) return;
-      const t = s.table(title, ['Nombre', 'Créditos', 'Saldo', '% saldo', 'Tasa pond.', 'DPD prom.'], list.map(g => [g.name, g.count, g.balance, g.pct, g.waRate, g.avgDpd]), [undefined, 'int', 'money', 'pct', 'pct2', 'dec1']);
+      const t = s.table(title, ['Nombre', 'Créditos', 'Saldo', '% saldo', 'Tasa pond.', 'DPD prom.'], list.map(g => [g.name, g.count, g.balance, g.pct, g.waRate, g.avgDpd]), [undefined, 'int', 'money', 'pct', 'pct2', 'dec1'], undefined, { pct: [[3, 2]], baseRef: base });
       s.chart(t, { title: chartTitle, kind: 'bar', series: [{ col: 2, color, fmt: '$#,##0' }], yFmt: '$#,##0', rows: Math.max(15, list.length + 4) });
       s.blank();
     };
@@ -606,7 +646,7 @@ export function buildLoanTapeReportSheets(clientName: string, selectedPeriods: s
     const sizeTable = (title: string, list: Bucket[], chartTitle: string) => {
       if (!list.length) return;
       const t = s.table(title, ['Rango', 'Créditos', 'Saldo', '% saldo', 'Tasa simple', 'Plazo prom. (m)', 'DPD prom.'], list.map(b => [b.label, b.count, b.balance, b.pct, b.avgRate, b.avgTerm, b.avgDpd]), [undefined, 'int', 'money', 'pct', 'pct2', 'dec1', 'dec1'],
-        ['TOTAL', list.reduce((x, b) => x + b.count, 0), list.reduce((x, b) => x + b.balance, 0), list.reduce((x, b) => x + b.pct, 0)]);
+        ['TOTAL', list.reduce((x, b) => x + b.count, 0), list.reduce((x, b) => x + b.balance, 0), list.reduce((x, b) => x + b.pct, 0)], { sum: [1, 2], pct: [[3, 2]], baseRef: base });
       s.chart(t, { title: chartTitle, kind: 'column', series: [{ col: 2, color: AXC.deep, fmt: '$#,##0' }, { col: 3, as: 'line', secondary: true, color: AXC.cyan, fmt: '0.0%' }], yFmt: '$#,##0', y2Fmt: '0%', rows: 16 });
       s.blank();
     };
@@ -620,12 +660,14 @@ export function buildLoanTapeReportSheets(clientName: string, selectedPeriods: s
   {
     const s = new SheetBuilder('Calidad y DPD', [30, 12, 18, 12, 12, 12]);
     s.title(`CALIDAD DE CARTERA Y DPD — ${a.focusLabel}`);
+    const qBase = s.baseCell('Saldo total de la cartera (base de los %)', k.saldo);
     s.blank();
-    const dt = s.table('DISTRIBUCIÓN DPD (0 / 1-30 / 31-60 / 61-89 / 90-180 / >180)', ['Bucket', 'Créditos', 'Saldo', '% saldo'], a.dpd.map(d => [d.bucket, d.count, d.balance, d.pct]), [undefined, 'int', 'money', 'pct']);
+    const dt = s.table('DISTRIBUCIÓN DPD (0 / 1-30 / 31-60 / 61-89 / 90-180 / >180)', ['Bucket', 'Créditos', 'Saldo', '% saldo'], a.dpd.map(d => [d.bucket, d.count, d.balance, d.pct]), [undefined, 'int', 'money', 'pct'],
+      ['TOTAL', a.dpd.reduce((x, d) => x + d.count, 0), a.dpd.reduce((x, d) => x + d.balance, 0), a.dpd.reduce((x, d) => x + d.pct, 0)], { sum: [1, 2], pct: [[3, 2]], baseRef: qBase });
     s.chart(dt, { title: 'Saldo y % por bucket DPD', kind: 'column', series: [{ col: 2, labels: true, pointColors: SEMANTIC_DPD, fmt: '$#,##0' }, { col: 3, as: 'line', secondary: true, color: AXC.deep, fmt: '0.0%' }], yFmt: '$#,##0', y2Fmt: '0%' });
     s.blank();
     const rec = reconcileQuality(a.rows);
-    s.table('PUENTE DE DEFINICIONES: “AL CORRIENTE” vs. “VIGENTE”', ['Concepto', 'Créditos', 'Saldo', '% saldo'], rec.bridge.map(b => [b.label, null, b.balance, b.pct]), [undefined, 'int', 'money', 'pct']);
+    s.table('PUENTE DE DEFINICIONES: “AL CORRIENTE” vs. “VIGENTE”', ['Concepto', 'Créditos', 'Saldo', '% saldo'], rec.bridge.map(b => [b.label, null, b.balance, b.pct]), [undefined, 'int', 'money', 'pct'], undefined, { pct: [[3, 2]], baseRef: qBase });
     s.blank();
     if (a.products.length) {
       const pt = s.table('CALIDAD POR PRODUCTO (% del saldo del producto)', ['Producto', 'Saldo', 'Vigente %', 'Atrasada %', 'Vencida %', 'DPD prom.'], a.products.map(p => [p.name, p.balance, p.vigPct, p.atrPct, p.venPct, p.avgDpd]), [undefined, 'money', 'pct', 'pct', 'pct', 'dec1']);
@@ -647,6 +689,7 @@ export function buildLoanTapeReportSheets(clientName: string, selectedPeriods: s
   if (withRate || a.products.some(p => p.waRate !== null)) {
     const s = new SheetBuilder('Tasas', [34, 12, 18, 12, 14, 14, 14, 14]);
     s.title(`TASAS DE INTERÉS — ${a.focusLabel}`);
+    const tBase = s.baseCell('Saldo total de la cartera (base de los %)', k.saldo);
     s.blank();
     const rv = (v: number | null) => (v === null ? 'N/D' : F(v, FMT.pct2));
     s.table('ESTADÍSTICOS DE TASA', ['Métrica', 'Valor'], [
@@ -657,7 +700,7 @@ export function buildLoanTapeReportSheets(clientName: string, selectedPeriods: s
     s.blank();
     if (withRate) {
       const rt = s.table('DISTRIBUCIÓN POR RANGO DE TASA (5 rangos iguales)', ['Rango de tasa', 'Créditos', 'Saldo', '% saldo', 'Plazo prom. (m)', 'DPD prom.'], a.rateBuckets.map(b => [b.label, b.count, b.balance, b.pct, b.avgTerm, b.avgDpd]), [undefined, 'int', 'money', 'pct', 'dec1', 'dec1'],
-        ['TOTAL', a.rateBuckets.reduce((x, b) => x + b.count, 0), a.rateBuckets.reduce((x, b) => x + b.balance, 0), a.rateBuckets.reduce((x, b) => x + b.pct, 0)]);
+        ['TOTAL', a.rateBuckets.reduce((x, b) => x + b.count, 0), a.rateBuckets.reduce((x, b) => x + b.balance, 0), a.rateBuckets.reduce((x, b) => x + b.pct, 0)], { sum: [1, 2], pct: [[3, 2]], baseRef: tBase });
       s.chart(rt, { title: 'Saldo por rango de tasa', kind: 'column', series: [{ col: 2, color: AXC.deep, fmt: '$#,##0' }, { col: 3, as: 'line', secondary: true, color: AXC.cyan, fmt: '0.0%' }], yFmt: '$#,##0', y2Fmt: '0%' });
       s.blank();
     }
@@ -680,6 +723,7 @@ export function buildLoanTapeReportSheets(clientName: string, selectedPeriods: s
   if (a.termBuckets.length || a.maturity.length) {
     const s = new SheetBuilder('Plazos y vencimientos', [34, 12, 18, 12, 14, 14]);
     s.title(`PLAZOS Y VENCIMIENTOS — ${a.focusLabel}`);
+    const pBase = s.baseCell('Saldo total de la cartera (base de los %)', k.saldo);
     s.blank();
     s.table('INDICADORES DE PLAZO', ['Métrica', 'Valor'], [
       ['Plazo original ponderado (meses)', k.waTermMonths === null ? 'N/D' : F(k.waTermMonths, FMT.dec1)],
@@ -691,12 +735,13 @@ export function buildLoanTapeReportSheets(clientName: string, selectedPeriods: s
     ], []);
     s.blank();
     if (a.termBuckets.length) {
-      const tt = s.table('DISTRIBUCIÓN POR PLAZO ORIGINAL', ['Rango de plazo', 'Créditos', 'Saldo', '% saldo', 'Tasa simple', 'DPD prom.'], a.termBuckets.map(b => [b.label, b.count, b.balance, b.pct, b.avgRate, b.avgDpd]), [undefined, 'int', 'money', 'pct', 'pct2', 'dec1']);
+      const tt = s.table('DISTRIBUCIÓN POR PLAZO ORIGINAL', ['Rango de plazo', 'Créditos', 'Saldo', '% saldo', 'Tasa simple', 'DPD prom.'], a.termBuckets.map(b => [b.label, b.count, b.balance, b.pct, b.avgRate, b.avgDpd]), [undefined, 'int', 'money', 'pct', 'pct2', 'dec1'],
+        ['TOTAL', a.termBuckets.reduce((x, b) => x + b.count, 0), a.termBuckets.reduce((x, b) => x + b.balance, 0), a.termBuckets.reduce((x, b) => x + b.pct, 0)], { sum: [1, 2], pct: [[3, 2]], baseRef: pBase });
       s.chart(tt, { title: 'Saldo por plazo original', kind: 'column', series: [{ col: 2, color: AXC.deep, fmt: '$#,##0' }, { col: 3, as: 'line', secondary: true, color: AXC.cyan, fmt: '0.0%' }], yFmt: '$#,##0', y2Fmt: '0%' });
       s.blank();
     }
     if (a.maturity.length) {
-      const mt = s.table('PERFIL DE VENCIMIENTOS POR TRIMESTRE', ['Trimestre', 'Créditos', 'Saldo', '% saldo'], a.maturity.map(m => [m.quarter, m.count, m.balance, m.pct]), [undefined, 'int', 'money', 'pct']);
+      const mt = s.table('PERFIL DE VENCIMIENTOS POR TRIMESTRE', ['Trimestre', 'Créditos', 'Saldo', '% saldo'], a.maturity.map(m => [m.quarter, m.count, m.balance, m.pct]), [undefined, 'int', 'money', 'pct'], undefined, { pct: [[3, 2]], baseRef: pBase });
       s.chart(mt, { title: 'Vencimientos próximos por trimestre', kind: 'column', series: [{ col: 2, color: AXC.deep, fmt: '$#,##0' }, { col: 3, as: 'line', secondary: true, color: AXC.cyan, fmt: '0.0%' }], yFmt: '$#,##0', y2Fmt: '0%' });
     }
     sheets.push(s.done({ freezeRows: 0 }));

@@ -479,10 +479,11 @@ export async function buildWorkbookBuffer(sheets: SheetDef[]): Promise<ArrayBuff
       const noteOverrides: Record<number, string> = {};
       const exRow = ws.addRow(raw.map((c, ci) => {
         if (c && typeof c === 'object' && (c as any).__fmtNum) {
-          const { raw: inner, fmt, note } = c as unknown as FormattedCell;
+          const { raw: inner, fmt, note, result } = c as unknown as FormattedCell;
           numFmtOverrides[ci + 1] = fmt;
           if (note) noteOverrides[ci + 1] = note;
-          if (typeof inner === 'string' && inner.startsWith('=')) return { formula: inner.slice(1), result: null } as any;
+          // `result` = valor ya calculado: Excel recalcula igual, pero los visores sin motor de cálculo lo muestran.
+          if (typeof inner === 'string' && inner.startsWith('=')) return { formula: inner.slice(1), result: result ?? null } as any;
           // Empty numeric cells must be a TRUE blank (null), never '' — an empty
           // string is a text cell, which shows up blank but breaks =A+B math and
           // reads as "number stored as text" in a numeric column.
@@ -825,6 +826,7 @@ interface FormattedCell {
   raw: string | number | null;
   fmt: string;
   note?: string;
+  result?: number | string | null;
 }
 function fmtNum(raw: string | number | null, fmt: string, note?: string): FormattedCell {
   return { __fmtNum: true, raw, fmt, note };
