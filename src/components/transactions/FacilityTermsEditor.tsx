@@ -41,8 +41,14 @@ export default function FacilityTermsEditor({ clientId, transactionId, terms, on
   const [draft, setDraft] = useState<FacilityTerms>(terms || emptyFacilityTerms());
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [cov, setCov] = useState({ key: KNOWN_INDICATORS[0].key, operator: knownIndicatorDirection(KNOWN_INDICATORS[0]) as string, limit: '' });
-  const [addingCov, setAddingCov] = useState(false);
+  // Captura de varios covenants a la vez: un renglón por indicador del contrato.
+  type CovRow = { id: string; key: string; operator: string; limit: string };
+  const newRow = (key = KNOWN_INDICATORS[0].key): CovRow => {
+    const ind = KNOWN_INDICATORS.find(i => i.key === key) || KNOWN_INDICATORS[0];
+    return { id: `r${Date.now()}${Math.random().toString(36).slice(2, 6)}`, key: ind.key, operator: knownIndicatorDirection(ind), limit: '' };
+  };
+  const [rows, setRows] = useState<CovRow[]>([newRow()]);
+  const [savingCovs, setSavingCovs] = useState(false);
   const [covMsg, setCovMsg] = useState('');
   const [facilityCovenants, setFacilityCovenants] = useState<Covenant_DB[]>([]);
   const loadFacilityCovenants = () => db.getCovenants(clientId).then(all => setFacilityCovenants(all.filter(c => c.type === 'financial' && c.transactionId === transactionId))).catch(() => undefined);
@@ -61,27 +67,49 @@ export default function FacilityTermsEditor({ clientId, transactionId, terms, on
     finally { setSaving(false); }
   };
 
-  const addCovenant = async () => {
-    const ind = KNOWN_INDICATORS.find(i => i.key === cov.key);
-    if (!ind) return;
-    const parsed = parseLimit(cov.limit, ind.unit);
-    if (!parsed.store) { setCovMsg(parsed.error || 'Escribe el límite del contrato.'); return; }
-    setAddingCov(true);
-    setCovMsg('');
+  const rowInfo = (r: CovRow) => {
+    const ind = KNOWN_INDICATORS.find(i => i.key === r.key)!;
+    const parsed = parseLimit(r.limit, ind.unit);
+    const existing = facilityCovenants.find(c => c.formula === knownIndicatorFormula(ind));
+    return { ind, parsed, existing };
+  };
+
+  // Guarda todos los renglones válidos. Si el indicador ya existe en la facility, actualiza su límite (sin duplicar).
+  const saveCovenants = async () => {
+    const ready = rows.map(r => ({ r, ...rowInfo(r) })).filter(x => x.parsed.store);
+    const keys = ready.map(x => x.ind.key);
+    if (!ready.length) { setCovMsg('Escribe el límite de al menos un covenant.'); return; }
+    if (new Set(keys).size !== keys.length) { setCovMsg('Hay indicadores repetidos en la captura: deja uno por indicador.'); return; }
+    setSavingCovs(true); setCovMsg('');
     try {
-      await db.createCovenant({
-        clientId, transactionId, name: ind.label, type: 'financial', formula: knownIndicatorFormula(ind),
-        threshold: parsed.store, operator: cov.operator as any, description: `${ind.hint} · límite del contrato`, isCustom: true,
-      });
-      setCov(c => ({ ...c, limit: '' }));
-      setCovMsg(`✓ ${ind.label} ${OP_TEXT[cov.operator]} ${parsed.display} agregado: ya se calcula en Indicadores Financieros.`);
-      onCovenantCreated();
+      let created = 0, updated = 0;
+      for (const { r, ind, parsed, existing } of ready) {
+        if (existing) {
+          await db.updateCovenant(existing.id, { threshold: parsed.store as string, operator: r.operator as any });
+          updated += 1;
+        } else {
+          await db.createCovenant({
+            clientId, transactionId, name: ind.label, type: 'financial', formula: knownIndicatorFormula(ind),
+            threshold: parsed.store as string, operator: r.operator as any, description: `${ind.hint} · límite del contrato`, isCustom: true,
+          });
+          created += 1;
+        }
+      }
+      setRows([newRow()]);
+      setCovMsg(`✓ ${created} agregado${created === 1 ? '' : 's'}${updated ? `, ${updated} actualizado${updated === 1 ? '' : 's'}` : ''}. Ya se calculan en Indicadores Financieros.`);
       await loadFacilityCovenants();
+      onCovenantCreated();
     } catch (e: any) {
-      setCovMsg(`No se pudo agregar: ${e?.message || e}`);
+      setCovMsg(`No se pudo guardar: ${e?.message || e}`);
     } finally {
-      setAddingCov(false);
+      setSavingCovs(false);
     }
+  };
+
+  const removeCovenant = async (c: Covenant_DB) => {
+    if (!confirm(`¿Eliminar el covenant "${c.name}" de esta facility?`)) return;
+    try { await db.deleteCovenant(c.id); await loadFacilityCovenants(); onCovenantCreated(); }
+    catch (e: any) { setCovMsg(`No se pudo eliminar: ${e?.message || e}`); }
   };
 
   const limitLabel = (c: Covenant_DB) => {
@@ -91,9 +119,8 @@ export default function FacilityTermsEditor({ clientId, transactionId, terms, on
     const percent = ind ? ind.unit === 'percent' : Math.abs(n) <= 1.5;
     return `${OP_TEXT[c.operator] || ''} ${percent ? `${(n * 100).toLocaleString('es-MX', { maximumFractionDigits: 2 })}%` : `${n.toLocaleString('es-MX', { maximumFractionDigits: 4 })}x`}`;
   };
+  const duplicates = new Set(facilityCovenants.map(c => c.formula).filter((f, i, arr) => f && arr.indexOf(f) !== i));
 
-  const selectedInd = KNOWN_INDICATORS.find(i => i.key === cov.key);
-  const preview = selectedInd ? parseLimit(cov.limit, selectedInd.unit) : { store: null, display: '', error: '' };
 
   return (
     <div className="space-y-4">
@@ -178,33 +205,48 @@ export default function FacilityTermsEditor({ clientId, transactionId, terms, on
       </div>
 
       <div className="bg-white border border-slate-200 rounded-xl p-4">
-        <p className="text-xs font-black text-slate-700 uppercase tracking-widest flex items-center gap-1.5"><ShieldCheck className="w-3.5 h-3.5 text-indigo-600" />Agregar covenant financiero de esta facility</p>
-        <p className="text-xs text-slate-400 mt-0.5 mb-3">Se guarda con su fórmula estándar: se empieza a calcular en Indicadores Financieros contra los EEFF cargados.</p>
-        <div className="grid grid-cols-1 md:grid-cols-[1fr_120px_140px_auto] gap-2 items-end">
-          <div><span className={label}>Indicador</span>
-            <select className={inputClass} value={cov.key} onChange={e => { const ind = KNOWN_INDICATORS.find(i => i.key === e.target.value)!; setCov({ key: ind.key, operator: knownIndicatorDirection(ind), limit: cov.limit }); }}>
-              {KNOWN_INDICATORS.map(i => <option key={i.key} value={i.key}>{i.label} — {i.hint}</option>)}
-            </select>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-black text-slate-700 uppercase tracking-widest flex items-center gap-1.5"><ShieldCheck className="w-3.5 h-3.5 text-indigo-600" />Covenants financieros de esta facility</p>
+            <p className="text-xs text-slate-400 mt-0.5">Captura todos los del contrato y guárdalos juntos. Se calculan en Indicadores Financieros contra los EEFF cargados; si el indicador ya existe, se actualiza su límite.</p>
           </div>
-          <div><span className={label}>Condición</span>
-            <select className={inputClass} value={cov.operator} onChange={e => setCov({ ...cov, operator: e.target.value })}>
-              <option value="gte">≥ mínimo</option><option value="gt">&gt; mínimo</option><option value="lte">≤ máximo</option><option value="lt">&lt; máximo</option>
-            </select>
-          </div>
-          <div><span className={label}>Límite {selectedInd?.unit === 'percent' ? '(%)' : '(veces)'}</span><input className={`${inputClass} ${preview.error ? 'border-rose-300' : ''}`} value={cov.limit} onChange={e => { setCov({ ...cov, limit: e.target.value }); setCovMsg(''); }} placeholder={selectedInd?.unit === 'percent' ? 'ej. 30% o 0.30' : 'ej. 1.25x'} /></div>
-          <button onClick={addCovenant} disabled={addingCov} className="flex items-center gap-1.5 text-xs bg-slate-900 text-white px-3 py-2 rounded-lg hover:bg-slate-700 disabled:opacity-40 font-bold"><Plus className="w-3.5 h-3.5" />{addingCov ? 'Agregando…' : 'Agregar'}</button>
+          <button onClick={saveCovenants} disabled={savingCovs} className="flex-shrink-0 flex items-center gap-1.5 text-xs bg-slate-900 text-white px-3 py-2 rounded-lg hover:bg-slate-700 disabled:opacity-40 font-bold"><Save className="w-3.5 h-3.5" />{savingCovs ? 'Guardando…' : 'Guardar covenants'}</button>
         </div>
-        <p className={`text-xs mt-2 font-semibold ${preview.error || covMsg.startsWith('No') ? 'text-rose-600' : covMsg ? 'text-emerald-700' : 'text-slate-500'}`}>
-          {covMsg || preview.error || (preview.display ? `Se guardará como: ${selectedInd?.label} ${OP_TEXT[cov.operator]} ${preview.display}` : 'Escribe el límite como viene en el contrato (30%, 0.30 o 1.25x).')}
-        </p>
+        <div className="mt-3 space-y-2">
+          {rows.map(r => {
+            const { ind, parsed, existing } = rowInfo(r);
+            return (
+              <div key={r.id}>
+                <div className="grid grid-cols-1 md:grid-cols-[1fr_120px_150px_auto] gap-2 items-center">
+                  <select className={inputClass} value={r.key} onChange={e => { const next = KNOWN_INDICATORS.find(i => i.key === e.target.value)!; setRows(rs => rs.map(x => x.id === r.id ? { ...x, key: next.key, operator: knownIndicatorDirection(next) } : x)); setCovMsg(''); }}>
+                    {KNOWN_INDICATORS.map(i => <option key={i.key} value={i.key}>{i.label} — {i.hint}</option>)}
+                  </select>
+                  <select className={inputClass} value={r.operator} onChange={e => setRows(rs => rs.map(x => x.id === r.id ? { ...x, operator: e.target.value } : x))}>
+                    <option value="gte">≥ mínimo</option><option value="gt">&gt; mínimo</option><option value="lte">≤ máximo</option><option value="lt">&lt; máximo</option>
+                  </select>
+                  <input className={`${inputClass} ${parsed.error ? 'border-rose-300' : ''}`} value={r.limit} onChange={e => { setRows(rs => rs.map(x => x.id === r.id ? { ...x, limit: e.target.value } : x)); setCovMsg(''); }} placeholder={ind.unit === 'percent' ? 'Límite: 30% o 0.30' : 'Límite: 1.25x'} />
+                  <button onClick={() => setRows(rs => (rs.length > 1 ? rs.filter(x => x.id !== r.id) : [newRow()]))} className="text-slate-300 hover:text-rose-500 justify-self-end" title="Quitar renglón"><Trash2 className="w-4 h-4" /></button>
+                </div>
+                <p className={`text-[11px] mt-0.5 font-semibold ${parsed.error ? 'text-rose-600' : 'text-slate-500'}`}>
+                  {parsed.error || (parsed.display ? `${ind.label} ${OP_TEXT[r.operator]} ${parsed.display}${existing ? ' · ya existe: se actualizará su límite' : ''}` : '')}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+        <button onClick={() => { const used = new Set(rows.map(r => r.key)); const next = KNOWN_INDICATORS.find(i => !used.has(i.key)) || KNOWN_INDICATORS[0]; setRows(rs => [...rs, newRow(next.key)]); }} className="mt-2 flex items-center gap-1 text-[11px] font-black text-indigo-600"><Plus className="w-3 h-3" />Agregar otro covenant</button>
+        {covMsg && <p className={`text-xs mt-2 font-semibold ${covMsg.startsWith('✓') ? 'text-emerald-700' : 'text-rose-600'}`}>{covMsg}</p>}
         {facilityCovenants.length > 0 && (
           <div className="mt-3 border-t border-slate-100 pt-2">
-            <p className={label}>Covenants financieros de esta facility</p>
+            <p className={label}>Ya guardados</p>
             <ul className="space-y-1">
               {facilityCovenants.map(c => (
-                <li key={c.id} className="flex items-center justify-between text-xs">
-                  <span className="font-semibold text-slate-700">{c.name}</span>
-                  <span className="font-mono font-black text-slate-900">{limitLabel(c)}</span>
+                <li key={c.id} className="flex items-center justify-between gap-2 text-xs">
+                  <span className="font-semibold text-slate-700">{c.name}{duplicates.has(c.formula) && <span className="ml-1.5 text-[10px] font-black text-amber-600">duplicado</span>}</span>
+                  <span className="flex items-center gap-3">
+                    <span className="font-mono font-black text-slate-900">{limitLabel(c)}</span>
+                    <button onClick={() => removeCovenant(c)} className="text-slate-300 hover:text-rose-500" title="Eliminar covenant"><Trash2 className="w-3.5 h-3.5" /></button>
+                  </span>
                 </li>
               ))}
             </ul>
