@@ -207,12 +207,14 @@ export interface ExtractionResult {
 
 export interface FinancialCovenant {
   name: string; threshold: string; operator: 'gt'|'lt'|'gte'|'lte'|'none'; description: string; formula?: string;
+  indicatorKey?: string;   // indicador estándar calculable (KNOWN_INDICATORS) al que corresponde, si aplica
 }
 
 export interface ContractExtractionResult {
   condicionesHacer: string[];
   condicionesNoHacer: string[];
   covenants: FinancialCovenant[];
+  terminos?: Record<string, any>;   // términos económicos de la facility (ver facilityTerms.termsFromExtraction)
 }
 
 export interface ContractClientExtractionResult extends ContractExtractionResult {
@@ -923,7 +925,15 @@ Devuelves únicamente JSON válido.`;
   const prompt = `Extrae de ${docRef}:
 1. condicionesHacer: obligaciones positivas (cosas que el acreditado DEBE hacer)
 2. condicionesNoHacer: obligaciones negativas (cosas que el acreditado NO debe hacer)
-3. covenants: razones financieras con umbrales numéricos
+3. covenants: razones financieras con umbrales numéricos. Si el covenant corresponde a uno de estos indicadores, pon su clave en "indicatorKey" (si no corresponde a ninguno, deja "indicatorKey": null):
+   capitalization (ICAP = capital contable / activos), adjusted_capitalization (capital / cartera neta), leverage (bancos y fondos / activos),
+   debt_equity (deuda / capital), debt_ebitda (deuda / EBITDA), dscr (EBITDA / gasto financiero), current_ratio (activo circulante / pasivo circulante),
+   immediate_liquidity (efectivo e inversiones / pasivo circulante), roa, roe, ifnb_net_margin, ifnb_financial_margin, ifnb_operating_efficiency,
+   past_due_portfolio (cartera vencida / cartera total, IMOR), past_due_coverage (estimación preventiva / cartera vencida), portfolio_yield, funding_cost, financial_spread.
+4. terminos: términos económicos del crédito. Usa null cuando el contrato no lo diga; NO inventes.
+   - Tasas en % anual como número (ej. 14.5). Si la tasa es variable (TIIE, SOFR…): tasaTipo "variable", referencia, sobretasa en puntos porcentuales, y piso / techo si los hay.
+   - Moratorios: copia el texto del contrato en moratorioTexto; si es un múltiplo de la ordinaria pon moratorioFactor (ej. 2), si es una tasa fija pon moratorioTasa.
+   - Comisiones relevantes (apertura, disposición, administración, prepago, no disposición, etc.) con su valor y base tal como vienen.
 
 Devuelve JSON:
 {
@@ -935,12 +945,30 @@ Devuelve JSON:
       "threshold": "valor límite (ej: 2.0, 5%, 1.25x)",
       "operator": "gte|lte|gt|lt",
       "description": "descripción breve del indicador",
-      "formula": "descripción de cómo se calcula"
+      "formula": "descripción de cómo se calcula",
+      "indicatorKey": "debt_equity | null"
     }
-  ]
+  ],
+  "terminos": {
+    "plazoMeses": "plazo total del crédito en meses o null",
+    "disposicionMinima": "monto mínimo por disposición o null",
+    "plazoDisposicionMeses": "plazo de pago de cada disposición en meses o null",
+    "periodicidadPago": "mensual | trimestral | al vencimiento | ... o null",
+    "tasaTipo": "fija | variable",
+    "tasaFija": "número % anual o null",
+    "referencia": "TIIE 28 | TIIE 91 | SOFR | ... o null",
+    "sobretasa": "puntos porcentuales sobre la referencia o null",
+    "piso": "% anual o null",
+    "techo": "% anual o null",
+    "moratorioTexto": "texto del contrato o null",
+    "moratorioFactor": "veces la ordinaria o null",
+    "moratorioTasa": "% anual o null",
+    "comisiones": [{ "concepto": "apertura", "valor": "1%", "base": "sobre el monto de la línea, por única vez" }],
+    "notas": "otras condiciones económicas relevantes o null"
+  }
 }
 ${attachmentList}
-${hasText ? `\nTexto del contrato:\n${contractText.slice(0, 12000)}` : ''}`;
+${hasText ? `\nTexto del contrato:\n${contractText.slice(0, 40000)}` : ''}`;
 
   const text = await callAI(settings, system, prompt, media);
   const parsed = extractJSON(text);
@@ -948,6 +976,7 @@ ${hasText ? `\nTexto del contrato:\n${contractText.slice(0, 12000)}` : ''}`;
     condicionesHacer: Array.isArray(parsed.condicionesHacer) ? parsed.condicionesHacer : [],
     condicionesNoHacer: Array.isArray(parsed.condicionesNoHacer) ? parsed.condicionesNoHacer : [],
     covenants: Array.isArray(parsed.covenants) ? parsed.covenants : [],
+    terminos: parsed.terminos && typeof parsed.terminos === 'object' ? parsed.terminos : undefined,
   };
 }
 

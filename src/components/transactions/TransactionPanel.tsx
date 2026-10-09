@@ -12,6 +12,9 @@ import WorkingOverlay from '../common/WorkingOverlay';
 import { parseFinancialNumber } from '../../lib/numberParsing';
 import { extractPdfText, isUsefulExtractedText } from '../../lib/documentParsing';
 import { loadExportModule } from '../../lib/exportLoader';
+import FacilityTermsEditor from './FacilityTermsEditor';
+import { type FacilityTerms, type FacilityTermsMap, emptyFacilityTerms, facilityTermsKey, termsFromExtraction } from '../../lib/facilityTerms';
+import { KNOWN_INDICATORS, knownIndicatorFormula, thresholdToStore } from '../../lib/covenantBuilder';
 
 const nanoid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
@@ -148,6 +151,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
   const [savingCovenants, setSavingCovenants] = useState<string | null>(null);
   const [dispositions, setDispositions] = useState<DispositionMap>({});
   const [pipelineMeta, setPipelineMeta] = useState<PipelineTransactionMetaMap>({});
+  const [facilityTerms, setFacilityTerms] = useState<FacilityTermsMap>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadingFor, setUploadingFor] = useState<string | null>(null);
 
@@ -171,6 +175,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
     }
     setFiles(fileMap);
     setDispositions(await db.getClientSetting<DispositionMap>(clientId, dispositionsKey(clientId), {}));
+    setFacilityTerms(await db.getClientSetting<FacilityTermsMap>(clientId, facilityTermsKey(clientId), {}));
     setPipelineMeta(await db.getClientSetting<PipelineTransactionMetaMap>(clientId, pipelineMetaKey(clientId), {}));
   };
 
@@ -405,6 +410,13 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
     }
   };
 
+  const saveFacilityTerms = async (txId: string, terms: FacilityTerms) => {
+    const current = await db.getClientSetting<FacilityTermsMap>(clientId, facilityTermsKey(clientId), {});
+    const next = { ...current, [txId]: terms };
+    await db.setClientSetting(clientId, facilityTermsKey(clientId), next);
+    setFacilityTerms(next);
+  };
+
   const handleSaveCovenants = async (txId: string) => {
     const extraction = extractedMap[txId];
     if (!extraction) return;
@@ -431,13 +443,32 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
         });
       }
       for (const cov of extraction.covenants) {
+        // Si el contrato usa un indicador estándar, se guarda con su fórmula calculable y el límite normalizado
+        // ("15%" → 0.15): así Indicadores Financieros lo calcula de inmediato contra los EEFF.
+        const ind = KNOWN_INDICATORS.find(i => i.key === cov.indicatorKey);
+        const rawLimit = String(cov.threshold ?? '').trim();
+        const limitNum = Number(rawLimit.replace(/[%x\s,]/gi, ''));
+        const percentInput = ind?.unit === 'percent' && !rawLimit.includes('%') && Number.isFinite(limitNum) && Math.abs(limitNum) <= 1 ? String(limitNum * 100) : rawLimit;
         await db.createCovenant({
           clientId, transactionId: txId,
           name: cov.name, type: 'financial',
-          formula: cov.formula || '', threshold: cov.threshold,
-          operator: cov.operator, description: cov.description,
+          formula: ind ? knownIndicatorFormula(ind) : (cov.formula || ''),
+          threshold: ind ? (thresholdToStore(percentInput, ind.unit) || cov.threshold) : cov.threshold,
+          operator: cov.operator, description: ind ? `${cov.description || ''}${cov.formula ? ` · Contrato: ${cov.formula}` : ''}`.trim() : cov.description,
           isCustom: false,
         });
+      }
+      // Términos económicos del contrato: llenan lo que el contrato dice, sin borrar lo capturado a mano.
+      if (extraction.terminos) {
+        const fromContract = termsFromExtraction(extraction.terminos);
+        const existing = facilityTerms[txId] || emptyFacilityTerms();
+        const merged: FacilityTerms = { ...existing };
+        (Object.keys(fromContract) as Array<keyof FacilityTerms>).forEach(k => {
+          const v = fromContract[k] as any;
+          if (k === 'comisiones') { if (v.length) merged.comisiones = v; return; }
+          if (v !== '' && v !== null && v !== undefined) (merged as any)[k] = v;
+        });
+        await saveFacilityTerms(txId, { ...merged, fuente: 'contrato', updatedAt: new Date().toISOString() });
       }
       setExtractedMap(prev => { const n = { ...prev }; delete n[txId]; return n; });
       onCovenantsExtracted();
@@ -710,6 +741,14 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                         </label>
                       </div>
                     </div>
+
+                    <FacilityTermsEditor
+                      clientId={clientId}
+                      transactionId={tx.id}
+                      terms={facilityTerms[tx.id]}
+                      onSave={terms => saveFacilityTerms(tx.id, terms)}
+                      onCovenantCreated={onCovenantsExtracted}
+                    />
 
                     <div className="bg-white border border-slate-200 rounded-xl p-4">
                       <div className="flex items-center justify-between mb-3">
