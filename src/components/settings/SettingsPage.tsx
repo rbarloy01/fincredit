@@ -566,12 +566,6 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
                 </div>
               )}
             </div>
-            {aiSettings.provider === 'openrouter' && (
-              <div className="rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-xs text-cyan-900 leading-5">
-                <p className="font-black">Ruta recomendada sin costo: stealth/ox-alpha → openrouter/free.</p>
-                <p className="font-semibold mt-1">Los modelos gratis pueden tener límites o cola. Para producción, configura OPENROUTER_API_KEY en Vercel y deja la llave local vacía.</p>
-              </div>
-            )}
             <div className="rounded-xl border border-slate-200 bg-white p-4">
               <h3 className="text-xs font-black text-slate-700 uppercase tracking-wider mb-3">Proveedor por flujo</h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
