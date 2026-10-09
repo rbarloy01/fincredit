@@ -19,6 +19,7 @@ export interface StandardLoan {
   installment?: number | null;
   currency: string | null;
   industry: string | null;
+  purpose?: string | null;   // destino del crédito, texto libre del acreditado (se agrupa con loanPurpose.ts)
   state: string | null;
   file_date: string | null;
   source_granularity?: 'loan' | 'product_summary' | 'state_summary';
@@ -34,7 +35,7 @@ export const STANDARD_FIELD_LABELS: Record<StandardLoanField, string> = {
   loan_id: 'ID de crédito', client: 'Cliente', amount: 'Monto original', outstanding_balance: 'Saldo insoluto',
   interest_rate: 'Tasa', loan_status: 'Estatus del crédito', start_date: 'Fecha de inicio', end_date: 'Fecha de vencimiento',
   loan_type: 'Producto', days_overdue: 'Días de atraso', currency: 'Moneda', industry: 'Giro / industria',
-  state: 'Estado (geográfico)', file_date: 'Fecha de corte',
+  state: 'Estado (geográfico)', file_date: 'Fecha de corte', purpose: 'Destino del crédito',
 };
 export function mappingHeaderKey(header: string): string { return normalize(header); }
 
@@ -74,6 +75,7 @@ const FIELD_IMPACT: Record<StandardLoanField, string> = {
   days_overdue: 'Limita mora, cartera atrasada/vencida y DPD ponderado; concentración por saldo sigue disponible.',
   currency: 'Se asume MXN si falta.',
   industry: 'Limita concentración por industria.',
+  purpose: 'Limita el desglose por destino del crédito.',
   state: 'Limita concentración por estado.',
   file_date: 'Limita comparativos temporales si tampoco viene fecha en el nombre del archivo.',
 };
@@ -100,6 +102,7 @@ const SYNONYMS: Record<StandardLoanField, string[]> = {
   loan_status: ['status', 'estado credito', 'estado del credito', 'estado del activo', 'estatus del activo', 'estado activo', 'loan status', 'estatus', 'estatus credito', 'situacion', 'condicion', 'clasificacion'],
   start_date: ['start date', 'origination date', 'fecha inicio', 'fecha otorgamiento', 'fecha apertura', 'fecha disposicion', 'fecha alta', 'disbursement date'],
   end_date: ['end date', 'maturity date', 'fecha vencimiento', 'fecha fin', 'fecha pago final', 'due date'],
+  purpose: ['loan use reason', 'loan use', 'use of proceeds', 'purpose', 'loan purpose', 'destino', 'destino del credito', 'destino de los recursos', 'uso del credito', 'uso de los recursos', 'finalidad', 'proposito'],
   loan_type: ['loan type', 'producto', 'product', 'product type', 'tipo contrato', 'tipo credito', 'tipo prestamo', 'tipo producto', 'linea', 'modalidad', 'subproducto', 'segmento', 'programa', 'plan', 'esquema'],
   days_overdue: ['days overdue', 'days past due', 'dpd', 'mora dias', 'dias mora', 'dias de mora', 'dias en mora', 'dias de retraso', 'dias atraso', 'dias de atraso', 'dias vencidos', 'dias de vencidos', 'dias vencido', 'dias vencida', 'delinquent days'],
   currency: ['currency', 'moneda', 'divisa'],
@@ -415,7 +418,7 @@ function pickColumns(headers: string[], rows: any[] = [], overrides: MappingOver
 
   const targetOrder: StandardLoanField[] = [
     'days_overdue', 'outstanding_balance', 'amount', 'interest_rate', 'start_date', 'end_date',
-    'loan_id', 'client', 'loan_status', 'loan_type', 'currency', 'industry', 'state', 'file_date',
+    'loan_id', 'client', 'loan_status', 'loan_type', 'purpose', 'currency', 'industry', 'state', 'file_date',
   ];
 
   for (const target of targetOrder) {
@@ -426,6 +429,32 @@ function pickColumns(headers: string[], rows: any[] = [], overrides: MappingOver
     }
     if (target === 'file_date') continue;
     if (target === 'outstanding_balance' && capitalVigente && capitalVencido) continue;
+    // Estado geográfico = la columna cuyos VALORES son estados de México (Red Girasol los trae en "Ciudad"); el nombre
+    // del encabezado no basta: "Domicilio → Street / Municipality" se tomaban como estado.
+    if (target === 'state') {
+      const geoCandidates = normalized
+        .filter(h => !used.has(h.header))
+        .map(h => {
+          const vals = rows.map(row => row?.[h.header]).filter(v => v !== null && v !== undefined && String(v).trim() !== '').slice(0, 300);
+          const hits = vals.filter(v => MEXICAN_STATES.has(normalize(v))).length;
+          return { h, share: vals.length ? hits / vals.length : 0 };
+        })
+        .sort((x, y) => y.share - x.share);
+      const geoHint = /(estado|entidad|state|ciudad|region|plaza|localidad)/;
+      const streetLike = /(street|calle|municip|colonia|zip|postal|domicilio|numero|rank|saldo|sum)/;
+      // 1) mayoría de valores son estados de México; 2) el encabezado ES "estado / state / entidad" (p. ej. Texas en
+      // un tape de EE. UU.); 3) columna geográfica con al menos 30% de estados. Calles, municipios o números, nunca.
+      const best = geoCandidates.find(x => x.share >= 0.6)
+        || geoCandidates.find(x => headerMatchScore('state', x.h.norm).score >= 75 && !streetLike.test(x.h.norm))
+        || geoCandidates.find(x => x.share >= 0.3 && geoHint.test(x.h.norm) && !streetLike.test(x.h.norm));
+      const pick = best && (best.share > 0 || headerMatchScore('state', best.h.norm).score >= 75) ? best : undefined;
+      if (pick) {
+        mapping.state = pick.h.header;
+        used.add(pick.h.header);
+        notes.push({ source_header: pick.h.header, target_term: 'state', confidence: pick.share >= 0.6 ? 'high' : 'medium', reasoning: pick.share >= 0.6 ? `El ${(pick.share * 100).toFixed(0)}% de los valores son estados de México` : 'Encabezado de estado / entidad' });
+      }
+      continue;
+    }
     const candidates = normalized
       .filter(h => !used.has(h.header))
       .map(h => {
@@ -601,6 +630,7 @@ export function standardizeLoanTape(rows: any[], fileName?: string, overrides: M
       installment: installmentHeader ? parseNumber(row[installmentHeader]) : null,
       currency: get('currency') ? String(get('currency')).trim() : 'MXN',
       industry: get('industry') ? String(get('industry')).trim() : null,
+      purpose: get('purpose') ? String(get('purpose')).trim() : null,
       state: get('state') ? String(get('state')).trim() : null,
       file_date: rowFileDate,
     };

@@ -6,6 +6,7 @@ import type { StandardLoan } from './loanTapeAnalytics';
 import { activeRows, parseDate, sum, weightedAverage } from './loanTapeAnalytics';
 import type { CockpitData } from './loanTapeCockpit';
 import { AXC, type ChartKind, type ChartGrouping, type ChartSpec } from './xlsxCharts';
+import { purposeCategory } from './loanPurpose';
 import { buildEconomicGroups, type EconomicGroup, type GroupOverrides } from './economicGroups';
 import { buildMigrationMatrix, type MigrationMatrix } from './loanTapeMigration';
 import { imorBreakdown, liveLoansDetail, DPD_BUCKET_DEFS, QUALITY_DEFINITION_LINES, QUALITY_LABELS, QUALITY_RULES, RISK_THRESHOLDS, classifyDpd, reconcileQuality } from './portfolioRules';
@@ -49,6 +50,7 @@ export interface PortfolioAnalysis {
   industries: GroupRow[];
   states: GroupRow[];
   products: GroupRow[];
+  purposes: GroupRow[];   // destino del crédito agrupado (vacío si el archivo no trae la columna)
   currencies: GroupRow[];
   sizeOutstanding: Bucket[];
   sizeAmount: Bucket[];
@@ -241,6 +243,7 @@ export function analyzePortfolio(data: CockpitData, focusPeriod: string, groupOv
   const states = groupRows(rows, r => r.state || '', 11);
   const industries = groupRows(rows, r => r.industry || '', 10);
   const products = groupRows(rows, r => r.loan_type || '', 20);
+  const purposes = rows.some(r => r.purpose) ? groupRows(rows, r => purposeCategory(r.purpose), 20) : [];
   const currencies = groupRows(rows, r => r.currency || '', 6);
 
   const money = (v: number) => `$${Math.round(v).toLocaleString('es-MX')}`;
@@ -303,7 +306,7 @@ export function analyzePortfolio(data: CockpitData, focusPeriod: string, groupOv
       vencidaPct: prevQuality.find(q => q.key === 'vencida')!.pct, atrasadaPct: prevQuality.find(q => q.key === 'atrasada')!.pct,
     } : null,
     quality, dpd, clients, topN, hhi, effectiveClients: hhi > 0 ? 1 / hhi : null,
-    industries, states, products, currencies, sizeOutstanding, sizeAmount, sizeCount, rateBuckets, termBuckets, maturity,
+    industries, states, products, purposes, currencies, sizeOutstanding, sizeAmount, sizeCount, rateBuckets, termBuckets, maturity,
     originationMonthly, originationQuarterly, originationYearly, rateByDpd, coverage,
     endedWithBalance: { count: ended.length, balance: sum(ended) },
     maturing90: { count: m90.length, balance: sum(m90) },
@@ -645,6 +648,7 @@ export function buildLoanTapeReportSheets(clientName: string, selectedPeriods: s
       s.blank();
     };
     grp('POR PRODUCTO', a.products, 'Saldo por producto', AXC.deep);
+    grp('POR DESTINO DEL CRÉDITO (texto del acreditado agrupado por palabras clave; "Sin dato" = no lo capturó)', a.purposes, 'Saldo por destino del crédito', AXC.blue);
     grp('POR GIRO / INDUSTRIA (Top 10)', a.industries, 'Saldo por giro', AXC.cyan);
     grp('POR ESTADO (Top 10)', a.states, 'Saldo por estado', AXC.blue);
     if (a.currencies.length > 1) grp('POR MONEDA', a.currencies, 'Saldo por moneda', AXC.sky);
