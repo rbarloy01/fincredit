@@ -19,9 +19,10 @@ function safeParseJson(text: string, fallback: any = null) {
   }
 }
 
-export async function forwardJson(url: string, payload: unknown, headers: Record<string, string>) {
+// 280 s: por debajo del maxDuration de 300 s de las funciones de IA (los modelos gratuitos tardan en documentos).
+export async function forwardJson(url: string, payload: unknown, headers: Record<string, string>, timeoutMs = 280_000) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 58000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, {
       method: 'POST',

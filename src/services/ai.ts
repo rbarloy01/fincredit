@@ -45,7 +45,8 @@ const BYTEZ_MODEL = 'Qwen/Qwen3-4B';
 const NVIDIA_NIM_MODEL = 'mistralai/mistral-large-2-instruct';
 // NVIDIA deja de servir modelos aunque sigan en su catálogo (404 "no disponible para la cuenta") o los satura (504):
 // se prueba la cadena y se RECUERDA el que respondió con esta llave para usarlo primero la próxima vez.
-const NVIDIA_NIM_FALLBACK_MODELS = ['google/gemma-4-31b-it', 'openai/gpt-oss-20b', 'nv-mistralai/mistral-nemo-12b-instruct', 'deepseek-ai/deepseek-v4.1-flash'];
+// Gemma 4 al final para texto: con algunas cuentas gratuitas se queda en cola hasta el timeout.
+const NVIDIA_NIM_FALLBACK_MODELS = ['openai/gpt-oss-20b', 'deepseek-ai/deepseek-v4.1-flash', 'nv-mistralai/mistral-nemo-12b-instruct', 'google/gemma-4-31b-it'];
 const NIM_WORKING_MODEL_KEY = 'finmonitor_nim_working_model';
 let lastNimModel = '';
 const rememberNimModel = (model: string) => { lastNimModel = model; try { localStorage.setItem(NIM_WORKING_MODEL_KEY, model); } catch { /* sin storage */ } };
@@ -685,7 +686,8 @@ async function fetchAIWithRetry(url: string, body: unknown, retryStatuses: numbe
   let lastResponse: Response | null = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 62000);
+    // El servidor espera hasta 280 s al proveedor; el navegador un poco más para recibir su respuesta o su error.
+    const timeout = window.setTimeout(() => controller.abort(), 290_000);
     try {
       const response = await fetch(url, {
         method: 'POST',
@@ -698,7 +700,7 @@ async function fetchAIWithRetry(url: string, body: unknown, retryStatuses: numbe
       await new Promise(resolve => window.setTimeout(resolve, 1400));
     } catch (error: any) {
       if (error?.name === 'AbortError') {
-        throw new Error('La IA tardó más de 60 segundos en responder. Los modelos gratuitos se saturan seguido: intenta de nuevo o usa otro proveedor (Configuración → Motor de IA). Si estabas subiendo un documento, ya quedó guardado.');
+        throw new Error('La IA tardó más de 4 minutos en responder. Los modelos gratuitos se saturan seguido: intenta de nuevo o usa otro proveedor (Configuración → Motor de IA). Si estabas subiendo un documento, ya quedó guardado.');
       }
       if (attempt === 1) {
         throw new Error('Se perdió la conexión al recibir el análisis. Reintenta: el PDF ya se procesa en modo compacto y no necesitas volver a cargar otra API.');

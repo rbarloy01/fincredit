@@ -1,6 +1,7 @@
 import { forwardJson, readJson, requireActiveUser, sendJson } from '../../server/apiHelpers.js';
 
-export const maxDuration = 60;
+// Fluid compute (plan Hobby) permite hasta 300 s: los modelos gratuitos tardan más de 1 min en documentos.
+export const maxDuration = 300;
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' });

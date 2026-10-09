@@ -1,6 +1,7 @@
 import { forwardJson, readJson, requireActiveUser, sendJson } from '../server/apiHelpers.js';
 
-export const maxDuration = 60;
+// Fluid compute (plan Hobby) permite hasta 300 s: los modelos gratuitos tardan más de 1 min en documentos.
+export const maxDuration = 300;
 
 function openRouterRefererUrl() {
   const raw = process.env.OPENROUTER_SITE_URL || process.env.VERCEL_PROJECT_PRODUCTION_URL || 'https://finmonitor-base.vercel.app';
@@ -38,6 +39,12 @@ export default async function handler(req: any, res: any) {
       const result = await forwardJson(`${baseUrl}/chat/completions`, incoming.payload, {
         Authorization: `Bearer ${apiKey}`,
       });
+      // Diagnóstico (sin contenido ni llaves): qué modelo se pidió, qué contestó NVIDIA y si la respuesta vino vacía.
+      try {
+        const body = JSON.parse(result.text || '{}');
+        const msg = body?.choices?.[0]?.message || {};
+        console.log(`[nim] model=${(incoming.payload as any)?.model} status=${result.status} finish=${body?.choices?.[0]?.finish_reason ?? '-'} content=${String(msg.content ?? '').length} reasoning=${String(msg.reasoning_content ?? msg.reasoning ?? '').length} detail=${String(body?.detail || body?.error?.message || body?.title || '').slice(0, 120)}`);
+      } catch { console.log(`[nim] model=${(incoming.payload as any)?.model} status=${result.status} (respuesta no JSON)`); }
       res.status(result.status).setHeader('Content-Type', 'application/json');
       res.end(result.text);
       return;
