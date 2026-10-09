@@ -29,6 +29,7 @@ import { classifyBalanceSection, childrenTie, type BalanceLine } from './balance
 import { injectNativeCharts, type ChartSpec } from './xlsxCharts';
 import { buildLoanTapeReportSheets } from './loanTapeReport';
 import { buildLiabilitiesReportSheets } from './liabilitiesReport';
+import { checkHierarchy } from './statementRules';
 import { profileSourceColumns, type SourceTable } from './sourceColumns';
 import { type ComplianceLog, monthsEndingAt, monthLabel as complianceMonthLabel } from './covenantCompliance';
 import type { AssetLiabilityAnalysis } from './assetLiabilityAnalysis';
@@ -1269,7 +1270,9 @@ export interface SectionReconciliationResult {
   status: 'ok' | 'unverifiable' | 'divergence';
   excludedCount: number;
   gap: number | null;
+  label?: string;   // qué se compara cuando no es el total de la sección (p. ej. "Resultado neto vs. sus componentes")
 }
+
 
 export interface ReclassificationSuggestion {
   from: SectionReconciliationResult['section'];
@@ -1374,11 +1377,23 @@ export function computeStatementReconciliation(
     CAPITAL: bestDetail('CAPITAL'),
     'Estado de Resultados': detailFor('Estado de Resultados', name => isIncomeStatementRevenueLine(name) && !/^otr[oa]s/.test(nkey(name))),
   };
+  // Regla de negocio (statementRules.checkHierarchy): con jerarquía, el ER se valida renglón por renglón y el resultado
+  // neto contra la suma de todas sus hojas; sin jerarquía se usa la comparación de ingresos de siempre.
+  const erTree = checkHierarchy(stmt.rawLineItems || [], 'estado_resultados');
+  const erSection: SectionReconciliationResult = erTree?.top
+    ? {
+        section: 'Estado de Resultados', extractedTotal: erTree.top.reported, computedSum: erTree.top.leafSum, detailCount: erTree.leaves,
+        trustworthy: erTree.ok, status: erTree.ok ? 'ok' : 'divergence', excludedCount: 0, gap: erTree.top.gap,
+        label: erTree.failures.length
+          ? `${erTree.top.name} vs. sus componentes · no cuadra: ${erTree.failures.slice(0, 2).map(f => `${f.name} (${f.gap > 0 ? '+' : ''}${Math.round(f.gap).toLocaleString('es-MX')})`).join(', ')}`
+          : `${erTree.top.name} vs. sus componentes · ${erTree.nodesChecked} subtotales cuadran`,
+      }
+    : sectionResult('Estado de Resultados', detailBySection['Estado de Resultados'], totalRevenue);
   const sections: SectionReconciliationResult[] = [
     sectionResult('ACTIVO', detailBySection.ACTIVO, totalActivo),
     sectionResult('PASIVO', detailBySection.PASIVO, reportedPasivo ?? (totalActivo !== null && equity !== null ? totalActivo - equity : null)),
     sectionResult('CAPITAL', detailBySection.CAPITAL, equity),
-    sectionResult('Estado de Resultados', detailBySection['Estado de Resultados'], totalRevenue),
+    erSection,
   ];
 
   // Business rule: a section that is over/under its reported total is first explained by a MISPLACED ACCOUNT. When the surplus

@@ -146,7 +146,7 @@ const AuditPanel: React.FC<Props> = ({ clientId, statements, onStatementsChange 
                 <tbody>
                   {selectedReconciliation.sections.map(section => (
                     <tr key={section.section} className="border-t border-slate-100">
-                      <td className="px-4 py-3 font-black text-slate-800">{section.section}</td>
+                      <td className="px-4 py-3 font-black text-slate-800">{section.section}{section.label && <span className="block text-[10px] font-semibold text-slate-400 normal-case">{section.label}</span>}</td>
                       <td className="px-4 py-3 text-right font-mono font-black text-slate-900">{money(section.extractedTotal)}</td>
                       <td className="px-4 py-3 text-right font-mono font-black text-slate-700">{section.computedSum === null ? 'Sin detalle' : money(section.computedSum)}</td>
                       <td className={`px-4 py-3 text-right font-mono font-black ${section.status === 'ok' ? 'text-emerald-700' : section.status === 'divergence' ? 'text-rose-700' : 'text-amber-700'}`}>

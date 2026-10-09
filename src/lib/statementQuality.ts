@@ -7,6 +7,7 @@ import type { FinancialStatement_DB } from '../db/index';
 import type { StatementReconciliation } from './export';
 import { classifyAccount } from './accountClassification';
 import { getMetric } from './financialMetrics';
+import { checkHierarchy } from './statementRules';
 
 export type CheckSeverity = 'ok' | 'info' | 'warn' | 'block';
 export interface QualityCheck { id: string; label: string; severity: CheckSeverity; detail: string }
@@ -55,6 +56,31 @@ export function assessStatementQuality(stmt: StatementLike, history: StatementLi
   // A document may carry only the income statement (or only the balance): checks that need the missing half are skipped, not failed.
   const hasBalance = items.some(i => (i.statementType || 'balance_general') === 'balance_general');
   const hasIncome = items.some(i => i.statementType === 'estado_resultados');
+
+  // 0. Regla de negocio: cada subtotal / total del estado de resultados = suma de sus componentes (todos los niveles).
+  if (hasIncome) {
+    const er = checkHierarchy(stmt.rawLineItems || [], 'estado_resultados');
+    if (er?.top) {
+      if (er.ok) add('cuadre_er', 'Estado de resultados cuadra por niveles', 'ok', `${er.top.name} = suma de sus ${er.leaves} componentes; ${er.nodesChecked} subtotales cuadran.`);
+      else {
+        const worst = [...er.failures].sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap))[0];
+        const base = Math.abs(er.top.reported) || 1;
+        const severity: CheckSeverity = worst && Math.abs(worst.gap) > base * 0.05 ? 'block' : 'warn';
+        add('cuadre_er', 'Estado de resultados cuadra por niveles', severity, er.failures.length
+          ? `No cuadran: ${er.failures.slice(0, 3).map(f => `${f.name} (reportado ${money(f.reported)} vs. componentes ${money(f.childrenSum)})`).join(' · ')}`
+          : `${er.top.name}: reportado ${money(er.top.reported)} vs. suma de componentes ${money(er.top.leafSum)}.`);
+      }
+    }
+  }
+
+  if (hasBalance) {
+    const bg = checkHierarchy(stmt.rawLineItems || [], 'balance_general');
+    if (bg && bg.failures.length) {
+      add('cuadre_bg_niveles', 'Subtotales del balance cuadran', 'warn', `No cuadran: ${bg.failures.slice(0, 3).map(f => `${f.name} (reportado ${money(f.reported)} vs. componentes ${money(f.childrenSum)})`).join(' · ')}`);
+    } else if (bg) {
+      add('cuadre_bg_niveles', 'Subtotales del balance cuadran', 'ok', `${bg.nodesChecked} subtotales y totales del balance igualan la suma de sus componentes.`);
+    }
+  }
 
   // 1. Cuadre contable
   if (!hasBalance) {
