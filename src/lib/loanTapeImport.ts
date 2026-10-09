@@ -19,8 +19,9 @@ import {
   normalize,
   scoreHeaderRow,
   type DpdValidation,
+  activeRows,
 } from './loanTapeAnalytics';
-import { loanStatusFromDpd, DPD_PROXY_DAYS } from './portfolioRules';
+import { loanStatusFromDpd, DPD_PROXY_DAYS, statusDpdConflicts } from './portfolioRules';
 import { inferLoanIds } from './loanIdentity';
 
 // push(...arr) revienta la pila con cientos de miles de filas (archivos que declaran A1:…1048576).
@@ -658,7 +659,7 @@ export function importLoanTapeSheets(sheets: SheetInput[], fileName: string, opt
     messages.push(`${okSheets.length} hoja(s) leída(s) (${okSheets.map(s => s.profile).join(', ') || '—'}) · ${allStd.length} rubros de resumen · $${totalBalance.toLocaleString('es-MX', { maximumFractionDigits: 0 })}`);
     messages.push('Archivo resumido por producto/estado: se analizan saldo, mezcla y geografía; crédito, cliente y mora no se inventan.');
   } else {
-    messages.push(`${okSheets.length} hoja(s) leída(s) (${okSheets.map(s => s.profile).join(', ') || '—'}) · ${allStd.length} créditos · $${totalBalance.toLocaleString('es-MX', { maximumFractionDigits: 0 })}`);
+    messages.push(`${okSheets.length} hoja(s) leída(s) (${okSheets.map(s => s.profile).join(', ') || '—'}) · ${allStd.length} registros · $${totalBalance.toLocaleString('es-MX', { maximumFractionDigits: 0 })}`);
   }
 
   let severity: ImportReconciliation['severity'] = 'ok';
@@ -681,6 +682,26 @@ export function importLoanTapeSheets(sheets: SheetInput[], fileName: string, opt
       messages.push(`Días de atraso tomados de "${v.dpdHeader}" porque ${v.switchedFrom ? `"${v.switchedFrom}" no cuadraba` : 'ninguna columna se reconocía'} con "${v.evidenceHeader}" (validado en ${v.compared} créditos).`);
     } else {
       messages.push(`✓ Días de atraso validados contra "${v.evidenceHeader}" (${v.compared} créditos, ${pctTxt} fuera de bucket).`);
+    }
+  }
+
+  // Regla de negocio: el conteo cuadra a la vista (registros = vivos + liquidados) y se desglosa por estatus del archivo.
+  if (summary?.granularity !== 'product_summary') {
+    const live = activeRows(allStd);
+    const paid = allStd.length - live.length;
+    if (paid > 0) {
+      const paidBal = allStd.filter(r => !live.includes(r)).reduce((a, r) => a + (r.outstanding_balance || 0), 0);
+      messages.push(`${allStd.length} registros = ${live.length} créditos vivos + ${paid} liquidados (saldo $${paidBal.toLocaleString('es-MX', { maximumFractionDigits: 0 })}), que no cuentan en la cartera.`);
+    }
+    const byStatus = new Map<string, number>();
+    allStd.forEach(r => { if (r.loan_status) byStatus.set(r.loan_status, (byStatus.get(r.loan_status) || 0) + 1); });
+    if (byStatus.size > 1 && byStatus.size <= 12) {
+      messages.push(`Estatus en el archivo: ${[...byStatus.entries()].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(' · ')}.`);
+    }
+    const conflicts = statusDpdConflicts(live);
+    if (conflicts.count) {
+      if (severity === 'ok') severity = 'warning';
+      messages.push(`⚠ ${conflicts.count} créditos con estatus de castigo/incobrable (${conflicts.statuses.join(', ')}) traen menos de 90 días de atraso ($${conflicts.balance.toLocaleString('es-MX', { maximumFractionDigits: 0 })}): se clasifican por días, como dice el archivo. Confirma con el cliente si deben ir a vencida.`);
     }
   }
 

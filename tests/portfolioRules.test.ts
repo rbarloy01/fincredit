@@ -130,3 +130,17 @@ test('la regla corrige la columna de DPD cuando la elegida no cuadra con el buck
   assert.ok(res.dpdValidation);
   assert.ok(res.standardized.filter(r => (r.days_overdue || 0) > 90).length === 10, JSON.stringify(res.dpdValidation));
 });
+
+import { statusDpdConflicts } from '../src/lib/portfolioRules';
+
+test('estatus de castigo/incobrable con menos de 90 días se reporta, no se reclasifica', () => {
+  const rows: StandardLoan[] = [
+    { ...loan(1, 0, 1_000), loan_status: 'irrecoverable' },
+    { ...loan(2, 120, 2_000), loan_status: 'irrecoverable' },
+    { ...loan(3, 0, 3_000), loan_status: 'collecting' },
+  ];
+  const c = statusDpdConflicts(rows);
+  assert.equal(c.count, 1);
+  assert.equal(c.balance, 1_000);
+  assert.equal(classifyDpd(rows[0].days_overdue), 'vigente');
+});

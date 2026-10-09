@@ -225,3 +225,19 @@ export function checkDpdConsistency(pairs: Array<{ range: DpdRange | null; dpd: 
     examples,
   };
 }
+
+// ── Estatus del crédito vs. días de atraso ──────────────────────────────────────────────────────────────────────────
+// La calidad (vigente/atrasada/vencida) se mide SOLO por días (definición del usuario: vencida = 90+ días). Pero un
+// estatus de castigo/incobrable/default con menos de 90 días es una contradicción del propio archivo (Red Girasol
+// sep-26: 10 "irrecoverable" al corriente con quebrantos): no se reclasifica, se reporta para que el analista decida.
+export const WRITE_OFF_STATUS = /(irrecoverable|irrecuper|incobrable|castig|quebrant|write.?off|charged.?off|default|judicial|demanda)/;
+
+export function statusDpdConflicts(rows: StandardLoan[]): { count: number; balance: number; statuses: string[] } {
+  const norm = (v: unknown) => String(v ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const hits = rows.filter(r => WRITE_OFF_STATUS.test(norm(r.loan_status)) && classifyDpd(r.days_overdue) !== 'vencida' && classifyDpd(r.days_overdue) !== 'sin_dato');
+  return {
+    count: hits.length,
+    balance: hits.reduce((a, r) => a + (r.outstanding_balance || 0), 0),
+    statuses: [...new Set(hits.map(r => String(r.loan_status)))],
+  };
+}

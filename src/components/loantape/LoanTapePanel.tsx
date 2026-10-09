@@ -9,7 +9,7 @@ import {
   FileText, Bot, Plus, LayoutDashboard,
 } from 'lucide-react';
 import { assessLoanTapeImport, formatDuration } from '../../lib/statementQuality';
-import { analyzeLoanTapesLocally, answerLoanTapeQuestion, buildLoanTapeDataProfile, loanTapePeriodDate, standardizeLoanTape, storedAnalysisFor } from '../../lib/loanTapeAnalytics';
+import { activeRows, analyzeLoanTapesLocally, answerLoanTapeQuestion, buildLoanTapeDataProfile, loanTapePeriodDate, standardizeLoanTape, storedAnalysisFor } from '../../lib/loanTapeAnalytics';
 import {
   createLoanTapeWorkspaceBlock,
   LoanTapeAnalystState,
@@ -675,7 +675,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                     }`}>{tape.tapeType.toUpperCase()}</span>
                   </div>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Corte {fmtDate(periodDate)} · subido {fmtDate(tape.uploadDate)} · {rawFileOnly ? 'archivo guardado sin filas analíticas' : `${rows.length} registros`}
+                    Corte {fmtDate(periodDate)} · subido {fmtDate(tape.uploadDate)} · {rawFileOnly ? 'archivo guardado sin filas analíticas' : (() => { const std = Array.isArray(data?._standardized) ? data._standardized : []; const live = std.length ? activeRows(std).length : rows.length; return live < std.length ? `${std.length} registros · ${live} créditos vivos · ${std.length - live} liquidados` : `${rows.length} registros`; })()}
                   </p>
 	                  {imp && (
 	                    <p className={`text-[11px] font-bold mt-0.5 truncate ${imp.severity === 'blocker' && rows.length === 0 ? 'text-rose-600' : imp.severity === 'blocker' || imp.severity === 'warning' ? 'text-amber-600' : 'text-emerald-600'}`}
