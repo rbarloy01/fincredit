@@ -1812,14 +1812,20 @@ export const db = {
   // extracted_data (its _analysis feeds monitor/report). Avoids pulling every tape's
   // MB-scale JSON on client open — the Loan Tape tab still loads full tapes on demand.
   async getLoanTapesForDetail(clientId: string): Promise<LoanTape_DB[]> {
+    // Metadatos de todos los tapes + su fecha de corte (sin el JSON pesado); los DOS cortes más recientes se traen
+    // completos (Underwriting / reporte usan el corte actual y lo comparan contra el anterior). Antes se traía el
+    // último archivo SUBIDO, que no siempre es el corte más reciente → Underwriting quedaba vacío.
     const { data, error } = await supabase.from('loan_tapes')
-      .select('id,client_id,name,upload_date,file_name,tape_type')
+      .select('id,client_id,name,upload_date,file_name,tape_type,cutoff:extracted_data->_standardized->0->>file_date')
       .eq('client_id', clientId).order('upload_date', { ascending: false });
     if (error) err('getLoanTapesForDetail', error);
-    const metas = (data || []).map(toLoanTape);
+    const metas = (data || []).map((r: any) => ({ ...toLoanTape(r), extractedData: r.cutoff ? { _cutoff: r.cutoff } : null }));
     if (metas.length === 0) return metas;
-    const { data: full } = await supabase.from('loan_tapes').select('*').eq('id', metas[0].id).maybeSingle();
-    return full ? [toLoanTape(full), ...metas.slice(1)] : metas;
+    const byCutoff = [...metas].sort((a, b) => String(b.extractedData?._cutoff || b.uploadDate).localeCompare(String(a.extractedData?._cutoff || a.uploadDate)));
+    const fullIds = byCutoff.slice(0, 2).map(t => t.id);
+    const { data: full } = await supabase.from('loan_tapes').select('*').in('id', fullIds);
+    const fullById = new Map((full || []).map((r: any) => [r.id, toLoanTape(r)]));
+    return metas.map(t => fullById.get(t.id) || t);
   },
 
   async getLoanTapesForClients(clientIds: string[]): Promise<Record<string, LoanTape_DB[]>> {

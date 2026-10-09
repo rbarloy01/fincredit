@@ -178,7 +178,7 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
   const insights = useMemo(() => buildLiabilitiesInsights(liabilities), [liabilities]);
   // Activo vs. pasivo: último corte del loan tape contra el fondeo institucional.
   const assetLiability = useMemo(() => {
-    const tapes = loanTapes.filter(t => t.extractedData);
+    const tapes = loanTapes.filter(t => Array.isArray(t.extractedData?._standardized));
     if (!tapes.length || !liabilities.length) return null;
     try {
       const data = buildCockpitData(tapes);

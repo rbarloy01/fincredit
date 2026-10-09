@@ -290,6 +290,7 @@ export function loanTapeFileDates(tape: Pick<LoanTapePeriodInput, 'extractedData
       ? data.rows
       : [];
   const dates = Array.from(new Set(rows.map((row: any) => row?.file_date).filter(Boolean) as string[])).sort();
+  if (!dates.length && typeof data?._cutoff === 'string' && data._cutoff) return [data._cutoff];   // tape ligero (solo metadatos)
   const fromName = parseFileDate(tape.fileName);
   return dates.length ? dates : fromName ? [fromName] : [];
 }
@@ -1333,8 +1334,9 @@ function withThresholds<T extends { name: string; contractLimit?: string }>(metr
 const contextAnalysisCache = new WeakMap<object, Map<string, StructuredLoanTapeAnalysis>>();
 export function storedAnalysisFor(tape: LoanTape_DB | null | undefined, context: LoanTape_DB[] = []): StructuredLoanTapeAnalysis | null {
   const stored = tape?.extractedData?._analysis as StructuredLoanTapeAnalysis | undefined;
-  if (!tape || !stored) return null;
-  if (!Array.isArray(tape.extractedData?._standardized)) return stored;
+  if (!tape) return null;
+  // Sin análisis guardado (nadie presionó "Analizar") igual se calcula: los datos estandarizados bastan.
+  if (!Array.isArray(tape.extractedData?._standardized)) return stored || null;
   const key = tape.extractedData as object;
   const peers = context.filter(t => t.id !== tape.id && Array.isArray(t.extractedData?._standardized));
   const ctxKey = peers.map(t => `${t.id}:${t.extractedData?._standardized?.length}`).sort().join('|');
@@ -1344,7 +1346,7 @@ export function storedAnalysisFor(tape: LoanTape_DB | null | undefined, context:
   if (hit) return hit;
   const fresh = analyzeLoanTapesLocally([tape, ...peers], tape.id);
   // Todo número y texto sale del cálculo vigente (executiveSummary y findings incluidos); solo se conserva lo que no se calcula local.
-  const merged: StructuredLoanTapeAnalysis = { ...fresh, congruencyChecks: stored.congruencyChecks?.length ? stored.congruencyChecks : fresh.congruencyChecks };
+  const merged: StructuredLoanTapeAnalysis = { ...fresh, congruencyChecks: stored?.congruencyChecks?.length ? stored.congruencyChecks : fresh.congruencyChecks };
   byCtx.set(ctxKey, merged);
   return merged;
 }
