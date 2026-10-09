@@ -40,10 +40,12 @@ const RETIRED_OPENROUTER_MODELS = new Set(['stealth/ox-alpha']);
 const OPENROUTER_VISION_MODELS = ['google/gemma-4-31b-it:free', 'thinkingmachines/inkling:free', 'openrouter/free'];
 const VISION_CAPABLE = /gemini|gpt-4|gpt-5|claude|gemma-4|inkling|dots-3|omni|vision|-vl|qwen.*vl|pixtral|llama-4|openrouter\/free|openrouter\/auto/i;
 const BYTEZ_MODEL = 'Qwen/Qwen3-4B';
-const NVIDIA_NIM_MODEL = 'deepseek-ai/deepseek-v4.1-flash';
-// NVIDIA deja de servir modelos aunque sigan en su catálogo (404 "not found for account"): se prueba la cadena vigente.
-const NVIDIA_NIM_FALLBACK_MODELS = ['nvidia/nemotron-3-super-120b-a12b', 'mistralai/mistral-large-2-instruct', 'openai/gpt-oss-20b'];
-const RETIRED_NIM_MODELS = new Set(['nvidia/llama-3.1-nemotron-70b-instruct']);
+// Modelo sin "razonamiento": en el plan gratuito de NVIDIA los modelos que piensan antes de responder (DeepSeek,
+// Nemotron 3) tardan más de lo que espera el proxy (58 s) incluso para un "OK".
+const NVIDIA_NIM_MODEL = 'mistralai/mistral-large-2-instruct';
+// NVIDIA deja de servir modelos aunque sigan en su catálogo (404) o los satura (504): se prueba la cadena vigente.
+const NVIDIA_NIM_FALLBACK_MODELS = ['nv-mistralai/mistral-nemo-12b-instruct', 'openai/gpt-oss-20b', 'deepseek-ai/deepseek-v4.1-flash'];
+const RETIRED_NIM_MODELS = new Set(['nvidia/llama-3.1-nemotron-70b-instruct', 'deepseek-ai/deepseek-v4.1-flash']);
 // NVIDIA NIM hosts free vision models (checked against its public catalog). Used automatically when the request has images.
 const NVIDIA_NIM_VISION_MODEL = 'google/gemma-4-31b-it';
 const NVIDIA_NIM_VISION_FALLBACKS = ['meta/llama-3.2-90b-vision-instruct', 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning'];
@@ -477,12 +479,12 @@ async function callAIResilient(settings: AISettings, systemPrompt: string, userP
 
 // chat = respuesta conversacional del asistente: texto normal (no JSON), salida corta y ruteo por latencia.
 // La extracción de documentos sigue en modo JSON con salida larga.
-interface CallOptions { chat?: boolean }
+interface CallOptions { chat?: boolean; maxTokens?: number }
 const CHAT_MAX_TOKENS = 2048;
 
 async function callAI(settings: AISettings, systemPrompt: string, userPrompt: string, media?: AIMedia | AIMedia[], opts: CallOptions = {}): Promise<string> {
   const { provider, apiKey } = settings;
-  const maxTokens = opts.chat ? CHAT_MAX_TOKENS : 8192;
+  const maxTokens = opts.maxTokens ?? (opts.chat ? CHAT_MAX_TOKENS : 8192);
   const mediaItems = media ? (Array.isArray(media) ? media : [media]).filter(item => item.base64 && item.mimeType) : [];
 
   if (provider === 'gemini') {
@@ -610,11 +612,11 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
           temperature: 0,
           max_tokens: maxTokens,
         };
-        const nimRes = await fetchAIWithRetry('/api/bytez', { provider, apiKey, payload: nimPayload });
+        const nimRes = await fetchAIWithRetry('/api/bytez', { provider, apiKey, payload: nimPayload }, [429, 502, 503]);
         const nimData = await readAIResponseJson(nimRes, 'NVIDIA NIM');
         if (nimRes.ok) return nimData.choices?.[0]?.message?.content || '';
         lastVisionError = String(nimData.error?.message || nimData.detail || nimData.title || nimData.error || `NVIDIA NIM error ${nimRes.status}`);
-        if (nimRes.status !== 404) throw new Error(nimRes.status === 401 || nimRes.status === 403 ? `NVIDIA NIM rechazó la llave (${nimRes.status}): revisa que sea una llave nvapi- vigente. ${lastVisionError}` : lastVisionError);
+        if (nimRes.status !== 404 && nimRes.status !== 504) throw new Error(nimRes.status === 401 || nimRes.status === 403 ? `NVIDIA NIM rechazó la llave (${nimRes.status}): revisa que sea una llave nvapi- vigente. ${lastVisionError}` : lastVisionError);
       }
       throw new Error(`NVIDIA NIM: ningún modelo de visión disponible para esta cuenta (${visionModels.join(', ')}). ${lastVisionError}`);
     }
@@ -633,16 +635,17 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
         temperature: 0,
         max_tokens: maxTokens,
       };
-      const res = await fetchAIWithRetry('/api/bytez', { provider, apiKey, payload });
+      // NVIDIA: si un modelo no contesta a tiempo (504) se pasa al siguiente en vez de reintentar el mismo.
+      const res = await fetchAIWithRetry('/api/bytez', { provider, apiKey, payload }, provider === 'nvidia_nim' ? [429, 502, 503] : undefined);
       const data = await readAIResponseJson(res, provider === 'bytez' ? 'Bytez' : 'NVIDIA NIM');
       if (res.ok) return data.choices?.[0]?.message?.content || '';
       const detail = String(data.error?.message || data.detail || data.title || data.error || `${provider} error ${res.status}`);
       lastError = detail;
-      // Solo un modelo no disponible (404) amerita probar el siguiente; llave inválida (401/403) o límite (429) no.
-      if (provider !== 'nvidia_nim' || res.status !== 404) {
+      // Modelo no disponible (404) o que no respondió a tiempo (504) → siguiente modelo; llave inválida (401/403) o límite (429) no.
+      if (provider !== 'nvidia_nim' || (res.status !== 404 && res.status !== 504)) {
         throw new Error(res.status === 401 || res.status === 403 ? `NVIDIA NIM rechazó la llave (${res.status}): revisa que sea una llave nvapi- vigente. ${detail}` : detail);
       }
-      console.warn(`NVIDIA NIM: el modelo ${model} no está disponible para esta cuenta (404); probando el siguiente.`);
+      console.warn(`NVIDIA NIM: el modelo ${model} no respondió (${res.status}); probando el siguiente.`);
     }
     throw new Error(`NVIDIA NIM: ningún modelo disponible para esta cuenta (${models.join(', ')}). ${lastError}`);
   }
@@ -663,7 +666,7 @@ async function readAIResponseJson(response: Response, provider: string) {
   }
 }
 
-async function fetchAIWithRetry(url: string, body: unknown): Promise<Response> {
+async function fetchAIWithRetry(url: string, body: unknown, retryStatuses: number[] = [429, 502, 503, 504]): Promise<Response> {
   const { data: { session } } = await supabase.auth.getSession();
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (session?.access_token) headers.Authorization = `Bearer ${session.access_token}`;
@@ -679,7 +682,7 @@ async function fetchAIWithRetry(url: string, body: unknown): Promise<Response> {
         signal: controller.signal,
       });
       lastResponse = response;
-      if (![429, 502, 503, 504].includes(response.status) || attempt === 1) return response;
+      if (!retryStatuses.includes(response.status) || attempt === 1) return response;
       await new Promise(resolve => window.setTimeout(resolve, 1400));
     } catch (error: any) {
       if (error?.name === 'AbortError') {
@@ -1282,7 +1285,8 @@ Devuelve:
 // ─── Test connection ──────────────────────────────────────────────────────────
 
 export async function testConnection(settings: AISettings): Promise<string> {
-  const text = await callAI(settings, 'Responde únicamente con: OK', 'Di "OK"');
+  // Respuesta mínima: con 8,000 tokens de margen un modelo que razona puede tardar más de un minuto en decir "OK".
+  const text = await callAI(settings, 'Responde únicamente con: OK', 'Di "OK"', undefined, { chat: true, maxTokens: 32 });
   return text.trim();
 }
 
