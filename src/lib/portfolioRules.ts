@@ -249,3 +249,64 @@ export function liveLoansDetail(registros: number, vivos: number): string {
   const liquidados = registros - vivos;
   return liquidados > 0 ? `${registros.toLocaleString('es-MX')} registros − ${liquidados.toLocaleString('es-MX')} liquidados` : `${registros.toLocaleString('es-MX')} registros en el archivo`;
 }
+
+// ── IMOR (índice de morosidad) por antigüedad ───────────────────────────────────────────────────────────────────────
+// Definición tomada de los archivos IMOR de Red Girasol (2026): antigüedad = INT((corte − originación) / 30) meses;
+// segmentos "<16 meses" / "16-35 meses" / "36+ meses". Dos índices, ambos sobre saldo:
+//   IMOR 90+ = saldo con 90+ días de atraso (vencida) ÷ saldo del segmento
+//   IMOR 30+ = saldo con más de 30 días (atrasada + vencida) ÷ saldo del segmento
+export const IMOR_SEGMENTS = [
+  { key: 'lt16', label: '<16 meses', min: 0, max: 15 },
+  { key: 'm16_35', label: '16-35 meses', min: 16, max: 35 },
+  { key: 'm36', label: '36+ meses', min: 36, max: Infinity },
+] as const;
+
+export function loanAgeMonths(startDate: string | null | undefined, cutoff: string | null | undefined): number | null {
+  if (!startDate || !cutoff) return null;
+  const s = Date.parse(startDate); const c = Date.parse(cutoff);
+  if (!Number.isFinite(s) || !Number.isFinite(c)) return null;
+  // Días COMPLETOS transcurridos: las originaciones traen hora (11:31 am) y el corte es a las 0:00, así que el Excel
+  // de los reportes IMOR, INT((corte − originación)/30), cuenta un día menos que la resta de fechas sin hora.
+  const days = Math.round((c - s) / 86400000);
+  return Math.max(0, Math.floor((days - 1) / 30));
+}
+
+export interface ImorRow {
+  label: string;
+  count: number;
+  balance: number;
+  vencida90: number;   // saldo 90+
+  atrasada30: number;  // saldo >30 (atrasada + vencida)
+  imor90: number | null;
+  imor30: number | null;
+  imor90Count: number | null;
+  imor30Count: number | null;
+}
+
+function imorOf(label: string, rows: StandardLoan[]): ImorRow {
+  const balance = rows.reduce((a, r) => a + bal(r), 0);
+  const v = rows.filter(r => classifyDpd(r.days_overdue) === 'vencida');
+  const l = rows.filter(r => { const q = classifyDpd(r.days_overdue); return q === 'vencida' || q === 'atrasada'; });
+  const vencida90 = v.reduce((a, r) => a + bal(r), 0);
+  const atrasada30 = l.reduce((a, r) => a + bal(r), 0);
+  return {
+    label, count: rows.length, balance, vencida90, atrasada30,
+    imor90: balance > 0 ? vencida90 / balance : null,
+    imor30: balance > 0 ? atrasada30 / balance : null,
+    imor90Count: rows.length ? v.length / rows.length : null,
+    imor30Count: rows.length ? l.length / rows.length : null,
+  };
+}
+
+// Total + un renglón por segmento de antigüedad (+ "Sin fecha de originación" si aplica, para que nada se pierda).
+export function imorBreakdown(rows: StandardLoan[]): ImorRow[] {
+  const withDpd = rows.filter(r => classifyDpd(r.days_overdue) !== 'sin_dato');
+  const out: ImorRow[] = [imorOf('Total cartera', withDpd)];
+  IMOR_SEGMENTS.forEach(seg => out.push(imorOf(seg.label, withDpd.filter(r => {
+    const m = loanAgeMonths(r.start_date, r.file_date);
+    return m !== null && m >= seg.min && m <= seg.max;
+  }))));
+  const noDate = withDpd.filter(r => loanAgeMonths(r.start_date, r.file_date) === null);
+  if (noDate.length) out.push(imorOf('Sin fecha de originación', noDate));
+  return out;
+}

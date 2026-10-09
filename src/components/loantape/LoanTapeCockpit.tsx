@@ -12,7 +12,7 @@ import {
 import { loadExportModule } from '../../lib/exportLoader';
 import { reserveDownloadTarget } from '../../lib/browserDownload';
 import { analyzePortfolio, buildLoanTapeInsights, type Insight } from '../../lib/loanTapeReport';
-import { liveLoansDetail, QUALITY_RULES } from '../../lib/portfolioRules';
+import { imorBreakdown, liveLoansDetail, QUALITY_RULES } from '../../lib/portfolioRules';
 import ChartCard from './ChartCard';
 import LoanTapePortfolioCharts from './LoanTapePortfolioCharts';
 
@@ -169,6 +169,12 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
     if (tapeClientId) void db.setClientSetting(tapeClientId, 'loan_tape_group_overrides', next);
   };
   const portfolio = useMemo(() => analyzePortfolio(data, focusPoint.period, groupOverrides), [data, focusPoint.period, groupOverrides]);
+  const imor = useMemo(() => (portfolio && !portfolio.isSummary ? imorBreakdown(portfolio.rows) : []), [portfolio]);
+  const prevImor = useMemo(() => {
+    if (!prevPoint) return [];
+    const prev = analyzePortfolio(data, prevPoint.period, groupOverrides);
+    return prev && !prev.isSummary ? imorBreakdown(prev.rows) : [];
+  }, [data, prevPoint?.period, groupOverrides]); // eslint-disable-line react-hooks/exhaustive-deps
   const insights = useMemo(() => (portfolio ? buildLoanTapeInsights(portfolio, data, (snapFocus as any)?.anomalies) : []), [portfolio, data, snapFocus]);
   const insightGroups = useMemo(() => {
     const groups = new Map<string, Insight[]>();
@@ -322,6 +328,41 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
                 </ul>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* IMOR por antigüedad (definición de los reportes IMOR: antigüedad = (corte − originación) / 30) */}
+      {imor.length > 0 && (
+        <div className="bg-white border border-slate-200 rounded-2xl p-5">
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+            <p className="text-xs font-black text-slate-700 uppercase tracking-widest">IMOR por antigüedad — {focusPoint.label}</p>
+            <p className="text-[11px] font-semibold text-slate-400">IMOR 90+ = saldo con {QUALITY_RULES.atrasadaMaxDpd + 1}+ días ÷ saldo · IMOR 30+ = saldo con más de {QUALITY_RULES.vigenteMaxDpd} días ÷ saldo{prevPoint ? ` · vs. ${prevPoint.label}` : ''}</p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead><tr className="text-slate-500 text-left"><th className="py-1.5 pr-3 font-black">Antigüedad</th><th className="py-1.5 px-2 font-black text-right">Créditos</th><th className="py-1.5 px-2 font-black text-right">Saldo</th><th className="py-1.5 px-2 font-black text-right">IMOR 90+</th><th className="py-1.5 px-2 font-black text-right">IMOR 30+</th></tr></thead>
+              <tbody>
+                {imor.map(r => {
+                  const p = prevImor.find(x => x.label === r.label);
+                  const cell = (v: number | null, pv: number | null | undefined) => (
+                    <td className="py-1.5 px-2 text-right font-mono">
+                      <span className="font-black text-slate-900">{v === null ? 'N/D' : pctS(v)}</span>
+                      {v !== null && pv !== null && pv !== undefined && <span className={`ml-1.5 text-[10px] font-bold ${v - pv > 1e-9 ? 'text-rose-600' : v - pv < -1e-9 ? 'text-emerald-600' : 'text-slate-400'}`}>{v - pv >= 0 ? '+' : ''}{((v - pv) * 100).toFixed(1)}pp</span>}
+                    </td>
+                  );
+                  return (
+                    <tr key={r.label} className={`border-t border-slate-100 ${r.label === 'Total cartera' ? 'font-black bg-slate-50' : ''}`}>
+                      <td className="py-1.5 pr-3 font-bold text-slate-700">{r.label}</td>
+                      <td className="py-1.5 px-2 text-right font-mono">{r.count}</td>
+                      <td className="py-1.5 px-2 text-right font-mono">{moneyM(r.balance)}</td>
+                      {cell(r.imor90, p?.imor90)}
+                      {cell(r.imor30, p?.imor30)}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         </div>
       )}

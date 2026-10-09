@@ -1,5 +1,5 @@
 import { LoanTape_DB } from '../db/index';
-import { liveLoansDetail, DPD_BUCKET_DEFS, DPD_CONSISTENCY, QUALITY_RULES, RISK_THRESHOLDS, checkDpdConsistency, classifyDpd, dpdRangeFromText, isStrongDpdText, resolveDpd, type DpdConsistency, type DpdSource } from './portfolioRules';
+import { imorBreakdown, liveLoansDetail, DPD_BUCKET_DEFS, DPD_CONSISTENCY, QUALITY_RULES, RISK_THRESHOLDS, checkDpdConsistency, classifyDpd, dpdRangeFromText, isStrongDpdText, resolveDpd, type DpdConsistency, type DpdSource } from './portfolioRules';
 import { StructuredLoanTapeAnalysis } from '../services/ai';
 import { parseNullableFinancialNumber } from './numberParsing';
 
@@ -604,11 +604,9 @@ export function standardizeLoanTape(rows: any[], fileName?: string, overrides: M
       state: get('state') ? String(get('state')).trim() : null,
       file_date: rowFileDate,
     };
-  }).filter(row => [
-    row.loan_id, row.client, row.amount, row.outstanding_balance, row.interest_rate,
-    row.loan_status, row.start_date, row.end_date, row.loan_type, row.days_overdue,
-    row.industry, row.state, row.file_date,
-  ].some(v => v !== null && v !== undefined && v !== ''));
+  // Un renglón es crédito solo si trae algo que lo identifique o lo mida (ID, cliente, monto o saldo). Fórmulas
+  // copiadas hacia abajo ("Meses", "Segmentación") dejaban filas fantasma que heredaban la fecha del nombre del archivo.
+  }).filter(row => [row.loan_id, row.client, row.amount, row.outstanding_balance].some(v => v !== null && v !== undefined && v !== ''));
 
   return { standardized, mappingReport: notes, dpdValidation };
 }
@@ -1253,7 +1251,7 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
       { name: 'Concentracion Top 10 creditos', latestValue: top10Pct === null ? 'N/D' : fmtPct(top10Pct), previousValue: previousRows.length && top10Pct !== null ? fmtPct(previousTop10Pct) : undefined, change: top10Pct === null ? undefined : fmtChange(top10Pct, previousTop10Pct, 'pct'), trend: top10Pct === null ? 'stable' : trend(top10Pct, previousTop10Pct, true), status: top10Pct !== null && top10Pct > RISK_THRESHOLDS.top10Alert ? 'critical' : top10Pct !== null && top10Pct > RISK_THRESHOLDS.top10Warn ? 'warning' : 'good', congruent: true },
       { name: 'DPD ponderado por saldo', latestValue: weightedDpd === null ? 'N/D' : `${weightedDpd.toFixed(1)} dias`, previousValue: previousWeightedDpd === null ? undefined : `${previousWeightedDpd.toFixed(1)} dias`, change: weightedDpd !== null && previousWeightedDpd !== null ? fmtChange(weightedDpd, previousWeightedDpd, 'number') : undefined, trend: weightedDpd !== null && previousWeightedDpd !== null ? trend(weightedDpd, previousWeightedDpd, true) : 'stable', status: weightedDpd !== null && weightedDpd > RISK_THRESHOLDS.waDpdAlert ? 'critical' : weightedDpd !== null && weightedDpd > RISK_THRESHOLDS.waDpdWarn ? 'warning' : 'good', congruent: true },
       { name: 'Tasa ponderada por saldo', latestValue: weightedRate === null ? 'N/D' : fmtPct(weightedRate), previousValue: previousWeightedRate === null ? undefined : fmtPct(previousWeightedRate), change: weightedRate !== null && previousWeightedRate !== null ? `${weightedRate - previousWeightedRate >= 0 ? '+' : ''}${((weightedRate - previousWeightedRate) * 100).toFixed(1)} pp` : undefined, trend: weightedRate !== null && previousWeightedRate !== null ? trend(weightedRate, previousWeightedRate) : 'stable', status: 'good', congruent: true },
-    ]),
+    ].concat(latestIsSummary ? [] : imorMetricRows(latest, previousRows))),
     findings,
     congruencyChecks: [],
   };
@@ -1263,6 +1261,28 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
 // Analyses saved before a business-rule change keep the old classification inside `_analysis`. Whenever a saved analysis
 // is read, its quality/risk fields are refreshed from the standardized rows with the CURRENT rules (portfolioRules), so
 // no screen can show a stale "vigente". The summary text and findings are regenerated too, so no stale percentage survives.
+// IMOR 90+ / 30+ total y por antigüedad (<16, 16-35, 36+ meses) contra el corte anterior.
+function imorMetricRows(latest: StandardLoan[], previous: StandardLoan[]) {
+  const cur = imorBreakdown(latest);
+  const prev = previous.length ? imorBreakdown(previous) : [];
+  const rows: any[] = [];
+  cur.filter(r => r.label !== 'Sin fecha de originación').forEach(r => {
+    const p = prev.find(x => x.label === r.label);
+    (['imor90', 'imor30'] as const).forEach(k => {
+      const v = r[k]; const pv = p ? p[k] : null;
+      const name = `${k === 'imor90' ? 'IMOR 90+' : 'IMOR 30+'} · ${r.label === 'Total cartera' ? 'total' : r.label}`;
+      rows.push({
+        name, latestValue: v === null ? 'N/D' : fmtPct(v), previousValue: pv === null || pv === undefined ? undefined : fmtPct(pv),
+        change: v !== null && pv !== null && pv !== undefined ? fmtChange(v, pv, 'pct') : undefined,
+        trend: v !== null && pv !== null && pv !== undefined ? trend(v, pv, true) : 'stable',
+        status: v === null ? 'neutral' : k === 'imor90' ? (v > RISK_THRESHOLDS.vencidaAlert ? 'critical' : v >= RISK_THRESHOLDS.vencidaWarn ? 'warning' : 'good') : (v > RISK_THRESHOLDS.atrasadaWarn ? 'warning' : 'good'),
+        congruent: true,
+      });
+    });
+  });
+  return rows;
+}
+
 // "Umbral de alerta" de cada métrica: sale de portfolioRules (no hay límite contractual capturado por métrica).
 const pctTxt = (v: number) => `${(v * 100).toLocaleString('es-MX', { maximumFractionDigits: 1 })}%`;
 const METRIC_THRESHOLDS: Record<string, string> = {
@@ -1273,7 +1293,9 @@ const METRIC_THRESHOLDS: Record<string, string> = {
   'DPD ponderado por saldo': `Atención >${RISK_THRESHOLDS.waDpdWarn} días · Alerta >${RISK_THRESHOLDS.waDpdAlert} días`,
 };
 function withThresholds<T extends { name: string; contractLimit?: string }>(metrics: T[]): T[] {
-  return metrics.map(m => (METRIC_THRESHOLDS[m.name] ? { ...m, contractLimit: METRIC_THRESHOLDS[m.name] } : m));
+  const byName = (name: string) => METRIC_THRESHOLDS[name]
+    || (name.startsWith('IMOR 90+') ? METRIC_THRESHOLDS['% cartera vencida'] : name.startsWith('IMOR 30+') ? `Atención >${pctTxt(RISK_THRESHOLDS.atrasadaWarn)}` : undefined);
+  return metrics.map(m => (byName(m.name) ? { ...m, contractLimit: byName(m.name) } : m));
 }
 
 // La tabla de métricas compara contra el corte inmediato anterior: por eso se calcula con TODOS los tapes del

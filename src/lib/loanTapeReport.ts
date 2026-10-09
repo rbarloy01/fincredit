@@ -8,7 +8,7 @@ import type { CockpitData } from './loanTapeCockpit';
 import { AXC, type ChartKind, type ChartGrouping, type ChartSpec } from './xlsxCharts';
 import { buildEconomicGroups, type EconomicGroup, type GroupOverrides } from './economicGroups';
 import { buildMigrationMatrix, type MigrationMatrix } from './loanTapeMigration';
-import { liveLoansDetail, DPD_BUCKET_DEFS, QUALITY_DEFINITION_LINES, QUALITY_LABELS, QUALITY_RULES, RISK_THRESHOLDS, classifyDpd, reconcileQuality } from './portfolioRules';
+import { imorBreakdown, liveLoansDetail, DPD_BUCKET_DEFS, QUALITY_DEFINITION_LINES, QUALITY_LABELS, QUALITY_RULES, RISK_THRESHOLDS, classifyDpd, reconcileQuality } from './portfolioRules';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -462,7 +462,7 @@ export class SheetBuilder {
   }
   // formulas: sum = columnas cuyo TOTAL es =SUM; pct = [col, colBase] → col = base/total (o /baseRef si se da);
   // cum = [col, colBase] → % acumulado. Cada fórmula lleva su valor calculado como respaldo para visores sin Excel.
-  table(title: string, headers: string[], raw: any[][], fmts: ColFmt[], total?: any[], formulas?: { sum?: number[]; pct?: Array<[number, number]>; cum?: Array<[number, number]>; baseRef?: string }): TableRef {
+  table(title: string, headers: string[], raw: any[][], fmts: ColFmt[], total?: any[], formulas?: { sum?: number[]; pct?: Array<[number, number]>; cum?: Array<[number, number]>; ratio?: Array<[number, number, number]>; baseRef?: string }): TableRef {
     const sub = this.next;
     this.sub(title);
     const header = this.next;
@@ -473,6 +473,11 @@ export class SheetBuilder {
     const L = (c: number) => colLetter(c + 1);
     const wrap = (r: any[], rowNum: number | null) => r.map((c, i) => {
       const fmt = fmts[i] ? FMT[fmts[i]!] : null;
+      const ratio = formulas?.ratio?.find(([col]) => col === i);
+      if (ratio && typeof c === 'number' && raw.length) {
+        const rr = rowNum ?? totalRow;
+        if (rr) return { __fmtNum: true as const, raw: `=IFERROR(${L(ratio[1])}${rr}/${L(ratio[2])}${rr},0)`, fmt: fmt || FMT.pct, result: c };
+      }
       if (formulas && rowNum !== null && raw.length) {
         const pct = formulas.pct?.find(([col]) => col === i);
         if (pct && typeof c === 'number') {
@@ -681,6 +686,35 @@ export function buildLoanTapeReportSheets(clientName: string, selectedPeriods: s
     }
     if (data.watchlist.length) {
       s.table('WATCHLIST — VENCIDOS CRÓNICOS (90+ DPD en 2+ cortes)', ['Crédito', 'Cliente', 'Cortes vencido', 'Máx DPD', 'Saldo actual'], data.watchlist.map(w => [w.loan_id, w.client, w.monthsOverdue, w.maxDpd, w.saldoActual]), [undefined, undefined, 'int', 'int', 'money']);
+    }
+    sheets.push(s.done({ freezeRows: 0 }));
+  }
+
+  // 4b — IMOR por antigüedad -------------------------------------------------------
+  if (!a.isSummary) {
+    const s = new SheetBuilder('IMOR', [26, 12, 18, 18, 18, 12, 12], AXC.red);
+    s.title(`IMOR POR ANTIGÜEDAD — ${a.focusLabel}`);
+    s.text(`Antigüedad = (corte − originación) ÷ 30 en meses. IMOR 90+ = saldo con ${QUALITY_RULES.atrasadaMaxDpd + 1}+ días ÷ saldo; IMOR 30+ = saldo con más de ${QUALITY_RULES.vigenteMaxDpd} días (atrasada + vencida) ÷ saldo. Los IMOR son fórmulas.`);
+    s.blank();
+    const ib = imorBreakdown(a.rows);
+    s.table('IMOR DEL CORTE', ['Segmento', 'Créditos', 'Saldo', 'Saldo 90+ días', `Saldo >${QUALITY_RULES.vigenteMaxDpd} días`, 'IMOR 90+', 'IMOR 30+'],
+      ib.map(r => [r.label, r.count, r.balance, r.vencida90, r.atrasada30, r.imor90, r.imor30]), [undefined, 'int', 'money', 'money', 'money', 'pct2', 'pct2'],
+      undefined, { ratio: [[5, 3, 2], [6, 4, 2]] });
+    s.blank();
+    const periodsSel = data.series.filter(p => selSet.has(p.period) && !p.isSummary);
+    if (periodsSel.length) {
+      const live = activeRows(data.allRows);
+      const evo = periodsSel.map(p => {
+        const b = imorBreakdown(live.filter(r => r.file_date === p.period));
+        const get = (label: string, k: 'imor90' | 'imor30') => b.find(x => x.label === label)?.[k] ?? null;
+        return [p.label, get('Total cartera', 'imor90'), get('Total cartera', 'imor30'),
+          get('<16 meses', 'imor90'), get('16-35 meses', 'imor90'), get('36+ meses', 'imor90'),
+          get('<16 meses', 'imor30'), get('16-35 meses', 'imor30'), get('36+ meses', 'imor30')];
+      });
+      const et = s.table('EVOLUCIÓN DEL IMOR', ['Corte', 'IMOR 90+', 'IMOR 30+', '90+ <16m', '90+ 16-35m', '90+ 36+m', '30+ <16m', '30+ 16-35m', '30+ 36+m'], evo,
+        [undefined, 'pct2', 'pct2', 'pct2', 'pct2', 'pct2', 'pct2', 'pct2', 'pct2']);
+      s.chart(et, { title: 'IMOR 90+ y 30+ por corte', kind: 'line', series: [{ col: 1, color: AXC.red, labels: true, fmt: '0.0%' }, { col: 2, color: AXC.amber, labels: true, fmt: '0.0%' }], yFmt: '0%' });
+      s.chart(et, { title: 'IMOR 90+ por antigüedad', kind: 'line', series: [{ col: 3, color: AXC.cyan }, { col: 4, color: AXC.blue }, { col: 5, color: AXC.deep }], yFmt: '0%', slot: 1 });
     }
     sheets.push(s.done({ freezeRows: 0 }));
   }
