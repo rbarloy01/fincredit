@@ -364,7 +364,7 @@ const ClientReportView: React.FC<Props> = ({ client, statements, covenants, loan
   );
   const latest = sortedStatements.length > 0 ? sortedStatements[sortedStatements.length - 1] : null;
   const latestTape = useMemo(() => sortLoanTapesByPeriod<LoanTape_DB>(loanTapes)[0] || null, [loanTapes]);
-  const tapeAnalysis: StructuredLoanTapeAnalysis | null = useMemo(() => storedAnalysisFor(latestTape), [latestTape]);
+  const tapeAnalysis: StructuredLoanTapeAnalysis | null = useMemo(() => storedAnalysisFor(latestTape, loanTapes), [latestTape, loanTapes]);
   const liabilitiesSummary = useMemo(() => buildLiabilitiesSummary(institutionalLiabilities), [institutionalLiabilities]);
   const liabilityInsights = useMemo(() => buildLiabilitiesInsights(institutionalLiabilities), [institutionalLiabilities]);
   const liabilityConcentration = useMemo(() => buildLenderConcentration(institutionalLiabilities).slice(0, 5), [institutionalLiabilities]);

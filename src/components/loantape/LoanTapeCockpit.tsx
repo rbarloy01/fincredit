@@ -12,7 +12,7 @@ import {
 import { loadExportModule } from '../../lib/exportLoader';
 import { reserveDownloadTarget } from '../../lib/browserDownload';
 import { analyzePortfolio, buildLoanTapeInsights, type Insight } from '../../lib/loanTapeReport';
-import { liveLoansDetail } from '../../lib/portfolioRules';
+import { liveLoansDetail, QUALITY_RULES } from '../../lib/portfolioRules';
 import ChartCard from './ChartCard';
 import LoanTapePortfolioCharts from './LoanTapePortfolioCharts';
 
@@ -278,8 +278,8 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
         <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
           {[
             { k: 'Saldo', v: moneyM(focusPoint.saldo), d: kpiDelta(focusPoint.saldo, prevPoint?.saldo ?? null, false, n => moneyM(n)) },
-            { k: 'Vencida >90d', v: focusPoint.isSummary ? 'N/D' : pctS(focusPoint.venPct), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.venPct, prevPoint?.venPct ?? null, true, n => `${(n * 100).toFixed(1)}pp`) },
-            { k: 'Atrasada 1-90d', v: focusPoint.isSummary ? 'N/D' : pctS(focusPoint.atrPct), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.atrPct, prevPoint?.atrPct ?? null, true, n => `${(n * 100).toFixed(1)}pp`) },
+            { k: `Vencida ${QUALITY_RULES.atrasadaMaxDpd + 1}+ días`, v: focusPoint.isSummary ? 'N/D' : pctS(focusPoint.venPct), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.venPct, prevPoint?.venPct ?? null, true, n => `${(n * 100).toFixed(1)}pp`) },
+            { k: `Atrasada ${QUALITY_RULES.vigenteMaxDpd + 1}-${QUALITY_RULES.atrasadaMaxDpd} días`, v: focusPoint.isSummary ? 'N/D' : pctS(focusPoint.atrPct), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.atrPct, prevPoint?.atrPct ?? null, true, n => `${(n * 100).toFixed(1)}pp`) },
             { k: 'Créditos vivos', v: focusPoint.isSummary ? 'N/D' : `${focusPoint.creditos}`, d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : <span>{kpiDelta(focusPoint.creditos, prevPoint?.creditos ?? null)}{focusPoint.registros > focusPoint.creditos && <span className="block text-slate-400 font-semibold">{liveLoansDetail(focusPoint.registros, focusPoint.creditos)}</span>}</span> },
             { k: 'Concentración Top-1', v: focusPoint.isSummary ? 'N/D' : pctS(focusPoint.top1), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.top1, prevPoint?.top1 ?? null, true, n => `${(n * 100).toFixed(1)}pp`) },
             { k: 'HHI', v: focusPoint.isSummary ? 'N/D' : focusPoint.hhi.toFixed(3), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.hhi, prevPoint?.hhi ?? null, true, n => n.toFixed(3)) },
@@ -335,7 +335,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
       )}
 
       {/* Evolution */}
-      <ChartCard title="Evolución de saldo & cartera vencida (>90d)" subtitle="Barras = saldo · línea = % vencida" fileName={`Evolucion_${clientName}`} captureId="evo" registerNode={registerNode} legend={[{ label: 'Saldo', color: C.indigo }, { label: 'Vencida %', color: C.red }]}>
+      <ChartCard title="Evolución de saldo & cartera vencida (90+ días)" subtitle="Barras = saldo · línea = % vencida" fileName={`Evolucion_${clientName}`} captureId="evo" registerNode={registerNode} legend={[{ label: 'Saldo', color: C.indigo }, { label: 'Vencida %', color: C.red }]}>
         <div style={{ height: 260 }}>
           <ResponsiveContainer>
             <ComposedChart data={evoData} onClick={isolatePeriodFromChart} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
@@ -482,7 +482,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
       </ChartCard>
 
       {/* Watchlist */}
-      <ChartCard title="⚠ Watchlist — vencidos crónicos" subtitle="Créditos con >90 días de atraso en 2+ cortes" fileName={`Watchlist_${clientName}`} captureId="watchlist" registerNode={registerNode}>
+      <ChartCard title="⚠ Watchlist — vencidos crónicos" subtitle="Créditos con 90+ días de atraso en 2+ cortes" fileName={`Watchlist_${clientName}`} captureId="watchlist" registerNode={registerNode}>
         <div className="overflow-x-auto">
           <table className="w-full text-xs">
             <thead><tr className="bg-slate-50 text-left">

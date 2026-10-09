@@ -24,7 +24,19 @@ export interface StandardLoan {
   source_granularity?: 'loan' | 'product_summary' | 'state_summary';
   source_share?: number | null;
 }
-type StandardLoanField = Exclude<keyof StandardLoan, 'source_granularity' | 'source_share' | 'dpd_source' | 'id_source' | 'installment'>;
+export type StandardLoanField = Exclude<keyof StandardLoan, 'source_granularity' | 'source_share' | 'dpd_source' | 'id_source' | 'installment'>;
+
+// Retroalimentación del analista al mapeo: encabezado normalizado → campo estándar (o 'ignore' = no usar).
+// Se guarda por cliente y gana sobre el mapeo automático en cada importación.
+export type MappingOverrides = Record<string, StandardLoanField | 'ignore'>;
+export const MAPPING_OVERRIDES_KEY = 'loantape_mapping_overrides';
+export const STANDARD_FIELD_LABELS: Record<StandardLoanField, string> = {
+  loan_id: 'ID de crédito', client: 'Cliente', amount: 'Monto original', outstanding_balance: 'Saldo insoluto',
+  interest_rate: 'Tasa', loan_status: 'Estatus del crédito', start_date: 'Fecha de inicio', end_date: 'Fecha de vencimiento',
+  loan_type: 'Producto', days_overdue: 'Días de atraso', currency: 'Moneda', industry: 'Giro / industria',
+  state: 'Estado (geográfico)', file_date: 'Fecha de corte',
+};
+export function mappingHeaderKey(header: string): string { return normalize(header); }
 
 export interface MappingNote {
   source_header: string;
@@ -381,14 +393,23 @@ export function scoreHeaderRow(cells: any[]): number {
   return hit.size;
 }
 
-function pickColumns(headers: string[], rows: any[] = []) {
+function pickColumns(headers: string[], rows: any[] = [], overrides: MappingOverrides = {}) {
   const mapping: Partial<Record<StandardLoanField, string>> = {};
   const notes: MappingNote[] = [];
   const used = new Set<string>();
   const normalized = headers.map(h => ({ header: h, norm: normalize(h) }));
 
-  const capitalVigente = normalized.find(h => /capital.*vigente/.test(h.norm) && !/interes/.test(h.norm))?.header;
-  const capitalVencido = normalized.find(h => /capital.*(vencid|moros|mosor)/.test(h.norm) && !/interes/.test(h.norm))?.header;
+  // Correcciones del analista primero: fijan el campo y sacan la columna del concurso automático.
+  const forced: Partial<Record<StandardLoanField, string>> = {};
+  normalized.forEach(h => {
+    const o = overrides[h.norm];
+    if (!o) return;
+    used.add(h.header);
+    if (o !== 'ignore' && !forced[o]) forced[o] = h.header;
+  });
+
+  const capitalVigente = forced.outstanding_balance ? undefined : normalized.find(h => !used.has(h.header) && /capital.*vigente/.test(h.norm) && !/interes/.test(h.norm))?.header;
+  const capitalVencido = forced.outstanding_balance ? undefined : normalized.find(h => !used.has(h.header) && /capital.*(vencid|moros|mosor)/.test(h.norm) && !/interes/.test(h.norm))?.header;
   const installmentHeader = normalized.find(h => /^(renta|pago|mensualidad|cuota|amortizacion)( mensual| periodic[oa])?( con iva| sin iva)?$|^renta mensual|^pago mensual|^mensualidad/.test(h.norm))?.header;
   const overdueAmountHeader = normalized.find(h => /^(monto|saldo|importe) (en )?(mora|vencid[oa])$/.test(h.norm))?.header;
 
@@ -398,6 +419,11 @@ function pickColumns(headers: string[], rows: any[] = []) {
   ];
 
   for (const target of targetOrder) {
+    if (forced[target]) {
+      mapping[target] = forced[target];
+      notes.push({ source_header: forced[target] as string, target_term: target, confidence: 'high', reasoning: 'Mapeo corregido por el analista' });
+      continue;
+    }
     if (target === 'file_date') continue;
     if (target === 'outstanding_balance' && capitalVigente && capitalVencido) continue;
     const candidates = normalized
@@ -452,7 +478,7 @@ function pickColumns(headers: string[], rows: any[] = []) {
 
   // Fecha de corte explícita en el archivo (p. ej. "Fecha de corte"): manda sobre el nombre del archivo. Solo se
   // acepta si el encabezado lo dice y la columna es una fecha casi constante (un corte, no fechas por crédito).
-  const cutoffColumn = normalized
+  const cutoffColumn = forced.file_date ? undefined : normalized
     .filter(h => !used.has(h.header) && headerMatchScore('file_date', h.norm).score >= 40)
     .find(h => {
       const values = rows.map(row => row?.[h.header]).filter(v => v !== null && v !== undefined && String(v).trim() !== '');
@@ -469,7 +495,7 @@ function pickColumns(headers: string[], rows: any[] = []) {
     notes.push({ source_header: `${capitalVigente} + ${capitalVencido}`, target_term: 'outstanding_balance', confidence: 'high', reasoning: 'Prioritized sum of capital vigente and capital vencido' });
   }
 
-  return { mapping, notes, capitalVigente, capitalVencido, overdueAmountHeader, installmentHeader };
+  return { mapping, notes, capitalVigente, capitalVencido, overdueAmountHeader, installmentHeader, lockedDpd: !!forced.days_overdue };
 }
 
 export interface DpdValidation extends DpdConsistency {
@@ -482,7 +508,7 @@ export interface DpdValidation extends DpdConsistency {
 // Regla de negocio (portfolioRules.checkDpdConsistency): si el archivo trae su propio bucket / estatus de cobranza,
 // la columna de días de atraso tiene que cuadrar con él. Si no cuadra, se prueba cada columna candidata y se queda la
 // que sí cuadra; si ninguna, se reporta para bloquear el import en vez de publicar una calidad de cartera falsa.
-function validateDpdColumn(headers: string[], rows: any[], mapping: Partial<Record<StandardLoanField, string>>, notes: MappingNote[]): DpdValidation | null {
+function validateDpdColumn(headers: string[], rows: any[], mapping: Partial<Record<StandardLoanField, string>>, notes: MappingNote[], locked = false): DpdValidation | null {
   const evidenceHint = /(bucket|mora|atraso|retraso|cobranza|morosidad|dpd|antiguedad|vencid|estatus|status|estado|clasificacion|tramo|rango)/;
   const notEvidence = /(plazo|meses|residencia|producto|tasa|saldo|monto|importe|fecha|pagos|riesgo|modelo)/;
   const nonEmpty = (h: string) => rows.map(r => r?.[h]).filter(v => v !== null && v !== undefined && String(v).trim() !== '');
@@ -510,8 +536,8 @@ function validateDpdColumn(headers: string[], rows: any[], mapping: Partial<Reco
   const current = mapping.days_overdue;
   const currentCheck = score(current);
   if (current && currentCheck.ok) return { ...currentCheck, evidenceHeader: evidence.h, dpdHeader: current, strong };
-  // Evidencia débil (estatus genérico): nunca cambia la columna, solo se reporta.
-  if (!strong) return current ? { ...currentCheck, evidenceHeader: evidence.h, dpdHeader: current, strong } : null;
+  // Evidencia débil (estatus genérico) o columna fijada por el analista: nunca se cambia, solo se reporta.
+  if (!strong || locked) return current ? { ...currentCheck, evidenceHeader: evidence.h, dpdHeader: current, strong } : null;
 
   // Columnas numéricas que podrían ser días de atraso (no montos), excepto la evidencia misma.
   const alternatives = headers
@@ -534,10 +560,10 @@ function validateDpdColumn(headers: string[], rows: any[], mapping: Partial<Reco
   return current ? { ...currentCheck, evidenceHeader: evidence.h, dpdHeader: current, strong } : null;
 }
 
-export function standardizeLoanTape(rows: any[], fileName?: string) {
+export function standardizeLoanTape(rows: any[], fileName?: string, overrides: MappingOverrides = {}) {
   const headers = rows[0] ? Object.keys(rows[0]) : [];
-  const { mapping, notes, capitalVigente, capitalVencido, overdueAmountHeader, installmentHeader } = pickColumns(headers, rows);
-  const dpdValidation = validateDpdColumn(headers, rows, mapping, notes);
+  const { mapping, notes, capitalVigente, capitalVencido, overdueAmountHeader, installmentHeader, lockedDpd } = pickColumns(headers, rows, overrides);
+  const dpdValidation = validateDpdColumn(headers, rows, mapping, notes, lockedDpd);
   const fallbackFileDate = parseFileDate(fileName);
 
   const standardized: StandardLoan[] = rows.map(row => {
@@ -1216,8 +1242,8 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
     concentrations,
     anomalies: anomalySet,
     validation,
-    metrics: [
-      { name: 'Saldo total outstanding', latestValue: fmtMoney(total), previousValue: previousRows.length ? fmtMoney(previousTotal) : undefined, change: fmtChange(total, previousTotal, 'money'), trend: trend(total, previousTotal), status: overallStatus, congruent: true },
+    metrics: withThresholds([
+      { name: 'Saldo total outstanding', latestValue: fmtMoney(total), previousValue: previousRows.length ? fmtMoney(previousTotal) : undefined, change: fmtChange(total, previousTotal, 'money'), trend: trend(total, previousTotal), status: 'neutral', congruent: true },
       { name: 'Créditos vivos (sin liquidados)', latestValue: loanCount === null ? 'N/D' : String(loanCount), previousValue: previousRows.length && loanCount !== null ? String(previousLoanCount) : undefined, change: loanCount === null ? undefined : fmtChange(loanCount, previousLoanCount, 'number'), trend: loanCount === null ? 'stable' : trend(loanCount, previousLoanCount), status: 'good', congruent: true },
       { name: 'Numero de clientes', latestValue: clientCount === null ? 'N/D' : String(clientCount), previousValue: previousRows.length && clientCount !== null ? String(previousClientCount) : undefined, change: clientCount === null ? undefined : fmtChange(clientCount, previousClientCount, 'number'), trend: clientCount === null ? 'stable' : trend(clientCount, previousClientCount), status: 'good', congruent: true },
       { name: '% cartera vencida', latestValue: vencidaPct === null ? 'N/D' : fmtPct(vencidaPct), previousValue: previousRows.length && vencidaPct !== null ? fmtPct(previousVencidaPct) : undefined, change: vencidaPct === null ? undefined : fmtChange(vencidaPct, previousVencidaPct, 'pct'), trend: vencidaPct === null ? 'stable' : trend(vencidaPct, previousVencidaPct, true), status: vencidaPct !== null && vencidaPct > RISK_THRESHOLDS.vencidaAlert ? 'critical' : vencidaPct !== null && vencidaPct >= RISK_THRESHOLDS.vencidaWarn ? 'warning' : 'good', congruent: true },
@@ -1227,7 +1253,7 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
       { name: 'Concentracion Top 10 creditos', latestValue: top10Pct === null ? 'N/D' : fmtPct(top10Pct), previousValue: previousRows.length && top10Pct !== null ? fmtPct(previousTop10Pct) : undefined, change: top10Pct === null ? undefined : fmtChange(top10Pct, previousTop10Pct, 'pct'), trend: top10Pct === null ? 'stable' : trend(top10Pct, previousTop10Pct, true), status: top10Pct !== null && top10Pct > RISK_THRESHOLDS.top10Alert ? 'critical' : top10Pct !== null && top10Pct > RISK_THRESHOLDS.top10Warn ? 'warning' : 'good', congruent: true },
       { name: 'DPD ponderado por saldo', latestValue: weightedDpd === null ? 'N/D' : `${weightedDpd.toFixed(1)} dias`, previousValue: previousWeightedDpd === null ? undefined : `${previousWeightedDpd.toFixed(1)} dias`, change: weightedDpd !== null && previousWeightedDpd !== null ? fmtChange(weightedDpd, previousWeightedDpd, 'number') : undefined, trend: weightedDpd !== null && previousWeightedDpd !== null ? trend(weightedDpd, previousWeightedDpd, true) : 'stable', status: weightedDpd !== null && weightedDpd > RISK_THRESHOLDS.waDpdAlert ? 'critical' : weightedDpd !== null && weightedDpd > RISK_THRESHOLDS.waDpdWarn ? 'warning' : 'good', congruent: true },
       { name: 'Tasa ponderada por saldo', latestValue: weightedRate === null ? 'N/D' : fmtPct(weightedRate), previousValue: previousWeightedRate === null ? undefined : fmtPct(previousWeightedRate), change: weightedRate !== null && previousWeightedRate !== null ? `${weightedRate - previousWeightedRate >= 0 ? '+' : ''}${((weightedRate - previousWeightedRate) * 100).toFixed(1)} pp` : undefined, trend: weightedRate !== null && previousWeightedRate !== null ? trend(weightedRate, previousWeightedRate) : 'stable', status: 'good', congruent: true },
-    ],
+    ]),
     findings,
     congruencyChecks: [],
   };
@@ -1237,17 +1263,36 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
 // Analyses saved before a business-rule change keep the old classification inside `_analysis`. Whenever a saved analysis
 // is read, its quality/risk fields are refreshed from the standardized rows with the CURRENT rules (portfolioRules), so
 // no screen can show a stale "vigente". The summary text and findings are regenerated too, so no stale percentage survives.
-const refreshedAnalysisCache = new WeakMap<object, StructuredLoanTapeAnalysis>();
-export function storedAnalysisFor(tape: LoanTape_DB | null | undefined): StructuredLoanTapeAnalysis | null {
+// "Umbral de alerta" de cada métrica: sale de portfolioRules (no hay límite contractual capturado por métrica).
+const pctTxt = (v: number) => `${(v * 100).toLocaleString('es-MX', { maximumFractionDigits: 1 })}%`;
+const METRIC_THRESHOLDS: Record<string, string> = {
+  '% cartera vencida': `Atención ≥${pctTxt(RISK_THRESHOLDS.vencidaWarn)} · Alerta >${pctTxt(RISK_THRESHOLDS.vencidaAlert)}`,
+  '% cartera atrasada': `Atención >${pctTxt(RISK_THRESHOLDS.atrasadaWarn)}`,
+  'Concentracion max cliente': `Atención >${pctTxt(RISK_THRESHOLDS.clientConcentrationWarn)} · Alerta >${pctTxt(RISK_THRESHOLDS.clientConcentrationAlert)}`,
+  'Concentracion Top 10 clientes': `Atención >${pctTxt(RISK_THRESHOLDS.top10Warn)} · Alerta >${pctTxt(RISK_THRESHOLDS.top10Alert)}`,
+  'DPD ponderado por saldo': `Atención >${RISK_THRESHOLDS.waDpdWarn} días · Alerta >${RISK_THRESHOLDS.waDpdAlert} días`,
+};
+function withThresholds<T extends { name: string; contractLimit?: string }>(metrics: T[]): T[] {
+  return metrics.map(m => (METRIC_THRESHOLDS[m.name] ? { ...m, contractLimit: METRIC_THRESHOLDS[m.name] } : m));
+}
+
+// La tabla de métricas compara contra el corte inmediato anterior: por eso se calcula con TODOS los tapes del
+// cliente (`context`), no solo con el tape seleccionado. Sin contexto, no hay "Anterior / Cambio / Tendencia".
+const contextAnalysisCache = new WeakMap<object, Map<string, StructuredLoanTapeAnalysis>>();
+export function storedAnalysisFor(tape: LoanTape_DB | null | undefined, context: LoanTape_DB[] = []): StructuredLoanTapeAnalysis | null {
   const stored = tape?.extractedData?._analysis as StructuredLoanTapeAnalysis | undefined;
   if (!tape || !stored) return null;
   if (!Array.isArray(tape.extractedData?._standardized)) return stored;
   const key = tape.extractedData as object;
-  const cached = refreshedAnalysisCache.get(key);
-  if (cached) return cached;
-  const fresh = analyzeLoanTapesLocally([tape], tape.id);
+  const peers = context.filter(t => t.id !== tape.id && Array.isArray(t.extractedData?._standardized));
+  const ctxKey = peers.map(t => `${t.id}:${t.extractedData?._standardized?.length}`).sort().join('|');
+  const byCtx = contextAnalysisCache.get(key) || new Map<string, StructuredLoanTapeAnalysis>();
+  if (!contextAnalysisCache.has(key)) contextAnalysisCache.set(key, byCtx);
+  const hit = byCtx.get(ctxKey);
+  if (hit) return hit;
+  const fresh = analyzeLoanTapesLocally([tape, ...peers], tape.id);
   // Todo número y texto sale del cálculo vigente (executiveSummary y findings incluidos); solo se conserva lo que no se calcula local.
   const merged: StructuredLoanTapeAnalysis = { ...fresh, congruencyChecks: stored.congruencyChecks?.length ? stored.congruencyChecks : fresh.congruencyChecks };
-  refreshedAnalysisCache.set(key, merged);
+  byCtx.set(ctxKey, merged);
   return merged;
 }

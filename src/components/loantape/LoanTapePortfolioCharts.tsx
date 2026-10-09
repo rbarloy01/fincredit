@@ -109,7 +109,7 @@ export default function LoanTapePortfolioCharts({ portfolio: a, clientName, onSe
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-1 2xl:grid-cols-2 gap-4">
-        <ChartCard title="Calidad de cartera" subtitle="% del saldo · vigente 0-30 · atrasada 31-90 · vencida >90 DPD" fileName={`Calidad_${name}`}>
+        <ChartCard title="Calidad de cartera" subtitle="% del saldo · vigente 0-30 · atrasada 31-89 · vencida 90+ DPD" fileName={`Calidad_${name}`}>
           <div style={{ height: 260 }}>
             <ResponsiveContainer>
               <PieChart>

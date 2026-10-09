@@ -19,6 +19,7 @@ import {
   normalize,
   scoreHeaderRow,
   type DpdValidation,
+  type MappingOverrides,
   activeRows,
 } from './loanTapeAnalytics';
 import { loanStatusFromDpd, DPD_PROXY_DAYS, statusDpdConflicts } from './portfolioRules';
@@ -502,7 +503,7 @@ function extractSummaryBreakdown(rows: any[][], fileName: string, fileDate: stri
 }
 
 // Generic fallback: re-key rows using a detected header row and run the synonym mapper.
-function extractGeneric(rows: any[][], fileName: string): { std: StandardLoan[]; notes: MappingNote[]; headerIdx: number; dpdValidation?: DpdValidation | null; header?: string[]; dataRows?: any[][] } {
+function extractGeneric(rows: any[][], fileName: string, overrides: MappingOverrides = {}): { std: StandardLoan[]; notes: MappingNote[]; headerIdx: number; dpdValidation?: DpdValidation | null; header?: string[]; dataRows?: any[][] } {
   // pick the first row (within 8) that looks like a header: mostly non-numeric text, ≥3 labels
   // Reports often start with a title or a banner of totals: take the row that names the MOST loan-tape fields, and fall back
   // to the first text-like row when none stands out.
@@ -532,7 +533,7 @@ function extractGeneric(rows: any[][], fileName: string): { std: StandardLoan[];
       return !/^(total|totales|gran total|subtotal|suma|filtros aplicados)/.test(first);
     });
   const objs = dataRows.map(r => Object.fromEntries(header.map((h, i) => [h, r[i] ?? null])));
-  const res = standardizeLoanTape(objs, fileName);
+  const res = standardizeLoanTape(objs, fileName, overrides);
   return { std: res.standardized, notes: res.mappingReport, headerIdx, dpdValidation: res.dpdValidation, header, dataRows };
 }
 
@@ -574,7 +575,7 @@ function sanitizeLoans(rows: StandardLoan[]) {
   return { std, rateFixes, dpdFixes };
 }
 
-export function importLoanTapeSheets(sheets: SheetInput[], fileName: string, opts: { previousTotal?: number | null } = {}): ImportResult {
+export function importLoanTapeSheets(sheets: SheetInput[], fileName: string, opts: { previousTotal?: number | null; mappingOverrides?: MappingOverrides } = {}): ImportResult {
   const fileDate = fileDateISO(fileName);
   const prefersSummaryWorkflow = /cofine/.test(normalize(fileName)) && /desglose|antiguedad/.test(normalize(fileName));
   const allStd: StandardLoan[] = [];
@@ -631,7 +632,7 @@ export function importLoanTapeSheets(sheets: SheetInput[], fileName: string, opt
     }
 
     // generic fallback
-    const gen = extractGeneric(rows, fileName);
+    const gen = extractGeneric(rows, fileName, opts.mappingOverrides || {});
     if (gen.std.length > 0) {
       const withDate = gen.std.map(s => ({ ...s, file_date: s.file_date || sheetDate }));
       genericCandidates.push({ name: sheet.name, std: withDate, notes: gen.notes, dpdValidation: gen.dpdValidation, source: gen.header && gen.dataRows ? buildSourceTable(sheet.name, gen.header, gen.dataRows) : null });
@@ -769,4 +770,13 @@ export function importLoanTapeSheets(sheets: SheetInput[], fileName: string, opt
     summary,
     sourceTables: genericCandidates.filter(c => kept.keep.includes(c) && c.source).map(c => c.source as SourceTable),
   };
+}
+
+// Re-procesa un tape ya guardado a partir de sus columnas originales (`_source`) con el mapeo corregido por el
+// analista: mismo pipeline y mismas validaciones que una carga nueva, sin volver a subir el archivo.
+export function reimportFromSource(tape: { fileName: string; extractedData: any }, mappingOverrides: MappingOverrides): ImportResult | null {
+  const tables: SourceTable[] = Array.isArray(tape.extractedData?._source) ? tape.extractedData._source : [];
+  if (!tables.length) return null;
+  const sheets = tables.map(t => ({ name: t.sheet, rows: [t.headers, ...t.rows] }));
+  return importLoanTapeSheets(sheets, tape.fileName, { mappingOverrides });
 }

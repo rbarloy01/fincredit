@@ -9,7 +9,7 @@ import {
   FileText, Bot, Plus, LayoutDashboard,
 } from 'lucide-react';
 import { assessLoanTapeImport, formatDuration } from '../../lib/statementQuality';
-import { activeRows, analyzeLoanTapesLocally, answerLoanTapeQuestion, buildLoanTapeDataProfile, loanTapePeriodDate, standardizeLoanTape, storedAnalysisFor } from '../../lib/loanTapeAnalytics';
+import { activeRows, analyzeLoanTapesLocally, answerLoanTapeQuestion, buildLoanTapeDataProfile, loanTapePeriodDate, standardizeLoanTape, storedAnalysisFor, MAPPING_OVERRIDES_KEY, STANDARD_FIELD_LABELS, mappingHeaderKey, type MappingOverrides, type StandardLoanField } from '../../lib/loanTapeAnalytics';
 import {
   createLoanTapeWorkspaceBlock,
   LoanTapeAnalystState,
@@ -20,7 +20,8 @@ import WorkingOverlay from '../common/WorkingOverlay';
 import { lazyWithChunkRetry } from '../../lib/lazyWithChunkRetry';
 import { loadExportModule } from '../../lib/exportLoader';
 import LoanTapeCockpit from './LoanTapeCockpit';
-import { importLoanTapeSheets } from '../../lib/loanTapeImport';
+import { importLoanTapeSheets, reimportFromSource } from '../../lib/loanTapeImport';
+import type { SourceTable } from '../../lib/sourceColumns';
 import { extractPdfText, isUsefulExtractedText } from '../../lib/documentParsing';
 import { sheetToRows } from '../../lib/sheetRows';
 
@@ -94,13 +95,116 @@ function RiskGauge({ score }: { score: number }) {
   );
 }
 
-function TrendIcon({ trend }: { trend?: string }) {
-  if (trend === 'up') return <TrendingUp className="w-3.5 h-3.5 text-emerald-500" />;
-  if (trend === 'down') return <TrendingDown className="w-3.5 h-3.5 text-rose-500" />;
-  return <Minus className="w-3.5 h-3.5 text-slate-400" />;
+// Flecha = hacia dónde se movió el número (según el signo del cambio); color = si eso es bueno (verde) o malo (rojo).
+// `trend` viene como mejora ('up') / deterioro ('down'): una vencida que BAJA es 'up' pero la flecha debe ir abajo.
+function TrendIcon({ trend, change }: { trend?: string; change?: string }) {
+  const dir = change?.trim().startsWith('-') ? 'down' : change?.trim().startsWith('+') ? 'up' : null;
+  if (!dir || trend === 'stable' || !trend) return <Minus className="w-3.5 h-3.5 text-slate-400" />;
+  const color = trend === 'up' ? 'text-emerald-500' : 'text-rose-500';
+  const label = `${dir === 'up' ? 'Subió' : 'Bajó'} · ${trend === 'up' ? 'mejora' : 'empeora'}`;
+  return dir === 'up' ? <span title={label}><TrendingUp className={`w-3.5 h-3.5 ${color}`} /></span> : <span title={label}><TrendingDown className={`w-3.5 h-3.5 ${color}`} /></span>;
+}
+
+// Retroalimentación al mapeo: el analista corrige a qué campo va cada columna; se guarda por cliente y el tape se
+// re-procesa desde sus columnas originales (mismas validaciones que una carga nueva).
+function MappingEditor({ tape, mappingRows, clientId, onSaved }: { tape: LoanTape_DB; mappingRows: any[]; clientId: string; onSaved: () => Promise<void> | void }) {
+  const sources: SourceTable[] = Array.isArray(tape.extractedData?._source) ? tape.extractedData._source : [];
+  const headers = Array.from(new Set(sources.flatMap(t => t.headers)));
+  const auto = (h: string) => mappingRows.find((m: any) => String(m.source_header).split(' + ').map((x: string) => x.trim()).includes(h));
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const fields = Object.keys(STANDARD_FIELD_LABELS) as StandardLoanField[];
+  const pending = Object.keys(draft).length;
+
+  const apply = async () => {
+    setSaving(true);
+    try {
+      const saved = await db.getClientSetting<MappingOverrides>(clientId, MAPPING_OVERRIDES_KEY, {});
+      const next: MappingOverrides = { ...saved };
+      Object.entries(draft).forEach(([h, v]) => {
+        const key = mappingHeaderKey(h);
+        if (!v) delete next[key];
+        else next[key] = v as StandardLoanField | 'ignore';
+      });
+      await db.setClientSetting(clientId, MAPPING_OVERRIDES_KEY, next);
+      const res = reimportFromSource({ fileName: tape.fileName, extractedData: tape.extractedData }, next);
+      if (!res) throw new Error('Este tape no tiene las columnas originales guardadas: vuelve a subir el archivo.');
+      const profile = buildLoanTapeDataProfile(res.standardized, res.mappingReport);
+      await db.updateLoanTape(tape.id, {
+        extractedData: {
+          ...tape.extractedData,
+          _standardized: res.standardized, _mappingReport: res.mappingReport, _import: res.reconciliation, _summary: res.summary,
+          _source: res.sourceTables?.length ? res.sourceTables : tape.extractedData?._source,
+          _quality: assessLoanTapeImport({ mappingReport: res.mappingReport, readinessScore: profile.readinessScore, rows: res.standardized.length, missingCritical: (res.reconciliation.unmappedCriticalFields || []) as string[], blocker: res.reconciliation.severity === 'blocker' }),
+        },
+      });
+      setDraft({});
+      await onSaved();
+      const warn = res.reconciliation.messages.filter(m => /^(⛔|⚠)/.test(m));
+      alert(warn.length ? `Re-procesado con tu mapeo. Revisa:\n\n${warn.join('\n')}` : 'Re-procesado con tu mapeo. El cambio queda guardado para los siguientes archivos de este cliente.');
+    } catch (e: any) {
+      alert(`No se pudo aplicar el mapeo: ${e?.message || e}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!headers.length) {
+    return (
+      <div className="bg-white rounded-xl border border-slate-200 p-4">
+        <p className="text-xs font-black text-slate-700 uppercase tracking-widest mb-2">Mapeo de columnas</p>
+        <div className="max-h-72 overflow-auto">
+          {mappingRows.map((m: any, i: number) => (
+            <p key={i} className="text-xs text-slate-600 py-0.5"><span className="font-bold">{m.source_header}</span> → {STANDARD_FIELD_LABELS[m.target_term as StandardLoanField] || m.target_term}</p>
+          ))}
+        </div>
+        <p className="text-[11px] text-amber-700 font-semibold mt-2">Para corregir el mapeo, vuelve a subir este archivo: se cargó antes de que la app guardara las columnas originales.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-4">
+      <div className="flex items-start justify-between gap-3 mb-2">
+        <div>
+          <p className="text-xs font-black text-slate-700 uppercase tracking-widest">Mapeo de columnas</p>
+          <p className="text-[11px] text-slate-500 mt-0.5">Corrige a qué campo va cada columna. Se guarda para este cliente y se aplica solo en los siguientes archivos.</p>
+        </div>
+        <button onClick={apply} disabled={saving || !pending} className="flex-shrink-0 text-xs font-black text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 px-3 py-1.5 rounded-lg">
+          {saving ? 'Re-procesando…' : `Aplicar${pending ? ` (${pending})` : ''}`}
+        </button>
+      </div>
+      <div className="max-h-80 overflow-auto">
+        <table className="w-full text-xs">
+          <thead className="sticky top-0 bg-white">
+            <tr className="text-left text-slate-500"><th className="py-1 pr-2 font-black">Columna del archivo</th><th className="py-1 font-black">Se usa como</th></tr>
+          </thead>
+          <tbody>
+            {headers.map(h => {
+              const m = auto(h);
+              const manual = m?.reasoning === 'Mapeo corregido por el analista';
+              return (
+                <tr key={h} className="border-t border-slate-100">
+                  <td className="py-1 pr-2 font-semibold text-slate-700">{h}{manual && <span className="ml-1 text-[9px] font-black text-indigo-600 uppercase">corregido</span>}</td>
+                  <td className="py-1">
+                    <select value={draft[h] ?? ''} onChange={e => setDraft(d => ({ ...d, [h]: e.target.value }))} className={`w-full border rounded-md px-1.5 py-1 ${draft[h] !== undefined ? 'border-indigo-400 bg-indigo-50' : 'border-slate-200'}`}>
+                      <option value="">{m ? `${STANDARD_FIELD_LABELS[m.target_term as StandardLoanField] || m.target_term} (actual)` : 'No se usa (actual)'}</option>
+                      {fields.map(f => <option key={f} value={f}>{STANDARD_FIELD_LABELS[f]}</option>)}
+                      <option value="ignore">— No usar esta columna —</option>
+                    </select>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 }
 
 function MetricStatus({ status }: { status?: string }) {
+  if (status === 'neutral') return <Minus className="w-3.5 h-3.5 text-slate-300" />;
   if (status === 'good') return <CheckCircle className="w-3.5 h-3.5 text-emerald-500" />;
   if (status === 'warning') return <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />;
   return <XCircle className="w-3.5 h-3.5 text-rose-500" />;
@@ -324,7 +428,9 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
           text: isUsefulExtractedText(text) ? text : '',
           media: { base64, mimeType, fileName: file.name },
         }, clientName || clientId, file.name);
-        const result = importLoanTapeSheets(sheets, file.name, { previousTotal });
+        // Correcciones de mapeo que el analista ya hizo para este cliente: se aplican solas a cada archivo nuevo.
+    const mappingOverrides = await db.getClientSetting<MappingOverrides>(clientId, MAPPING_OVERRIDES_KEY, {}).catch(() => ({} as MappingOverrides));
+    const result = importLoanTapeSheets(sheets, file.name, { previousTotal, mappingOverrides });
         const rec = {
           ...result.reconciliation,
           messages: [`${file.name}: imagen/PDF leído con IA visual y estandarizado.`, ...result.reconciliation.messages],
@@ -409,7 +515,9 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
       rows: sheetToRows<any[]>(XLSX, workbook.Sheets[name], { header: 1, blankrows: false, defval: null }),
     }));
 
-    const result = importLoanTapeSheets(sheets, file.name, { previousTotal });
+    // Correcciones de mapeo que el analista ya hizo para este cliente: se aplican solas a cada archivo nuevo.
+    const mappingOverrides = await db.getClientSetting<MappingOverrides>(clientId, MAPPING_OVERRIDES_KEY, {}).catch(() => ({} as MappingOverrides));
+    const result = importLoanTapeSheets(sheets, file.name, { previousTotal, mappingOverrides });
     const rec = result.reconciliation;
 
     if (rec.severity === 'blocker') {
@@ -649,7 +757,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
           const rows: any[] = Array.isArray(data) ? data : (data?.rows || data?._standardized || []);
           const mappingRows: any[] = Array.isArray(data?._mappingReport) ? data._mappingReport : [];
           const standardizedRows: any[] = Array.isArray(data?._standardized) ? data._standardized : [];
-          const analysis: StructuredLoanTapeAnalysis | null = storedAnalysisFor(tape);
+          const analysis: StructuredLoanTapeAnalysis | null = storedAnalysisFor(tape, tapes);
           const hardValidationRows = (analysis?.validation || []).filter((item: any) => item.severity === 'high');
           const imp: any = (data && !Array.isArray(data)) ? data._import : null;
           const rawFileOnly = !!(data && !Array.isArray(data) && data._unsupportedImport);
@@ -1050,16 +1158,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                   </div>
 
                   <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                    <SmallDataTable
-                      title="Mapeo de Columnas"
-                      rows={mappingRows}
-                      columns={[
-                        { key: 'source_header', label: 'Columna Fuente' },
-                        { key: 'target_term', label: 'Campo Estándar' },
-                        { key: 'confidence', label: 'Confianza' },
-                        { key: 'reasoning', label: 'Razón' },
-                      ]}
-                    />
+                    <MappingEditor tape={tape} mappingRows={mappingRows} clientId={clientId} onSaved={loadTapes} />
                     <SmallDataTable
                       title="Datos Estandarizados"
                       rows={standardizedRows}
@@ -1089,6 +1188,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                     <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
                       <div className="px-5 py-3 border-b border-slate-100">
                         <p className="text-xs font-black text-slate-700 uppercase tracking-widest">Métricas de Cartera</p>
+                        <p className="text-[11px] text-slate-500 mt-0.5">"Anterior" = corte inmediato previo cargado. Evolución: la flecha indica si subió o bajó; verde = mejora, rojo = empeora. Estado: ✓ dentro del umbral · ⚠ en atención · ✗ en alerta (umbrales de la regla de negocio de cartera).</p>
                       </div>
                       <div className="overflow-x-auto">
                         <table className="w-full text-xs">
@@ -1098,8 +1198,8 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                               <th className="text-right px-4 py-2 font-black text-slate-600 uppercase tracking-wider">Valor Actual</th>
                               <th className="text-right px-4 py-2 font-black text-slate-600 uppercase tracking-wider">Anterior</th>
                               <th className="text-right px-4 py-2 font-black text-slate-600 uppercase tracking-wider">Cambio</th>
-                              <th className="text-center px-4 py-2 font-black text-slate-600 uppercase tracking-wider">Tendencia</th>
-                              <th className="text-right px-4 py-2 font-black text-slate-600 uppercase tracking-wider">Límite</th>
+                              <th className="text-center px-4 py-2 font-black text-slate-600 uppercase tracking-wider">Evolución</th>
+                              <th className="text-right px-4 py-2 font-black text-slate-600 uppercase tracking-wider">Umbral de alerta</th>
                               <th className="text-center px-4 py-2 font-black text-slate-600 uppercase tracking-wider">Estado</th>
                             </tr>
                           </thead>
@@ -1111,7 +1211,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                                 <td className="px-4 py-2.5 text-right font-mono text-slate-500">{m.previousValue || '—'}</td>
                                 <td className="px-4 py-2.5 text-right font-mono text-slate-500">{m.change || '—'}</td>
                                 <td className="px-4 py-2.5 text-center">
-                                  <div className="flex justify-center"><TrendIcon trend={m.trend} /></div>
+                                  <div className="flex justify-center"><TrendIcon trend={m.trend} change={m.change} /></div>
                                 </td>
                                 <td className="px-4 py-2.5 text-right font-mono text-slate-500">{m.contractLimit || '—'}</td>
                                 <td className="px-4 py-2.5 text-center">

@@ -680,7 +680,7 @@ export function buildLoanTapeReportSheets(clientName: string, selectedPeriods: s
       s.blank();
     }
     if (data.watchlist.length) {
-      s.table('WATCHLIST — VENCIDOS CRÓNICOS (>90 DPD en 2+ cortes)', ['Crédito', 'Cliente', 'Cortes vencido', 'Máx DPD', 'Saldo actual'], data.watchlist.map(w => [w.loan_id, w.client, w.monthsOverdue, w.maxDpd, w.saldoActual]), [undefined, undefined, 'int', 'int', 'money']);
+      s.table('WATCHLIST — VENCIDOS CRÓNICOS (90+ DPD en 2+ cortes)', ['Crédito', 'Cliente', 'Cortes vencido', 'Máx DPD', 'Saldo actual'], data.watchlist.map(w => [w.loan_id, w.client, w.monthsOverdue, w.maxDpd, w.saldoActual]), [undefined, undefined, 'int', 'int', 'money']);
     }
     sheets.push(s.done({ freezeRows: 0 }));
   }

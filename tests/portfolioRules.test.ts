@@ -144,3 +144,24 @@ test('estatus de castigo/incobrable con menos de 90 días se reporta, no se recl
   assert.equal(c.balance, 1_000);
   assert.equal(classifyDpd(rows[0].days_overdue), 'vigente');
 });
+
+import { importLoanTapeSheets, reimportFromSource } from '../src/lib/loanTapeImport';
+
+test('el mapeo corregido por el analista se respeta, y una corrección de mora errónea queda bloqueada por la validación', () => {
+  const header = ['ID', 'Client ID', 'Saldo insoluto', 'Saldo alterno', 'No. pagos vencidos', 'Días de mora', 'Bucket Mora'];
+  const body = Array.from({ length: 40 }, (_, i) => {
+    const late = i % 4 === 0;
+    return [i + 1, 1000 + i, 10_000, 7_000, late ? 4 : 0, late ? 120 : 0, late ? '90+ días' : 'Al corriente'];
+  });
+  const first = importLoanTapeSheets([{ name: 'Hoja1', rows: [header, ...body] }], '260831 - tape.xlsx');
+  const tape = { fileName: '260831 - tape.xlsx', extractedData: { _source: first.sourceTables } };
+  assert.ok(first.sourceTables?.length);
+
+  const alt = reimportFromSource(tape, { 'saldo alterno': 'outstanding_balance', 'saldo insoluto': 'ignore' })!;
+  assert.equal(alt.standardized[0].outstanding_balance, 7_000);
+  assert.ok(alt.mappingReport.some(m => m.reasoning === 'Mapeo corregido por el analista'));
+
+  const wrong = reimportFromSource(tape, { 'no pagos vencidos': 'days_overdue' })!;
+  assert.equal(wrong.reconciliation.severity, 'blocker');
+  assert.ok(wrong.reconciliation.messages.some(m => m.startsWith('⛔')));
+});

@@ -124,7 +124,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
   const sortedTapes = sortLoanTapesByPeriod<LoanTape_DB>(loanTapes);
   const latestTape = sortedTapes[0];
   const latestTapePeriod = latestTape ? loanTapePeriodDate(latestTape) : '';
-  const tapeAnalysis = storedAnalysisFor(latestTape);
+  const tapeAnalysis = storedAnalysisFor(latestTape, loanTapes);
   const tapeQuality = tapeAnalysis?.portfolioQuality || {};
   const tapeConcentrations = tapeAnalysis?.concentrations || {};
   const tapeValidation = tapeAnalysis?.validation || [];
@@ -199,7 +199,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
     ...(daysSince(latestStatement?.periodDate) > 45 ? [{ severity: 'warning', title: 'Estados financieros vencidos', detail: latestStatement ? `Último periodo hace ${daysSince(latestStatement.periodDate)} días` : 'Sin estados financieros cargados' }] : []),
     ...(loanTapes.length === 0 ? [{ severity: 'warning', title: 'Loan tape faltante', detail: 'No hay loan tape cargada para monitoreo' }] : []),
     ...(latestTape && !tapeAnalysis ? [{ severity: 'warning', title: 'Loan tape sin analizar', detail: 'Carga hecha, falta correr análisis de cartera' }] : []),
-    ...(vencidaPct > 0 ? [{ severity: vencidaPct > 0.1 ? 'critical' : 'warning', title: 'Cartera vencida detectada', detail: `${(vencidaPct * 100).toFixed(1)}% del saldo en >90 DPD` }] : []),
+    ...(vencidaPct > 0 ? [{ severity: vencidaPct > 0.1 ? 'critical' : 'warning', title: 'Cartera vencida detectada', detail: `${(vencidaPct * 100).toFixed(1)}% del saldo con 90+ DPD` }] : []),
     ...(utilization !== null && utilization > 1 ? [{ severity: 'critical', title: 'Loan tape excede línea contratada', detail: `Utilización calculada ${pct(utilization)} sobre ${money(facilityAmount, client.currency)}` }] : []),
     ...(maxClient?.pct > 0.2 ? [{ severity: 'warning', title: 'Concentración alta por cliente', detail: `${maxClient.name}: ${pct(maxClient.pct)} del saldo` }] : []),
     ...(highValidationIssues > 0 ? [{ severity: 'warning', title: 'Calidad de datos del tape', detail: `${highValidationIssues} validaciones críticas en el archivo` }] : []),
