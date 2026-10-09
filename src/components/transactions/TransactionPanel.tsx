@@ -76,9 +76,20 @@ interface TxFormData {
 interface Disposition {
   id: string;
   date: string;
+  maturityDate?: string;   // fecha de vencimiento de la disposición
   amount: string;
   currency: string;
   notes: string;
+}
+
+// Vencimiento efectivo de una facility: el último vencimiento entre el contrato y sus disposiciones.
+function facilityMaturity(tx: Transaction, items: Disposition[]): { last: string | null; allMatured: boolean; maturedCount: number } {
+  const today = new Date().toISOString().slice(0, 10);
+  const dates = [tx.maturityAt, ...items.map(d => d.maturityDate || '')].filter(Boolean) as string[];
+  const last = dates.sort().at(-1) || null;
+  const withDate = items.filter(d => d.maturityDate);
+  const maturedCount = withDate.filter(d => (d.maturityDate as string) < today).length;
+  return { last, allMatured: !!last && last < today, maturedCount };
 }
 
 type DispositionMap = Record<string, Disposition[]>;
@@ -99,7 +110,7 @@ interface PipelineTransactionMeta {
 
 type PipelineTransactionMetaMap = Record<string, PipelineTransactionMeta>;
 const pipelineMetaKey = (clientId: string) => `finmonitor_transaction_pipeline_meta_${clientId}`;
-const PIPELINE_STAGES = ['1. Contacto', '2. Term Sheet', '3. Checklist', '4. Análisis', '5. Due Diligence', '6. Contrato', '7. Disposición', 'Monitoring'];
+const PIPELINE_STAGES = ['1. Contacto', '2. Term Sheet', '3. Checklist', '4. Análisis', '5. Due Diligence', '6. Contrato', '7. Disposición', 'Monitoring', 'Dormant', 'Terminado'];
 const PIPELINE_PRIORITIES = ['Crítico', 'Alto', 'Medio', 'Bajo'];
 const MONITORING_STATUSES = ['Cumplimiento', 'Incumplimiento técnico', 'Incumplimiento'];
 
@@ -251,7 +262,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
       ...dispositions,
       [tx.id]: [
         ...(dispositions[tx.id] || []),
-        { id: nanoid(), date: tx.date || '', amount: '', currency: tx.currency || 'MXN', notes: '' },
+        { id: nanoid(), date: tx.date || '', maturityDate: '', amount: '', currency: tx.currency || 'MXN', notes: '' },
       ],
     };
     await saveDispositions(next);
@@ -565,6 +576,8 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
             const txDispositions = dispositions[tx.id] || [];
             const disposedTotal = txDispositions.reduce((sum, item) => sum + parseFinancialNumber(item.amount), 0);
             const txPipelineMeta = pipelineMeta[tx.id] || emptyPipelineMeta();
+            const maturity = facilityMaturity(tx, txDispositions);
+            const closedStage = txPipelineMeta.pipelineStage === 'Dormant' || txPipelineMeta.pipelineStage === 'Terminado';
 
             return (
               <div key={tx.id} className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
@@ -596,7 +609,13 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                       <span className="flex items-center gap-1"><Calendar className="w-3 h-3" />Disp. inicial {fmtDate(tx.date)}</span>
                       <span className="flex items-center gap-1"><DollarSign className="w-3 h-3" />Autorizado {fmtAmount(tx.originalAmount, tx.currency)}</span>
                       {txPipelineMeta.utilizationPct && <span className="font-semibold text-slate-600">Utilización {txPipelineMeta.utilizationPct}%</span>}
-                      {txDispositions.length > 0 && <span className="flex items-center gap-1 text-emerald-600 font-semibold">{txDispositions.length} disposición{txDispositions.length !== 1 ? 'es' : ''}</span>}
+                      {txDispositions.length > 0 && <span className="flex items-center gap-1 text-emerald-600 font-semibold">{txDispositions.length} disposición{txDispositions.length !== 1 ? 'es' : ''}{maturity.maturedCount ? ` · ${maturity.maturedCount} vencida${maturity.maturedCount !== 1 ? 's' : ''}` : ''}</span>}
+                      {maturity.last && <span className={`flex items-center gap-1 font-semibold ${maturity.allMatured ? 'text-rose-600' : 'text-slate-600'}`}><Calendar className="w-3 h-3" />Vence {fmtDate(maturity.last)}{maturity.allMatured ? ' · todo vencido' : ''}</span>}
+                      {maturity.allMatured && !closedStage && (
+                        <button onClick={e => { e.stopPropagation(); void updatePipelineMeta(tx.id, { pipelineStage: 'Terminado' }); }} className="text-[11px] font-black text-rose-700 bg-rose-50 border border-rose-200 rounded-md px-2 py-0.5 hover:bg-rose-100">
+                          Marcar como Terminado
+                        </button>
+                      )}
                       {txFiles.length > 0
                         ? <span className="flex items-center gap-1"><FileText className="w-3 h-3" />{txFiles.length} archivo{txFiles.length !== 1 ? 's' : ''}</span>
                         : <span className="flex items-center gap-1 text-indigo-400 font-semibold"><Upload className="w-3 h-3" />Subir contrato / anexos</span>
@@ -696,7 +715,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                       <div className="flex items-center justify-between mb-3">
                         <div>
                           <p className="text-xs font-black text-slate-700 uppercase tracking-widest">Disposiciones</p>
-                          <p className="text-xs text-slate-400 mt-0.5">Carga una o varias disposiciones cuando no se usa todo el monto autorizado de una sola vez.</p>
+                          <p className="text-xs text-slate-400 mt-0.5">Carga una o varias disposiciones: fecha de disposición, fecha de vencimiento (en rojo si ya venció), monto y moneda.</p>
                         </div>
                         <button
                           onClick={() => addDisposition(tx)}
@@ -711,8 +730,9 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                       ) : (
                         <div className="space-y-2">
                           {txDispositions.map(disposition => (
-                            <div key={disposition.id} className="grid grid-cols-1 md:grid-cols-[140px_1fr_110px_1fr_auto] gap-2 items-center">
-                              <input type="date" value={disposition.date} onChange={e => updateDisposition(tx.id, disposition.id, { date: e.target.value })} className={inputClass} />
+                            <div key={disposition.id} className="grid grid-cols-1 md:grid-cols-[140px_140px_1fr_110px_1fr_auto] gap-2 items-center">
+                              <input type="date" title="Fecha de disposición" value={disposition.date} onChange={e => updateDisposition(tx.id, disposition.id, { date: e.target.value })} className={inputClass} />
+                              <input type="date" title="Fecha de vencimiento" value={disposition.maturityDate || ''} onChange={e => updateDisposition(tx.id, disposition.id, { maturityDate: e.target.value })} className={`${inputClass} ${disposition.maturityDate && disposition.maturityDate < new Date().toISOString().slice(0, 10) ? 'border-rose-300 text-rose-700' : ''}`} />
                               <input type="text" inputMode="decimal" value={disposition.amount} onChange={e => updateDisposition(tx.id, disposition.id, { amount: e.target.value })} placeholder="Monto dispuesto" className={inputClass} />
                               <select value={disposition.currency} onChange={e => updateDisposition(tx.id, disposition.id, { currency: e.target.value })} className={inputClass}>
                                 {['MXN', 'USD', 'EUR'].map(c => <option key={c} value={c}>{c}</option>)}

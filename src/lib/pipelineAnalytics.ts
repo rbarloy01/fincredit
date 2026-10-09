@@ -4,7 +4,7 @@
 import { Client, CrmActivity } from '../db/index';
 import { LineMovement, computeLineBalance } from './lineLedger';
 import { isClientMonitored } from './clientStatus';
-import { CRM_STAGES, CrmStage, currentStage } from './crmPipeline';
+import { CRM_STAGES, CrmStage, currentStage, isOpenDealStage } from './crmPipeline';
 
 // Probability of close per stage, as configured by the team (Configuración!L:M).
 export const STAGE_PROBABILITY: Record<CrmStage, number> = {
@@ -16,6 +16,8 @@ export const STAGE_PROBABILITY: Record<CrmStage, number> = {
   '6. Contrato': 0.95,
   '7. Disposición': 1,
   Monitoring: 1,
+  Dormant: 0,
+  Terminado: 0,
 };
 
 export interface UnderwritingMeta {
@@ -155,7 +157,7 @@ export function computeStageCycleTimes(activitiesByClient: Record<string, CrmAct
       if (usableDurationDays(days)) (durations.get(prevStage) || durations.set(prevStage, []).get(prevStage)!).push(days);
     }
   }
-  return CRM_STAGES.filter(s => s !== 'Monitoring')
+  return CRM_STAGES.filter(s => isOpenDealStage(s))
     .map(stage => {
       const values = durations.get(stage) || [];
       if (!values.length) return null;
@@ -201,7 +203,7 @@ export function buildPipelineSummary(
     const meta = pipelineMetaByClient[client.id];
     const stage = currentStage(activitiesByClient[client.id] || []);
 
-    if (meta?.underwriting && stage !== 'Monitoring') {
+    if (meta?.underwriting && isOpenDealStage(stage)) {
       const uw = meta.underwriting;
       deals += 1;
       const monto = uw.monto || 0;
@@ -265,7 +267,7 @@ export function buildPipelineSummary(
       deals,
       nuevosProspectosTrimestre,
       porCategoria: Array.from(uwByCategoria.entries()).map(([categoria, v]) => ({ categoria, ...v })),
-      porEtapa: CRM_STAGES.filter(s => s !== 'Monitoring')
+      porEtapa: CRM_STAGES.filter(s => isOpenDealStage(s))
         .map(stage => ({ stage, ...(uwByEtapa.get(stage) || { count: 0, monto: 0 }) }))
         .filter(e => e.count > 0),
     },

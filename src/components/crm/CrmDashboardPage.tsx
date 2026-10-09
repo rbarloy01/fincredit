@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Building2, CheckCircle2, Columns3, ExternalLink, FileText, KanbanSquare, ListChecks, Search, Table2, TrendingUp } from 'lucide-react';
 import { Client, ContractFile, Covenant_DB, CrmActivity, db, FinancialStatement_DB, Transaction } from '../../db/index';
 import { computeClientSignal, ClientSignal } from '../../lib/portfolioAnalytics';
-import { CRM_STAGES, CrmStage, collectOpenReminders, currentStage } from '../../lib/crmPipeline';
+import { CRM_STAGES, CrmStage, collectOpenReminders, currentStage, isClosedStage } from '../../lib/crmPipeline';
 import KanbanBoard from './KanbanBoard';
 import RemindersInbox from './RemindersInbox';
 import { Session } from '../../services/auth';
@@ -198,7 +198,7 @@ const CrmDashboardPage: React.FC<Props> = ({ onSelectClient, session }) => {
         clientId,
         contactId: undefined,
         type: 'review',
-        phase: toStage === 'Monitoring' ? 'Monitoring' : 'Underwriting',
+        phase: toStage === 'Monitoring' || isClosedStage(toStage) ? 'Monitoring' : 'Underwriting',
         recordType: 'Avance de etapa',
         nextStage: toStage,
         contactName: '',
@@ -214,6 +214,12 @@ const CrmDashboardPage: React.FC<Props> = ({ onSelectClient, session }) => {
         ownerId: undefined,
         createdBy: session.userId,
       });
+      // Dormant / Terminado también cambian el estatus del cliente (dashboard y alertas dejan de exigirle EEFF).
+      const status = toStage === 'Dormant' ? 'dormant' : toStage === 'Terminado' ? 'cerrado' : isClosedStage(from) ? 'activo' : null;
+      if (status && client && client.status !== status) {
+        await db.updateClient(clientId, { status });
+        setClients(prev => prev.map(c => (c.id === clientId ? { ...c, status } : c)));
+      }
       await reloadActivities(clientId);
     } catch (err: any) {
       setError(err.message || 'No se pudo mover la etapa del cliente.');

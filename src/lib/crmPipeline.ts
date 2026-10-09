@@ -11,9 +11,17 @@ export const CRM_STAGES = [
   '6. Contrato',
   '7. Disposición',
   'Monitoring',
+  'Dormant',
+  'Terminado',
 ] as const;
 
 export type CrmStage = (typeof CRM_STAGES)[number];
+
+// Etapas de cierre: crédito sin actividad (dormant) o terminado (disposiciones/contrato vencidos y pagados). No son
+// negocio en el pipeline ni cuentan en montos ponderados, y solo se dejan con un nuevo "avance de etapa" explícito.
+export const CLOSED_STAGES: readonly CrmStage[] = ['Dormant', 'Terminado'];
+export const isClosedStage = (stage: string) => (CLOSED_STAGES as readonly string[]).includes(stage);
+export const isOpenDealStage = (stage: string) => stage !== 'Monitoring' && !isClosedStage(stage);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -30,6 +38,11 @@ function ts(value?: string): number {
 // ever recorded — so that phase tag is treated as its own signal too.
 // Falls back to the first stage.
 export function currentStage(activities: CrmActivity[] = []): CrmStage {
+  // Una etapa de cierre explícita manda sobre actividades posteriores de monitoreo (notas, llamadas).
+  const lastExplicit = activities
+    .filter(a => a.nextStage && (CRM_STAGES as readonly string[]).includes(a.nextStage))
+    .sort((a, b) => ts(b.createdAt) - ts(a.createdAt))[0];
+  if (lastExplicit && isClosedStage(lastExplicit.nextStage as string)) return lastExplicit.nextStage as CrmStage;
   const signals = activities
     .map(a => {
       if (a.nextStage && (CRM_STAGES as readonly string[]).includes(a.nextStage)) {

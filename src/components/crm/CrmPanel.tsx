@@ -117,7 +117,7 @@ function typeLabel(value: CrmActivityType) {
 
 const PHASES = ['Underwriting', 'Monitoring', 'Renovación', 'Apoyo'];
 const RECORD_TYPES = ['Comunicación', 'Reunión', 'Doc. Recibido', 'Avance', 'Avance de etapa', 'Disposición', 'Nota'];
-const STAGES = ['1. Contacto', '2. Term Sheet', '3. Checklist', '4. Análisis', '5. Due Diligence', '6. Contrato', '7. Disposición', 'Monitoring'];
+const STAGES = ['1. Contacto', '2. Term Sheet', '3. Checklist', '4. Análisis', '5. Due Diligence', '6. Contrato', '7. Disposición', 'Monitoring', 'Dormant', 'Terminado'];
 
 const CATEGORIAS = ['Nuevo Cliente', 'Renovación', 'Reingreso'];
 const PRIORIDADES = ['Crítico', 'Alto', 'Medio', 'Bajo'];
