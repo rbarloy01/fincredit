@@ -313,8 +313,8 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
         model: current.model,
         fallbackModels: current.fallbackModels,
       });
-      setTestResult(result.includes('OK') || result.length > 0 ? 'success' : 'error');
-      setTestMsg(result.includes('OK') ? 'Conexión exitosa' : result.slice(0, 60));
+      setTestResult(result.startsWith('OK') ? 'success' : 'error');
+      setTestMsg(result.startsWith('OK') ? `Conexión exitosa${result.slice(2)}` : result.slice(0, 120));
     } catch (e: any) {
       setTestResult('error');
       setTestMsg(e.message?.slice(0, 80) || 'Error de conexión');

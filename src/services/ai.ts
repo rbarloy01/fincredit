@@ -43,8 +43,13 @@ const BYTEZ_MODEL = 'Qwen/Qwen3-4B';
 // Modelo sin "razonamiento": en el plan gratuito de NVIDIA los modelos que piensan antes de responder (DeepSeek,
 // Nemotron 3) tardan más de lo que espera el proxy (58 s) incluso para un "OK".
 const NVIDIA_NIM_MODEL = 'mistralai/mistral-large-2-instruct';
-// NVIDIA deja de servir modelos aunque sigan en su catálogo (404) o los satura (504): se prueba la cadena vigente.
-const NVIDIA_NIM_FALLBACK_MODELS = ['nv-mistralai/mistral-nemo-12b-instruct', 'openai/gpt-oss-20b', 'deepseek-ai/deepseek-v4.1-flash'];
+// NVIDIA deja de servir modelos aunque sigan en su catálogo (404 "no disponible para la cuenta") o los satura (504):
+// se prueba la cadena y se RECUERDA el que respondió con esta llave para usarlo primero la próxima vez.
+const NVIDIA_NIM_FALLBACK_MODELS = ['google/gemma-4-31b-it', 'openai/gpt-oss-20b', 'nv-mistralai/mistral-nemo-12b-instruct', 'deepseek-ai/deepseek-v4.1-flash'];
+const NIM_WORKING_MODEL_KEY = 'finmonitor_nim_working_model';
+let lastNimModel = '';
+const rememberNimModel = (model: string) => { lastNimModel = model; try { localStorage.setItem(NIM_WORKING_MODEL_KEY, model); } catch { /* sin storage */ } };
+const workingNimModel = () => { try { return localStorage.getItem(NIM_WORKING_MODEL_KEY) || ''; } catch { return ''; } };
 const RETIRED_NIM_MODELS = new Set(['nvidia/llama-3.1-nemotron-70b-instruct', 'deepseek-ai/deepseek-v4.1-flash']);
 // NVIDIA NIM hosts free vision models (checked against its public catalog). Used automatically when the request has images.
 const NVIDIA_NIM_VISION_MODEL = 'google/gemma-4-31b-it';
@@ -621,8 +626,9 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
       throw new Error(`NVIDIA NIM: ningún modelo de visión disponible para esta cuenta (${visionModels.join(', ')}). ${lastVisionError}`);
     }
     const configuredModel = settings.model && !RETIRED_NIM_MODELS.has(settings.model) ? settings.model : (provider === 'bytez' ? BYTEZ_MODEL : NVIDIA_NIM_MODEL);
+    const remembered = provider === 'nvidia_nim' ? workingNimModel() : '';
     const models = provider === 'nvidia_nim'
-      ? [configuredModel, ...[NVIDIA_NIM_MODEL, ...NVIDIA_NIM_FALLBACK_MODELS].filter(m => m !== configuredModel)]
+      ? Array.from(new Set([remembered, configuredModel, NVIDIA_NIM_MODEL, ...NVIDIA_NIM_FALLBACK_MODELS].filter(Boolean)))
       : [configuredModel];
     let lastError = '';
     for (const model of models) {
@@ -638,7 +644,13 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
       // NVIDIA: si un modelo no contesta a tiempo (504) se pasa al siguiente en vez de reintentar el mismo.
       const res = await fetchAIWithRetry('/api/bytez', { provider, apiKey, payload }, provider === 'nvidia_nim' ? [429, 502, 503] : undefined);
       const data = await readAIResponseJson(res, provider === 'bytez' ? 'Bytez' : 'NVIDIA NIM');
-      if (res.ok) return data.choices?.[0]?.message?.content || '';
+      if (res.ok) {
+        const msg = data.choices?.[0]?.message || {};
+        // Modelos que razonan (gpt-oss, deepseek) pueden dejar la respuesta en reasoning_content.
+        const content = msg.content || msg.reasoning_content || msg.reasoning || '';
+        if (provider === 'nvidia_nim') rememberNimModel(model);
+        return content;
+      }
       const detail = String(data.error?.message || data.detail || data.title || data.error || `${provider} error ${res.status}`);
       lastError = detail;
       // Modelo no disponible (404) o que no respondió a tiempo (504) → siguiente modelo; llave inválida (401/403) o límite (429) no.
@@ -1285,9 +1297,11 @@ Devuelve:
 // ─── Test connection ──────────────────────────────────────────────────────────
 
 export async function testConnection(settings: AISettings): Promise<string> {
-  // Respuesta mínima: con 8,000 tokens de margen un modelo que razona puede tardar más de un minuto en decir "OK".
-  const text = await callAI(settings, 'Responde únicamente con: OK', 'Di "OK"', undefined, { chat: true, maxTokens: 32 });
-  return text.trim();
+  // Respuesta corta pero con margen: un modelo que razona gasta tokens "pensando" antes de escribir el OK.
+  lastNimModel = '';
+  const text = await callAI(settings, 'Responde únicamente con: OK', 'Di "OK"', undefined, { chat: true, maxTokens: 512 });
+  const model = settings.provider === 'nvidia_nim' && lastNimModel ? ` · modelo ${lastNimModel}` : '';
+  return text.trim() ? `OK${model}` : `El proveedor respondió vacío${model}`;
 }
 
 
