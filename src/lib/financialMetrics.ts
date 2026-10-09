@@ -2,7 +2,7 @@ import type { Covenant_DB, FinancialStatement_DB } from '../db/index';
 import { findConsolidatedMetricValue, metricAliases } from './accountConsolidation';
 import { parseNullableFinancialNumber } from './numberParsing';
 
-export type RatioStatus = 'cumple' | 'alerta' | 'incumple';
+export type RatioStatus = 'cumple' | 'alerta' | 'incumple' | 'sin_dato';
 export type CovenantMovement = 'betterment' | 'deterioration' | 'stable' | 'new' | 'insufficient';
 
 export function isPercentCovenant(cov: Covenant_DB) {
@@ -261,24 +261,25 @@ function hasMiscellaneousPrefix(value: string): boolean {
 // findRaw depends only on the line items + alias list + types, so its result is cached
 // per rawLineItems array (getMetric re-asks the same lookups via recursive metrics).
 const findRawCache = new WeakMap<object, Map<string, number | null>>();
-function findRaw(stmt: FinancialStatement_DB, names: string[], types?: string[]): number | null {
+function findRaw(stmt: FinancialStatement_DB, names: string[], types?: string[], exclude?: RegExp): number | null {
   const items = rawLineItems(stmt);
   let perStmt = findRawCache.get(items);
   if (!perStmt) { perStmt = new Map(); findRawCache.set(items, perStmt); }
-  const key = `${names.join('\u0001')}\u0002${types ? types.join(',') : '*'}`;
+  const key = `${names.join('\u0001')}\u0002${types ? types.join(',') : '*'}\u0002${exclude ? exclude.source : ''}`;
   if (perStmt.has(key)) return perStmt.get(key) as number | null;
-  const result = findRawUncached(stmt, names, types);
+  const result = findRawUncached(stmt, names, types, exclude);
   perStmt.set(key, result);
   return result;
 }
 
-function findRawUncached(stmt: FinancialStatement_DB, names: string[], types?: string[]): number | null {
+function findRawUncached(stmt: FinancialStatement_DB, names: string[], types?: string[], exclude?: RegExp): number | null {
   const aliases = preparedAliases(names);
   let best: { value: number; score: number } | null = null;
   preparedItems(stmt).forEach((item, itemIndex) => {
     const { n, words: itemWords, section } = item;
     const typeOk = !types || types.includes(item.type);
     if (!typeOk) return;
+    if (exclude && exclude.test(item.n)) return;
     const itemIsMiscellaneous = item.misc;
     const itemDigits = item.digits;
     aliases.forEach(alias => {
@@ -429,8 +430,18 @@ export function getMetric(stmt: FinancialStatement_DB, key: string): number | nu
     case 'banksFundsShortTerm': return firstValue(raw(['prestamos total corto plazo', 'préstamos total corto plazo', 'prestamos (total corto plazo)', 'prestamos corto plazo', 'préstamos corto plazo', 'bancos y fondos corto plazo', 'bancos y fondos cp', 'fondeo corto plazo', 'prestamos bancarios y de otros organismos de corto plazo', 'prestamos interbancarios y de otros organismos de corto plazo', ...metricAliases('banksFundsShortTerm')], ['balance_general']), findConsolidatedMetricValue(stmt, 'banksFundsShortTerm'));
     case 'banksFundsLongTerm': return firstValue(raw(['prestamos total largo plazo', 'préstamos total largo plazo', 'prestamos (total largo plazo)', 'prestamos largo plazo', 'préstamos largo plazo', 'bancos y fondos largo plazo', 'bancos y fondos lp', 'fondeo largo plazo', 'prestamos bancarios y de otros organismos de largo plazo', 'prestamos interbancarios y de otros organismos de largo plazo', ...metricAliases('banksFundsLongTerm')], ['balance_general']), findConsolidatedMetricValue(stmt, 'banksFundsLongTerm'));
     case 'totalLiabilities': return firstValue(raw(['total de pasivo', 'total, de pasivo', 'total pasivo', 'suma del pasivo', 'pasivo total', ...metricAliases('totalLiabilities')], ['balance_general']), findConsolidatedMetricValue(stmt, 'totalLiabilities'), getMetric(stmt, 'totalDebt'));
-    case 'totalAssets': return firstValue(m.totalAssets, findConsolidatedMetricValue(stmt, 'totalAssets'), raw(['total activo', 'activos totales', 'suma del activo', ...metricAliases('totalAssets')], ['balance_general']));
-    case 'equity': return firstValue(m.equity, findConsolidatedMetricValue(stmt, 'equity'), raw(['capital contable', 'patrimonio', 'suma del capital', 'total capital', ...metricAliases('equity')], ['balance_general']));
+    // Activos totales / capital contable en exactamente 0 = extracción fallida (Red Girasol abr-26), no un dato: se usa el renglón del balance.
+    case 'totalAssets': return firstValue(nz(m.totalAssets), findConsolidatedMetricValue(stmt, 'totalAssets'), raw(['total activo', 'activos totales', 'suma del activo', ...metricAliases('totalAssets')], ['balance_general']));
+    // "Total de Pasivo + Capital" NO es capital contable (tiene las palabras "total" y "capital"): ICAP salía 100% (Kredi jul-23).
+    case 'equity': {
+      // Un "capital" igual al renglón combinado "pasivo + capital" (o "liabilities and capital") es el total del balance,
+      // venga del mapeo, de las reglas de consolidación o del texto: se descarta.
+      const combined = rawLineItems(stmt)
+        .filter(i => /(pasivo|liabilit)/i.test(i.name) && /(capital|equity|patrimonio)/i.test(i.name) && typeof i.value === 'number')
+        .map(i => i.value as number);
+      const valid = (v: number | null | undefined) => (v === null || v === undefined || combined.some(c => Math.abs(c - v) < 0.5) ? null : v);
+      return firstValue(valid(nz(m.equity)), valid(findConsolidatedMetricValue(stmt, 'equity')), valid(findRaw(stmt, ['capital contable', 'patrimonio', 'suma del capital', 'total capital', ...metricAliases('equity')], ['balance_general'], /pasivo|liabilit/)));
+    }
     case 'cash': return firstValue(findConsolidatedMetricValue(stmt, 'cash'), raw(['efectivo', 'bancos', 'equivalentes de efectivo', ...metricAliases('cash')], ['balance_general']));
     case 'availableInvestments': return firstValue(raw(['inversiones temporales', 'inversiones disponibles', 'inversiones en valores', 'inversiones no comprometidas', ...metricAliases('availableInvestments')], ['balance_general']), findConsolidatedMetricValue(stmt, 'availableInvestments'));
     case 'loanPortfolio': return firstValue(raw(['cartera de credito subtotal', 'cartera de credito (subtotal)', 'cartera de credito total', 'cartera de credito', 'cartera vigente', 'creditos vigentes', ...metricAliases('loanPortfolio')], ['balance_general']), findConsolidatedMetricValue(stmt, 'loanPortfolio'));
@@ -735,7 +746,9 @@ export function evaluateCovenantForStatement(cov: Covenant_DB, stmt: FinancialSt
     return { value: annual, status: 'cumple', formula, annualized: true };
   }
   const value = evaluateFormula(formula, stmt);
-  if (value === null || cov.operator === 'none') return { value, status: 'cumple', formula };
+  // Sin valor no hay cumplimiento que afirmar: antes salía "cumple" y escondía el incumplimiento del corte previo.
+  if (value === null) return { value, status: 'sin_dato', formula };
+  if (cov.operator === 'none') return { value, status: 'cumple', formula };
   const threshold = resolveCovenantThreshold(cov);
   if (threshold === null) return { value, status: 'cumple', formula };
   let ok = true;
@@ -803,7 +816,7 @@ function movementFor(
 ): CovenantMovement {
   if (value === null) return 'insufficient';
   if (previousValue === null) return 'new';
-  const rank: Record<RatioStatus, number> = { cumple: 0, alerta: 1, incumple: 2 };
+  const rank: Record<RatioStatus, number> = { cumple: 0, sin_dato: 0, alerta: 1, incumple: 2 };
   if (previousStatus && rank[status] > rank[previousStatus]) return 'deterioration';
   if (previousStatus && rank[status] < rank[previousStatus]) return 'betterment';
   const delta = value - previousValue;
@@ -878,7 +891,7 @@ export function prioritizedLatestCovenantPerformance(
   contractCovenantKeys: string[] = [],
 ): PrioritizedCovenantPerformance[] {
   const covenantsById = new Map(covenants.map(cov => [cov.id, cov]));
-  const statusRank: Record<RatioStatus, number> = { incumple: 0, alerta: 1, cumple: 2 };
+  const statusRank: Record<RatioStatus, number> = { incumple: 0, alerta: 1, cumple: 2, sin_dato: 3 };
   const movementRank: Record<CovenantMovement, number> = { deterioration: 0, betterment: 1, stable: 2, new: 3, insufficient: 4 };
   return latestCovenantPerformance(covenants, statements)
     .map(row => {

@@ -79,23 +79,25 @@ function evaluateCovenant(cov: Covenant_DB, statements: FinancialStatement_DB[])
   return { value, status: 'cumple' };
 }
 
-const StatusBadge: React.FC<{ status: 'cumple' | 'alerta' | 'incumple' }> = ({ status }) => {
+const StatusBadge: React.FC<{ status: 'cumple' | 'alerta' | 'incumple' | 'sin_dato' }> = ({ status }) => {
   const monitored = useClientMonitored();
   if (!monitored) return <span className="flex items-center gap-1 text-xs font-black px-2.5 py-1 rounded-full border bg-slate-100 text-slate-500 border-slate-200">SIN MONITOREO</span>;
   const map = {
     cumple: 'bg-emerald-100 text-emerald-800 border-emerald-200',
     alerta: 'bg-amber-100 text-amber-800 border-amber-200',
     incumple: 'bg-rose-100 text-rose-800 border-rose-200',
+    sin_dato: 'bg-slate-100 text-slate-500 border-slate-200',
   };
   const icons = {
     cumple: <CheckCircle className="w-3 h-3" />,
     alerta: <AlertTriangle className="w-3 h-3" />,
     incumple: <XCircle className="w-3 h-3" />,
+    sin_dato: null,
   };
   return (
     <span className={`flex items-center gap-1 text-xs font-black px-2.5 py-1 rounded-full border ${map[status]}`}>
       {icons[status]}
-      {status.toUpperCase()}
+      {status === 'sin_dato' ? 'SIN DATO' : status.toUpperCase()}
     </span>
   );
 };

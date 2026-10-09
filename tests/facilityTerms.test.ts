@@ -19,3 +19,15 @@ test('términos del contrato: nulls quedan vacíos y las comisiones se conservan
   assert.equal(t.comisiones.length, 1);
   assert.equal(t.fuente, 'contrato');
 });
+
+import { parseLimit } from '../src/components/transactions/FacilityTermsEditor';
+
+test('el límite del covenant se entiende como lo escribe el analista', () => {
+  assert.equal(parseLimit('30%', 'percent').store, '0.3');
+  assert.equal(parseLimit('30', 'percent').store, '0.3');
+  assert.equal(parseLimit('0.30', 'percent').store, '0.3');
+  assert.equal(parseLimit('1.25x', 'number').store, '1.25');
+  assert.equal(parseLimit('1,25', 'number').store, '1.25');
+  assert.ok(parseLimit('abc', 'number').error);
+  assert.equal(parseLimit('', 'percent').store, null);
+});

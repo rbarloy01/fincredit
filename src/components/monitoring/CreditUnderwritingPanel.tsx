@@ -52,7 +52,7 @@ function dateLabel(value?: string) {
 }
 
 function statusClass(status: string) {
-  if (status === 'pausado') return 'bg-slate-50 text-slate-500 border-slate-200';
+  if (status === 'pausado' || status === 'sin_dato') return 'bg-slate-50 text-slate-500 border-slate-200';
   if (status === 'incumple') return 'bg-rose-50 text-rose-800 border-rose-200';
   if (status === 'alerta') return 'bg-amber-50 text-amber-800 border-amber-200';
   return 'bg-emerald-50 text-emerald-800 border-emerald-200';

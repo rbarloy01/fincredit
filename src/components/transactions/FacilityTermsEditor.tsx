@@ -4,7 +4,26 @@ import { db } from '../../db/index';
 import {
   type FacilityTerms, emptyFacilityTerms, effectiveRate, effectiveDefaultRate, RATE_REFERENCES,
 } from '../../lib/facilityTerms';
-import { KNOWN_INDICATORS, knownIndicatorFormula, knownIndicatorDirection, thresholdToStore } from '../../lib/covenantBuilder';
+import { KNOWN_INDICATORS, knownIndicatorFormula, knownIndicatorDirection, type LimitUnit } from '../../lib/covenantBuilder';
+import type { Covenant_DB } from '../../db/index';
+
+// Interpreta el límite como lo escriba el analista: "30%", "30", "0.30" (=30%), "1.25x", "1,25".
+// Devuelve el valor a guardar (fracción si es %) y el texto de cómo quedó, o un error legible.
+export function parseLimit(input: string, unit: LimitUnit): { store: string | null; display: string; error: string } {
+  const raw = input.trim();
+  if (!raw) return { store: null, display: '', error: '' };
+  const cleaned = raw.replace(/\s/g, '').replace(/x$/i, '').replace(/,(?=\d{1,2}$)/, '.').replace(/,/g, '');
+  const hasPct = cleaned.endsWith('%');
+  const n = Number(cleaned.replace('%', ''));
+  if (!Number.isFinite(n)) return { store: null, display: '', error: 'No entiendo ese límite: escribe un número, p. ej. 30% o 1.25' };
+  if (unit === 'percent') {
+    const fraction = hasPct ? n / 100 : n <= 1.5 ? n : n / 100;   // 0.30 → 30%; 30 → 30%
+    return { store: String(Math.round(fraction * 1e8) / 1e8), display: `${(fraction * 100).toLocaleString('es-MX', { maximumFractionDigits: 2 })}%`, error: '' };
+  }
+  return { store: String(n), display: `${n.toLocaleString('es-MX', { maximumFractionDigits: 4 })}x`, error: '' };
+}
+
+const OP_TEXT: Record<string, string> = { gte: '≥', gt: '>', lte: '≤', lt: '<' };
 
 const inputClass = 'bg-slate-50 border border-slate-200 text-slate-900 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 w-full';
 const label = 'text-[10px] font-black text-slate-500 uppercase tracking-wider block mb-1';
@@ -24,6 +43,10 @@ export default function FacilityTermsEditor({ clientId, transactionId, terms, on
   const [saving, setSaving] = useState(false);
   const [cov, setCov] = useState({ key: KNOWN_INDICATORS[0].key, operator: knownIndicatorDirection(KNOWN_INDICATORS[0]) as string, limit: '' });
   const [addingCov, setAddingCov] = useState(false);
+  const [covMsg, setCovMsg] = useState('');
+  const [facilityCovenants, setFacilityCovenants] = useState<Covenant_DB[]>([]);
+  const loadFacilityCovenants = () => db.getCovenants(clientId).then(all => setFacilityCovenants(all.filter(c => c.type === 'financial' && c.transactionId === transactionId))).catch(() => undefined);
+  useEffect(() => { void loadFacilityCovenants(); }, [clientId, transactionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { setDraft(terms || emptyFacilityTerms()); setDirty(false); }, [terms]);
 
@@ -41,25 +64,36 @@ export default function FacilityTermsEditor({ clientId, transactionId, terms, on
   const addCovenant = async () => {
     const ind = KNOWN_INDICATORS.find(i => i.key === cov.key);
     if (!ind) return;
-    const threshold = thresholdToStore(cov.limit, ind.unit);
-    if (!threshold) { alert('Captura el límite del covenant.'); return; }
+    const parsed = parseLimit(cov.limit, ind.unit);
+    if (!parsed.store) { setCovMsg(parsed.error || 'Escribe el límite del contrato.'); return; }
     setAddingCov(true);
+    setCovMsg('');
     try {
       await db.createCovenant({
         clientId, transactionId, name: ind.label, type: 'financial', formula: knownIndicatorFormula(ind),
-        threshold, operator: cov.operator as any, description: `${ind.hint} · límite del contrato`, isCustom: true,
+        threshold: parsed.store, operator: cov.operator as any, description: `${ind.hint} · límite del contrato`, isCustom: true,
       });
       setCov(c => ({ ...c, limit: '' }));
+      setCovMsg(`✓ ${ind.label} ${OP_TEXT[cov.operator]} ${parsed.display} agregado: ya se calcula en Indicadores Financieros.`);
       onCovenantCreated();
-      alert(`Covenant "${ind.label}" agregado. Ya se calcula en Indicadores Financieros.`);
+      await loadFacilityCovenants();
     } catch (e: any) {
-      alert(`No se pudo agregar: ${e?.message || e}`);
+      setCovMsg(`No se pudo agregar: ${e?.message || e}`);
     } finally {
       setAddingCov(false);
     }
   };
 
+  const limitLabel = (c: Covenant_DB) => {
+    const ind = KNOWN_INDICATORS.find(i => knownIndicatorFormula(i) === c.formula);
+    const n = Number(c.threshold);
+    if (!c.threshold || !Number.isFinite(n)) return c.threshold || 'sin límite';
+    const percent = ind ? ind.unit === 'percent' : Math.abs(n) <= 1.5;
+    return `${OP_TEXT[c.operator] || ''} ${percent ? `${(n * 100).toLocaleString('es-MX', { maximumFractionDigits: 2 })}%` : `${n.toLocaleString('es-MX', { maximumFractionDigits: 4 })}x`}`;
+  };
+
   const selectedInd = KNOWN_INDICATORS.find(i => i.key === cov.key);
+  const preview = selectedInd ? parseLimit(cov.limit, selectedInd.unit) : { store: null, display: '', error: '' };
 
   return (
     <div className="space-y-4">
@@ -157,9 +191,25 @@ export default function FacilityTermsEditor({ clientId, transactionId, terms, on
               <option value="gte">≥ mínimo</option><option value="gt">&gt; mínimo</option><option value="lte">≤ máximo</option><option value="lt">&lt; máximo</option>
             </select>
           </div>
-          <div><span className={label}>Límite {selectedInd?.unit === 'percent' ? '(%)' : '(veces)'}</span><input className={inputClass} inputMode="decimal" value={cov.limit} onChange={e => setCov({ ...cov, limit: e.target.value })} placeholder={selectedInd?.unit === 'percent' ? 'ej. 15' : 'ej. 1.25'} /></div>
+          <div><span className={label}>Límite {selectedInd?.unit === 'percent' ? '(%)' : '(veces)'}</span><input className={`${inputClass} ${preview.error ? 'border-rose-300' : ''}`} value={cov.limit} onChange={e => { setCov({ ...cov, limit: e.target.value }); setCovMsg(''); }} placeholder={selectedInd?.unit === 'percent' ? 'ej. 30% o 0.30' : 'ej. 1.25x'} /></div>
           <button onClick={addCovenant} disabled={addingCov} className="flex items-center gap-1.5 text-xs bg-slate-900 text-white px-3 py-2 rounded-lg hover:bg-slate-700 disabled:opacity-40 font-bold"><Plus className="w-3.5 h-3.5" />{addingCov ? 'Agregando…' : 'Agregar'}</button>
         </div>
+        <p className={`text-xs mt-2 font-semibold ${preview.error || covMsg.startsWith('No') ? 'text-rose-600' : covMsg ? 'text-emerald-700' : 'text-slate-500'}`}>
+          {covMsg || preview.error || (preview.display ? `Se guardará como: ${selectedInd?.label} ${OP_TEXT[cov.operator]} ${preview.display}` : 'Escribe el límite como viene en el contrato (30%, 0.30 o 1.25x).')}
+        </p>
+        {facilityCovenants.length > 0 && (
+          <div className="mt-3 border-t border-slate-100 pt-2">
+            <p className={label}>Covenants financieros de esta facility</p>
+            <ul className="space-y-1">
+              {facilityCovenants.map(c => (
+                <li key={c.id} className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-slate-700">{c.name}</span>
+                  <span className="font-mono font-black text-slate-900">{limitLabel(c)}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
     </div>
   );
