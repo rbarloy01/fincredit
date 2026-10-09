@@ -539,9 +539,9 @@ const SettingsPage: React.FC<Props> = ({ session, onSettingsChange }) => {
                   {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
-              <p className="text-xs text-slate-400 mt-2 flex items-center gap-1">
-                <Info className="w-3 h-3" />
-                Opcional: si se deja vacía, el servidor usará la llave configurada en variables de entorno
+              <p className="text-xs text-slate-400 mt-2 flex items-start gap-1">
+                <Info className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                Por seguridad esta llave NO se guarda en el navegador: solo dura mientras la pestaña esté abierta. Para dejarla fija para todo el equipo, agrégala en Vercel (proyecto finmonitor-base → Settings → Environment Variables) como {({ gemini: 'GEMINI_API_KEY', claude: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY', openrouter: 'OPENROUTER_API_KEY', bytez: 'BYTEZ_API_KEY', nvidia_nim: 'NVIDIA_NIM_API_KEY' } as Record<string, string>)[currentProvider.id] || 'la variable del proveedor'} y vuelve a desplegar. Si la dejas vacía, se usa la del servidor.
               </p>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

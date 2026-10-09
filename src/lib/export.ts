@@ -29,6 +29,7 @@ import { classifyBalanceSection, childrenTie, type BalanceLine } from './balance
 import { injectNativeCharts, type ChartSpec } from './xlsxCharts';
 import { buildLoanTapeReportSheets } from './loanTapeReport';
 import { buildLiabilitiesReportSheets } from './liabilitiesReport';
+import { profileSourceColumns, type SourceTable } from './sourceColumns';
 import { type ComplianceLog, monthsEndingAt, monthLabel as complianceMonthLabel } from './covenantCompliance';
 import type { AssetLiabilityAnalysis } from './assetLiabilityAnalysis';
 import { classifyAccount } from './accountClassification';
@@ -2975,6 +2976,36 @@ function buildLoanTapeAnalystSheet(tapes: LoanTape_DB[]): SheetDef {
   };
 }
 
+// Lo que el cliente reporta, completo y tal cual (incluidas columnas en 0), más un diagnóstico por columna con alertas.
+function buildReportedColumnsSheets(tapes: LoanTape_DB[]): SheetDef[] {
+  const sources = tapes.flatMap(tape => {
+    const tables: SourceTable[] = Array.isArray(tape.extractedData?._source) ? tape.extractedData._source : [];
+    const mapping = Array.isArray(tape.extractedData?._mappingReport) ? tape.extractedData._mappingReport : [];
+    return tables.map(table => ({ tape, table, profile: profileSourceColumns(table, mapping) }));
+  });
+  if (!sources.length) {
+    return [{ name: 'Columnas Reportadas', rows: [['COLUMNAS REPORTADAS POR EL CLIENTE'], [], ['Este loan tape se cargó antes de que la app guardara las columnas originales. Vuelve a subir el archivo para verlas aquí.']], colWidths: [90] }];
+  }
+  const ALERT = { fill: 'FFF4DB', font: '9A6B00' };
+  const profileRows: SheetDef['rows'] = [['COLUMNAS REPORTADAS POR EL CLIENTE'], ['Todas las columnas del archivo, aunque vengan en 0. "Alerta" marca las que vienen completas en 0 o vacías: el cliente las reporta, confirma si es correcto.'], [], ['Archivo', 'Hoja', 'Columna reportada', 'Usada como', 'Con dato', 'En 0', 'Total', 'Alerta']];
+  const cellStyles: NonNullable<SheetDef['cellStyles']> = [];
+  sources.forEach(({ tape, table, profile }) => profile.forEach(col => {
+    profileRows.push([tape.fileName || tape.name, table.sheet, col.header, col.mappedTo || 'No se usa en el análisis', col.filled, col.zeros, col.total === null ? null : fmtNum(col.total, '#,##0.00'), col.flagText]);
+    if (col.flag) cellStyles.push({ row: profileRows.length, col: 8, ...ALERT });
+  }));
+  const sheets: SheetDef[] = [{ name: 'Columnas Reportadas', rows: profileRows, colWidths: [30, 18, 34, 26, 10, 10, 18, 34], cellStyles, freezeRows: 4 }];
+  sources.forEach(({ tape, table }, idx) => {
+    const name = sources.length === 1 ? 'Datos Reportados' : `Reportados ${idx + 1}`;
+    sheets.push({
+      name,
+      rows: [[`DATOS REPORTADOS — ${tape.fileName || tape.name} · hoja "${table.sheet}"`], [], table.headers, ...table.rows.map(r => r.map(v => (typeof v === 'boolean' ? (v ? 'Sí' : 'No') : v)))],
+      colWidths: table.headers.map(h => Math.min(28, Math.max(10, String(h).length + 2))),
+      freezeRows: 3,
+    });
+  });
+  return sheets;
+}
+
 export function buildLoanTapeSheets(tapes: LoanTape_DB[]): SheetDef[] {
   const contexts = buildLoanTapeExportContexts(tapes);
   const summary = buildLoanTape(tapes, contexts);
@@ -2989,6 +3020,7 @@ export function buildLoanTapeSheets(tapes: LoanTape_DB[]): SheetDef[] {
     summary,
     buildLoanTapeReadinessSheet(contexts),
     buildLoanTapeAnalystSheet(tapes),
+    ...buildReportedColumnsSheets(tapes),
     {
       name: 'Datos Estandarizados',
       rows: rowsFromObjects('DATOS ESTANDARIZADOS', allStandardized, ['archivo', 'loan_id', 'client', 'amount', 'outstanding_balance', 'interest_rate', 'loan_status', 'start_date', 'end_date', 'loan_type', 'days_overdue', 'currency', 'industry', 'state', 'file_date']),

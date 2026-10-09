@@ -439,6 +439,8 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
       // back to it at read time — no duplicated payload.
       extractedData: {
         _standardized: result.standardized, _mappingReport: result.mappingReport, _import: rec, _summary: result.summary,
+        // Columnas tal como las reporta el cliente (incluidas las que vienen en 0): se exportan y se marcan, no se pierden.
+        _source: result.sourceTables?.length ? result.sourceTables : undefined,
         _quality: (() => {
           const profile = buildLoanTapeDataProfile(result.standardized, result.mappingReport);
           return assessLoanTapeImport({

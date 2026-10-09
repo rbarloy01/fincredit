@@ -253,6 +253,8 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
               covenants={covenants}
               customFields={customFields}
               aiSettings={aiSettings}
+              onClientUpdate={handleClientUpdate}
+              onCustomFieldsChange={setCustomFields}
             />
           )}
           {activeTab === 'transacciones' && (

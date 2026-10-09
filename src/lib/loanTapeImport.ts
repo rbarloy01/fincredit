@@ -22,6 +22,7 @@ import {
   activeRows,
 } from './loanTapeAnalytics';
 import { loanStatusFromDpd, DPD_PROXY_DAYS, statusDpdConflicts } from './portfolioRules';
+import { buildSourceTable, type SourceTable } from './sourceColumns';
 import { inferLoanIds } from './loanIdentity';
 
 // push(...arr) revienta la pila con cientos de miles de filas (archivos que declaran A1:…1048576).
@@ -136,6 +137,8 @@ export interface ImportResult {
   mappingReport: MappingNote[];
   reconciliation: ImportReconciliation;
   summary?: LoanTapeImportSummary;
+  // Columnas tal como las reporta el cliente (solo hojas de detalle leídas por el mapeador genérico).
+  sourceTables?: SourceTable[];
 }
 
 const MOM_TOLERANCE = 0.4; // ±40% MoM balance swing → warn
@@ -499,7 +502,7 @@ function extractSummaryBreakdown(rows: any[][], fileName: string, fileDate: stri
 }
 
 // Generic fallback: re-key rows using a detected header row and run the synonym mapper.
-function extractGeneric(rows: any[][], fileName: string): { std: StandardLoan[]; notes: MappingNote[]; headerIdx: number; dpdValidation?: DpdValidation | null } {
+function extractGeneric(rows: any[][], fileName: string): { std: StandardLoan[]; notes: MappingNote[]; headerIdx: number; dpdValidation?: DpdValidation | null; header?: string[]; dataRows?: any[][] } {
   // pick the first row (within 8) that looks like a header: mostly non-numeric text, ≥3 labels
   // Reports often start with a title or a banner of totals: take the row that names the MOST loan-tape fields, and fall back
   // to the first text-like row when none stands out.
@@ -521,16 +524,16 @@ function extractGeneric(rows: any[][], fileName: string): { std: StandardLoan[];
   }
   if (headerIdx === -1) return { std: [], notes: [], headerIdx };
   const header = rows[headerIdx].map((c, i) => (isBlank(c) ? `col_${i}` : String(c)));
-  const objs = rows.slice(headerIdx + 1)
+  const dataRows = rows.slice(headerIdx + 1)
     .filter(r => nonEmptyCells(r) > 0)
     .filter(r => {
       // totals, sub-totals and export footers ("Filtros aplicados: …") are not loans
       const first = normalize(r.find(c => !isBlank(c)));
       return !/^(total|totales|gran total|subtotal|suma|filtros aplicados)/.test(first);
-    })
-    .map(r => Object.fromEntries(header.map((h, i) => [h, r[i] ?? null])));
+    });
+  const objs = dataRows.map(r => Object.fromEntries(header.map((h, i) => [h, r[i] ?? null])));
   const res = standardizeLoanTape(objs, fileName);
-  return { std: res.standardized, notes: res.mappingReport, headerIdx, dpdValidation: res.dpdValidation };
+  return { std: res.standardized, notes: res.mappingReport, headerIdx, dpdValidation: res.dpdValidation, header, dataRows };
 }
 
 function isReferenceSheet(sheetName: string) {
@@ -578,7 +581,7 @@ export function importLoanTapeSheets(sheets: SheetInput[], fileName: string, opt
   const allNotes: MappingNote[] = [];
   const reports: SheetReport[] = [];
   let summary: LoanTapeImportSummary | undefined;
-  const genericCandidates: Array<{ name: string; std: StandardLoan[]; notes: MappingNote[]; dpdValidation?: DpdValidation | null }> = [];
+  const genericCandidates: Array<{ name: string; std: StandardLoan[]; notes: MappingNote[]; dpdValidation?: DpdValidation | null; source?: SourceTable | null }> = [];
 
   for (const sheet of sheets) {
     const rows = sheet.rows || [];
@@ -631,7 +634,7 @@ export function importLoanTapeSheets(sheets: SheetInput[], fileName: string, opt
     const gen = extractGeneric(rows, fileName);
     if (gen.std.length > 0) {
       const withDate = gen.std.map(s => ({ ...s, file_date: s.file_date || sheetDate }));
-      genericCandidates.push({ name: sheet.name, std: withDate, notes: gen.notes, dpdValidation: gen.dpdValidation });
+      genericCandidates.push({ name: sheet.name, std: withDate, notes: gen.notes, dpdValidation: gen.dpdValidation, source: gen.header && gen.dataRows ? buildSourceTable(sheet.name, gen.header, gen.dataRows) : null });
       reports.push({ name: sheet.name, profile: 'GENERIC', dataRows, mappedRows: gen.std.length, status: 'fallback' });
     } else {
       reports.push({ name: sheet.name, profile: null, dataRows, mappedRows: 0, status: 'unmapped' });
@@ -764,5 +767,6 @@ export function importLoanTapeSheets(sheets: SheetInput[], fileName: string, opt
       messages,
     },
     summary,
+    sourceTables: genericCandidates.filter(c => kept.keep.includes(c) && c.source).map(c => c.source as SourceTable),
   };
 }
