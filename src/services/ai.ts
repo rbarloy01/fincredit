@@ -40,9 +40,13 @@ const RETIRED_OPENROUTER_MODELS = new Set(['stealth/ox-alpha']);
 const OPENROUTER_VISION_MODELS = ['google/gemma-4-31b-it:free', 'thinkingmachines/inkling:free', 'openrouter/free'];
 const VISION_CAPABLE = /gemini|gpt-4|gpt-5|claude|gemma-4|inkling|dots-3|omni|vision|-vl|qwen.*vl|pixtral|llama-4|openrouter\/free|openrouter\/auto/i;
 const BYTEZ_MODEL = 'Qwen/Qwen3-4B';
-const NVIDIA_NIM_MODEL = 'nvidia/llama-3.1-nemotron-70b-instruct';
+const NVIDIA_NIM_MODEL = 'deepseek-ai/deepseek-v4.1-flash';
+// NVIDIA deja de servir modelos aunque sigan en su catálogo (404 "not found for account"): se prueba la cadena vigente.
+const NVIDIA_NIM_FALLBACK_MODELS = ['nvidia/nemotron-3-super-120b-a12b', 'mistralai/mistral-large-2-instruct', 'openai/gpt-oss-20b'];
+const RETIRED_NIM_MODELS = new Set(['nvidia/llama-3.1-nemotron-70b-instruct']);
 // NVIDIA NIM hosts free vision models (checked against its public catalog). Used automatically when the request has images.
 const NVIDIA_NIM_VISION_MODEL = 'google/gemma-4-31b-it';
+const NVIDIA_NIM_VISION_FALLBACKS = ['meta/llama-3.2-90b-vision-instruct', 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning'];
 const NIM_VISION_CAPABLE = /gemma-[34]|vision|-vl|omni|neva|vila|fuyu|kosmos|cosmos|phi-.*vision/i;
 const NIM_MAX_IMAGES = 10;
 const AI_PROVIDERS: AIProvider[] = ['gemini', 'claude', 'openai', 'openrouter', 'bytez', 'nvidia_nim'];
@@ -83,6 +87,7 @@ export function defaultProviderConfig(provider: AIProvider): AIProviderConfig {
 function normalizeProviderConfig(provider: AIProvider, config?: Partial<AIProviderConfig>): AIProviderConfig {
   let model = config?.model || defaultModelForProvider(provider);
   let fallbackModels = config?.fallbackModels || defaultFallbackModelsForProvider(provider);
+  if (provider === 'nvidia_nim' && RETIRED_NIM_MODELS.has(model)) model = defaultModelForProvider('nvidia_nim');
   if (provider === 'openrouter') {
     // A retired model makes every extraction fail ("No endpoints found"): move saved settings to the current default.
     if (RETIRED_OPENROUTER_MODELS.has(model)) model = defaultModelForProvider('openrouter');
@@ -593,33 +598,53 @@ async function callAI(settings: AISettings, systemPrompt: string, userPrompt: st
       const model = NIM_VISION_CAPABLE.test(configured) ? configured : NVIDIA_NIM_VISION_MODEL;
       const pages = mediaItems.filter(item => item.mimeType.startsWith('image/')).slice(0, NIM_MAX_IMAGES);
       if (!pages.length) throw new Error('NVIDIA NIM lee imágenes (JPG/PNG o páginas de PDF). Convierte el archivo a imágenes o usa otro proveedor.');
-      const nimPayload = {
+      const visionModels = [model, ...[NVIDIA_NIM_VISION_MODEL, ...NVIDIA_NIM_VISION_FALLBACKS].filter(m => m !== model)];
+      let lastVisionError = '';
+      for (const visionModel of visionModels) {
+        const nimPayload = {
+          model: visionModel,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: [...pages.map(item => ({ type: 'image_url', image_url: { url: `data:${item.mimeType};base64,${item.base64}` } })), { type: 'text', text: userPrompt }] },
+          ],
+          temperature: 0,
+          max_tokens: maxTokens,
+        };
+        const nimRes = await fetchAIWithRetry('/api/bytez', { provider, apiKey, payload: nimPayload });
+        const nimData = await readAIResponseJson(nimRes, 'NVIDIA NIM');
+        if (nimRes.ok) return nimData.choices?.[0]?.message?.content || '';
+        lastVisionError = String(nimData.error?.message || nimData.detail || nimData.title || nimData.error || `NVIDIA NIM error ${nimRes.status}`);
+        if (nimRes.status !== 404) throw new Error(nimRes.status === 401 || nimRes.status === 403 ? `NVIDIA NIM rechazó la llave (${nimRes.status}): revisa que sea una llave nvapi- vigente. ${lastVisionError}` : lastVisionError);
+      }
+      throw new Error(`NVIDIA NIM: ningún modelo de visión disponible para esta cuenta (${visionModels.join(', ')}). ${lastVisionError}`);
+    }
+    const configuredModel = settings.model && !RETIRED_NIM_MODELS.has(settings.model) ? settings.model : (provider === 'bytez' ? BYTEZ_MODEL : NVIDIA_NIM_MODEL);
+    const models = provider === 'nvidia_nim'
+      ? [configuredModel, ...[NVIDIA_NIM_MODEL, ...NVIDIA_NIM_FALLBACK_MODELS].filter(m => m !== configuredModel)]
+      : [configuredModel];
+    let lastError = '';
+    for (const model of models) {
+      const payload = {
         model,
         messages: [
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: [...pages.map(item => ({ type: 'image_url', image_url: { url: `data:${item.mimeType};base64,${item.base64}` } })), { type: 'text', text: userPrompt }] },
+          { role: 'user', content: userPrompt },
         ],
         temperature: 0,
         max_tokens: maxTokens,
       };
-      const nimRes = await fetchAIWithRetry('/api/bytez', { provider, apiKey, payload: nimPayload });
-      const nimData = await readAIResponseJson(nimRes, 'NVIDIA NIM');
-      if (!nimRes.ok) throw new Error(nimData.error?.message || nimData.detail || nimData.error || 'NVIDIA NIM error');
-      return nimData.choices?.[0]?.message?.content || '';
+      const res = await fetchAIWithRetry('/api/bytez', { provider, apiKey, payload });
+      const data = await readAIResponseJson(res, provider === 'bytez' ? 'Bytez' : 'NVIDIA NIM');
+      if (res.ok) return data.choices?.[0]?.message?.content || '';
+      const detail = String(data.error?.message || data.detail || data.title || data.error || `${provider} error ${res.status}`);
+      lastError = detail;
+      // Solo un modelo no disponible (404) amerita probar el siguiente; llave inválida (401/403) o límite (429) no.
+      if (provider !== 'nvidia_nim' || res.status !== 404) {
+        throw new Error(res.status === 401 || res.status === 403 ? `NVIDIA NIM rechazó la llave (${res.status}): revisa que sea una llave nvapi- vigente. ${detail}` : detail);
+      }
+      console.warn(`NVIDIA NIM: el modelo ${model} no está disponible para esta cuenta (404); probando el siguiente.`);
     }
-    const payload = {
-      model: settings.model || (provider === 'bytez' ? BYTEZ_MODEL : NVIDIA_NIM_MODEL),
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      temperature: 0,
-      max_tokens: maxTokens,
-    };
-    const res = await fetchAIWithRetry('/api/bytez', { provider, apiKey, payload });
-    const data = await readAIResponseJson(res, provider === 'bytez' ? 'Bytez' : 'NVIDIA NIM');
-    if (!res.ok) throw new Error(data.error?.message || data.error || `${provider} error`);
-    return data.choices?.[0]?.message?.content || '';
+    throw new Error(`NVIDIA NIM: ningún modelo disponible para esta cuenta (${models.join(', ')}). ${lastError}`);
   }
 
   throw new Error(`Proveedor desconocido: ${provider}`);
