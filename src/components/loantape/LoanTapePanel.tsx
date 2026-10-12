@@ -289,6 +289,7 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
   const [uploading, setUploading] = useState(false);
   const [analyzing, setAnalyzing] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [mappingOpen, setMappingOpen] = useState<string | null>(null);
   const [exporting, setExporting] = useState<'excel' | 'pdf' | null>(null);
   const [view, setView] = useState<'archivos' | 'dashboard'>('archivos');
   const [analystStates, setAnalystStates] = useState<Record<string, LoanTapeAnalystState>>({});
@@ -807,6 +808,13 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                 <div className="flex items-center gap-3">
                   {analysis && <StatusBadge status={analysis.overallStatus} />}
                   <button
+                    onClick={() => setMappingOpen(mappingOpen === tape.id ? null : tape.id)}
+                    title="Corregir a qué campo va cada columna del archivo"
+                    className={`flex items-center gap-1.5 text-xs border font-bold px-3 py-1.5 rounded-lg transition-all ${mappingOpen === tape.id ? 'bg-slate-900 text-white border-slate-900' : 'bg-white border-slate-200 text-slate-700 hover:border-indigo-300'}`}
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5" />Corregir mapeo
+                  </button>
+                  <button
                     onClick={() => handleAnalyze(tape)}
                     disabled={analyzing === tape.id || rows.length === 0}
                     title={rows.length === 0 ? 'Este archivo se guardó, pero no tiene filas tabulares para analizar.' : undefined}
@@ -825,6 +833,12 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
                   </button>
                 </div>
               </div>
+
+              {mappingOpen === tape.id && (
+                <div className="border-t border-slate-100 bg-slate-50 px-6 py-5">
+                  <MappingEditor tape={tape} mappingRows={mappingRows} clientId={clientId} onSaved={async () => { await loadTapes(); }} />
+                </div>
+              )}
 
               {isExpanded && !analysis && rawFileOnly && (
                 <div className="border-t border-slate-100 bg-slate-50 px-6 py-5">

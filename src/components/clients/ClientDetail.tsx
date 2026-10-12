@@ -1,4 +1,5 @@
 import React, { Suspense, useState, useEffect, useMemo } from 'react';
+import { loadAccountFeedback } from '../../lib/accountFeedback';
 import { db, Client, Transaction, FinancialStatement_DB, Covenant_DB, LoanTape_DB, InstitutionalLiability_DB, CustomField } from '../../db/index';
 import { Session } from '../../services/auth';
 import { AISettings } from '../../services/ai';
@@ -72,6 +73,8 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
   const loadData = async () => {
     setLoading(true);
     try {
+      // Correcciones de cuentas del analista: se cargan antes de calcular cualquier indicador del cliente.
+      await loadAccountFeedback(clientId).catch(() => null);
       const [c, txs, stmts, covs, tapes, liabilities, fields] = await timed('clientDetail.load', () => Promise.all([
         db.getClientById(clientId),
         db.getTransactions(clientId),

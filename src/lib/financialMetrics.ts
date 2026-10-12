@@ -1,4 +1,5 @@
 import type { Covenant_DB, FinancialStatement_DB } from '../db/index';
+import { feedbackValue } from './accountFeedback';
 import { findConsolidatedMetricValue, metricAliases } from './accountConsolidation';
 import { parseNullableFinancialNumber } from './numberParsing';
 
@@ -402,7 +403,12 @@ function hasStagedPortfolio(stmt: FinancialStatement_DB): boolean {
   return stagedPortfolioItems(stmt, '1').length > 0 || stagedPortfolioItems(stmt, '2').length > 0;
 }
 
+const ABSOLUTE_KEYS = new Set(['interestExpense', 'adminSellingOperatingExpenses', 'loanLossReserves']);
+
 export function getMetric(stmt: FinancialStatement_DB, key: string): number | null {
+  // Corrección del analista para este cliente ("el capital contable es la cuenta X"): manda sobre todo lo automático.
+  const corrected = feedbackValue(stmt.clientId, rawLineItems(stmt), key);
+  if (corrected !== null) return ABSOLUTE_KEYS.has(key) ? Math.abs(corrected) : corrected;
   const m = asObject<FinancialStatement_DB['mappedData']>((stmt as any).mappedData);
   const raw = (names: string[], types?: string[]) => findRaw(stmt, names, types);
   switch (key) {

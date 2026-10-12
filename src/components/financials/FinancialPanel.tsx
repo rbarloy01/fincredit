@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import AccountFeedbackPanel from './AccountFeedbackPanel';
 import { db, FinancialStatement_DB, Covenant_DB } from '../../db/index';
 import { Session } from '../../services/auth';
 import { AISettings, extractFinancials, settingsForTask } from '../../services/ai';
@@ -1037,6 +1038,11 @@ const FinancialPanel: React.FC<Props> = ({ clientId, clientName, session, aiSett
 
   return (
     <div ref={panelRef} className="space-y-6">
+      <AccountFeedbackPanel
+        clientId={clientId}
+        statements={statements}
+        onChanged={() => { const next = [...statements]; setStatements(next); onStatementsChange(next); }}
+      />
       <WorkingOverlay
         show={uploading || !!exporting || savingManual}
         title={savingManual ? 'Guardando captura manual' : exporting ? 'Exportando' : 'Procesando EFF'}

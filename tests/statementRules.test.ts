@@ -26,3 +26,17 @@ test('un subtotal que no cuadra se reporta con su nombre y diferencia', () => {
 test('sin jerarquía no se aplica la regla (estados viejos)', () => {
   assert.equal(checkHierarchy([{ name: 'Ingresos', value: 10, statementType: 'estado_resultados' }], 'estado_resultados'), null);
 });
+
+import { setAccountFeedbackCache, normalizeAccountName } from '../src/lib/accountFeedback';
+import { getMetric } from '../src/lib/financialMetrics';
+
+test('corrección de cuentas por cliente: la cartera de Red Girasol es "Instrumentos financieros para cobrar principal e interés"', () => {
+  const stmt: any = { id: 's', clientId: 'rg', period: 'dic 21', periodDate: '2021-12-31', rawLineItems: rg2021.raw_line_items, mappedData: rg2021.mapped_data };
+  assert.equal(getMetric(stmt, 'loanPortfolio'), null);   // sin corrección la app no la reconoce
+  setAccountFeedbackCache('rg', { loanPortfolio: [normalizeAccountName('Instrumentos financieros para cobrar principal e interés')] });
+  assert.equal(getMetric(stmt, 'loanPortfolio'), 5536695);
+  // suma de varias cuentas: deuda = préstamos de corto + largo plazo
+  setAccountFeedbackCache('rg', { totalDebt: ['prestamos bancarios y de otros organismos de corto plazo', 'prestamos bancarios y de otros organismos de largo plazo'] });
+  assert.equal(getMetric(stmt, 'totalDebt'), 150032 + 2309607);
+  setAccountFeedbackCache('rg', {});
+});
