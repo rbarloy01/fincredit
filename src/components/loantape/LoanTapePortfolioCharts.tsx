@@ -6,6 +6,7 @@ import {
 import type { PortfolioAnalysis, Bucket } from '../../lib/loanTapeReport';
 import { QUALITY_DEFINITION_LINES, reconcileQuality } from '../../lib/portfolioRules';
 import ChartCard from './ChartCard';
+import MexicoStateMap from './MexicoStateMap';
 
 // Axcess palette (same as the Excel report): brand blues + semantic quality colours.
 const AX = { deep: '#1430E6', blue: '#1B5BF5', cyan: '#16B7EA', sky: '#8FB4FF', ink: '#0E1B3D', muted: '#5D6B8A', green: '#128A48', amber: '#E8A317', orange: '#EA6A1F', red: '#C2271C', darkRed: '#7F1D1D', grey: '#9AA5BD' };
@@ -250,6 +251,12 @@ export default function LoanTapePortfolioCharts({ portfolio: a, clientName, onSe
             ].map(([k, v]) => <div key={k} className="rounded-lg border border-slate-200 px-3 py-2"><p className="text-[10px] font-black uppercase text-slate-400">{k}</p><p className="text-sm font-black text-slate-900">{v}</p></div>)}
           </div>
         </div>
+      )}
+
+      {a.states.length > 0 && (
+        <ChartCard title="Mapa de calor por estado" subtitle={`Cartera del corte ${a.focusLabel} por entidad federativa · pasa el cursor sobre un estado`} fileName={`Mapa_estados_${name}`}>
+          <MexicoStateMap rows={a.rows} />
+        </ChartCard>
       )}
 
       <div className="grid grid-cols-1 2xl:grid-cols-2 gap-4">
