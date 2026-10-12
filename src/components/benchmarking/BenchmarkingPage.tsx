@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { loadTapePortfolioForClients } from '../../lib/tapePortfolio';
 import { AlertTriangle, ClipboardList, FileSpreadsheet, FileText, Filter, Layers, RotateCcw } from 'lucide-react';
 import {
   Bar,
@@ -888,6 +889,7 @@ async function loadBenchmarkRowsFromClient(): Promise<BenchRow[]> {
     db.getCustomFieldsForClients(clientIds),
     db.getStatementsForClients(clientIds),
     db.getTransactionsForClients(clientIds),
+    loadTapePortfolioForClients(clientIds),
   ]);
   return clients.map(client => hydrateBenchmarkRow({
     client,

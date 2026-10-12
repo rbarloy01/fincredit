@@ -24,6 +24,7 @@ import { importLoanTapeSheets, reimportFromSource } from '../../lib/loanTapeImpo
 import type { SourceTable } from '../../lib/sourceColumns';
 import { extractPdfText, isUsefulExtractedText } from '../../lib/documentParsing';
 import { sheetToRows } from '../../lib/sheetRows';
+import { syncTapePortfolio } from '../../lib/tapePortfolio';
 
 const WorkspaceBlock = lazyWithChunkRetry(() => import('./LoanTapeWorkspaceBlock'), 'loan-tape-workspace-block');
 
@@ -372,6 +373,8 @@ const LoanTapePanel: React.FC<Props> = ({ clientId, clientName = '', session, ai
     setTapes(hydratedList);
     onTapesChange(hydratedList);
     setLoading(false);
+    // Resumen de cartera por corte para los indicadores financieros (cartera vencida directo del loan tape).
+    void syncTapePortfolio(clientId, hydratedList);
   };
 
   useEffect(() => { loadTapes(); }, [clientId]);

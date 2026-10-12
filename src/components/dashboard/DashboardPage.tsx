@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { loadTapePortfolioForClients } from '../../lib/tapePortfolio';
 import { QUALITY_SETTING_KEY, usableStatements, type StatementQualityRecord } from '../../lib/statementQuality';
 import {
   AlertTriangle, ArrowRight, Building2, CalendarClock, FileWarning,
@@ -223,6 +224,7 @@ const DashboardPage: React.FC<Props> = ({ onSelectClient }) => {
             db.getCrmActivitiesForClients(batch),
             db.getClientSettingsForClients<MasterOrgPipelineMeta>(batch, 'master_org_pipeline'),
             db.getClientSettingsForClients<Record<string, StatementQualityRecord>>(batch, QUALITY_SETTING_KEY),
+            loadTapePortfolioForClients(batch),
           ]);
           // Estados en revisión (no pasaron la puerta de calidad) no cuentan en alertas ni indicadores.
           const nextStatements = Object.fromEntries(Object.entries(rawStatements).map(([clientId, list]) => [clientId, usableStatements(list, qualityByClient[clientId] || {})]));

@@ -1,5 +1,6 @@
 import type { Covenant_DB, FinancialStatement_DB } from '../db/index';
 import { feedbackValue } from './accountFeedback';
+import { isTapePointUsable, tapeDpdCoverage, tapeMetric, tapePointForPeriod } from './tapePortfolioCache';
 import { findConsolidatedMetricValue, metricAliases } from './accountConsolidation';
 import { parseNullableFinancialNumber } from './numberParsing';
 
@@ -134,6 +135,7 @@ export const metricLabels: Record<string, string> = {
   netPortfolio: 'Cartera neta',
   managedPortfolio: 'Cartera administrada',
   pastDuePortfolio: 'Cartera vencida',
+  pastDue30Portfolio: 'Cartera con atraso 30+ (loan tape)',
   loanLossReserves: 'Estimación preventiva',
   productiveAssets: 'Activos productivos',
 };
@@ -409,6 +411,9 @@ export function getMetric(stmt: FinancialStatement_DB, key: string): number | nu
   // Corrección del analista para este cliente ("el capital contable es la cuenta X"): manda sobre todo lo automático.
   const corrected = feedbackValue(stmt.clientId, rawLineItems(stmt), key);
   if (corrected !== null) return ABSOLUTE_KEYS.has(key) ? Math.abs(corrected) : corrected;
+  // Cartera vencida y cartera administrada salen del loan tape del mismo corte cuando existe (regla del usuario).
+  const fromTape = tapeMetric(stmt.clientId, stmt.periodDate, key);
+  if (fromTape !== null) return fromTape;
   const m = asObject<FinancialStatement_DB['mappedData']>((stmt as any).mappedData);
   const raw = (names: string[], types?: string[]) => findRaw(stmt, names, types);
   switch (key) {
@@ -542,6 +547,12 @@ export function standardRatios(stmt: FinancialStatement_DB, siblings: FinancialS
   const costOfFunding = div(scale(interest), fundingDebt);
   const portfolioYield = div(scale(interestIncome), managedPortfolio);
   const miss = (items: Array<[string, number | null]>) => items.filter(([, value]) => value === null).map(([label]) => label);
+  // Cartera vencida / administrada del loan tape del mismo corte (si existe): se indica en la fórmula de cada indicador.
+  const tape = tapePointForPeriod(stmt.clientId, stmt.periodDate);
+  const tapeNote = tape && isTapePointUsable(tape)
+    ? ` · cartera del loan tape (corte ${tape.cutoff}, ${tape.loans.toLocaleString('es-MX')} créditos vivos; vencida = 90+ días)`
+    : tape ? ` · cartera del estado financiero: el loan tape del corte ${tape.cutoff} trae días de atraso solo para ${Math.round(tapeDpdCoverage(tape) * 100)}% del saldo` : '';
+  const pastDue30Portfolio = getMetric(stmt, 'pastDue30Portfolio');
   return [
     { key: 'revenue', label: 'Ingresos', value: revenue, formula: 'Cuenta extraída: ingresos/ventas', missing: miss([['Ingresos', revenue]]) },
     { key: 'ebitda', label: 'EBITDA', value: ebitda, formula: 'EBITDA o utilidad de operación', missing: miss([['EBITDA', ebitda]]) },
@@ -558,15 +569,16 @@ export function standardRatios(stmt: FinancialStatement_DB, siblings: FinancialS
     { key: 'adjusted_capitalization', label: 'ICAP Ajustado', value: div(equity, netPortfolio), formula: 'Capital contable / cartera neta', missing: miss([['Capital contable', equity], ['Cartera neta', netPortfolio]]) },
     { key: 'roa', label: 'ROA', value: div(scale(netIncome), totalAssets), formula: `Utilidad neta / activos totales${annualNote}`, missing: miss([['Utilidad neta', netIncome], ['Activos totales', totalAssets]]) },
     { key: 'roe', label: 'ROE', value: div(scale(netIncome), equity), formula: `Utilidad neta / capital contable${annualNote}`, missing: miss([['Utilidad neta', netIncome], ['Capital contable', equity]]) },
-    { key: 'past_due_portfolio', label: 'Cartera Vencida', value: div(pastDuePortfolio, managedPortfolio), formula: 'Cartera vencida / cartera administrada', missing: miss([['Cartera vencida', pastDuePortfolio], ['Cartera administrada', managedPortfolio]]) },
-    { key: 'net_past_due_portfolio', label: 'Cartera Vencida Neta', value: div(subtractValues(pastDuePortfolio, loanLossReserves), managedPortfolio), formula: '(Cartera vencida - estimación preventiva) / cartera administrada', missing: miss([['Cartera vencida', pastDuePortfolio], ['Estimación preventiva', loanLossReserves], ['Cartera administrada', managedPortfolio]]) },
-    { key: 'past_due_coverage', label: 'Índice de Cobertura de Cartera Vencida', value: div(loanLossReserves, pastDuePortfolio), formula: 'Estimación preventiva / cartera vencida', missing: miss([['Estimación preventiva', loanLossReserves], ['Cartera vencida', pastDuePortfolio]]) },
+    { key: 'past_due_portfolio', label: 'Cartera Vencida', value: div(pastDuePortfolio, managedPortfolio), formula: `Cartera vencida / cartera administrada${tapeNote}`, missing: miss([['Cartera vencida', pastDuePortfolio], ['Cartera administrada', managedPortfolio]]) },
+    { key: 'past_due_30_portfolio', label: 'Cartera con Atraso 30+ (IMOR 30)', value: div(pastDue30Portfolio, managedPortfolio), formula: `Cartera atrasada + vencida (31+ días) / cartera administrada${isTapePointUsable(tape) ? tapeNote : ' · requiere loan tape del corte con días de atraso'}`, missing: miss([['Cartera con atraso 30+ (loan tape)', pastDue30Portfolio], ['Cartera administrada', managedPortfolio]]) },
+    { key: 'net_past_due_portfolio', label: 'Cartera Vencida Neta', value: div(subtractValues(pastDuePortfolio, loanLossReserves), managedPortfolio), formula: `(Cartera vencida - estimación preventiva) / cartera administrada${tapeNote}`, missing: miss([['Cartera vencida', pastDuePortfolio], ['Estimación preventiva', loanLossReserves], ['Cartera administrada', managedPortfolio]]) },
+    { key: 'past_due_coverage', label: 'Índice de Cobertura de Cartera Vencida', value: div(loanLossReserves, pastDuePortfolio), formula: `Estimación preventiva / cartera vencida${tapeNote}`, missing: miss([['Estimación preventiva', loanLossReserves], ['Cartera vencida', pastDuePortfolio]]) },
     { key: 'debt_coverage_productive_assets', label: 'Cobertura de Deuda', value: div(productiveAssets, totalLiabilities), formula: 'Activos productivos / total pasivo', missing: miss([['Activos productivos', productiveAssets], ['Total pasivo', totalLiabilities]]) },
     { key: 'funding_cost', label: 'Costo de Fondeo Aproximado', value: costOfFunding, formula: `Gasto financiero / bancos y fondos CP + LP${annualNote}`, missing: miss([['Gasto financiero', interest], ['Bancos y fondos CP + LP', fundingDebt]]) },
-    { key: 'portfolio_yield', label: 'Rendimiento de Cartera (Yield)', value: portfolioYield, formula: `Ingresos por intereses / cartera administrada${annualNote}`, missing: miss([['Ingresos por intereses', interestIncome], ['Cartera administrada', managedPortfolio]]) },
+    { key: 'portfolio_yield', label: 'Rendimiento de Cartera (Yield)', value: portfolioYield, formula: `Ingresos por intereses / cartera administrada${annualNote}${tapeNote}`, missing: miss([['Ingresos por intereses', interestIncome], ['Cartera administrada', managedPortfolio]]) },
     { key: 'financial_spread', label: 'Spread Financiero Aproximado', value: portfolioYield !== null && costOfFunding !== null ? portfolioYield - costOfFunding : null, formula: `Rendimiento de cartera - costo de fondeo aproximado${annualNote}`, missing: miss([['Rendimiento de cartera', portfolioYield], ['Costo de fondeo', costOfFunding]]) },
     { key: 'immediate_liquidity', label: 'Liquidez Inmediata', value: div(addValues(getMetric(stmt, 'cash'), getMetric(stmt, 'availableInvestments')), currentLiabilities), formula: '(Bancos + inversiones disponibles no comprometidas) / pasivo corriente', missing: miss([['Bancos + inversiones disponibles', addValues(getMetric(stmt, 'cash'), getMetric(stmt, 'availableInvestments'))], ['Pasivo corriente', currentLiabilities]]) },
-    { key: 'past_due_to_equity', label: 'Cartera Vencida / Capital Contable', value: div(pastDuePortfolio, equity), formula: 'Cartera vencida / capital contable', missing: miss([['Cartera vencida', pastDuePortfolio], ['Capital contable', equity]]) },
+    { key: 'past_due_to_equity', label: 'Cartera Vencida / Capital Contable', value: div(pastDuePortfolio, equity), formula: `Cartera vencida / capital contable${tapeNote}`, missing: miss([['Cartera vencida', pastDuePortfolio], ['Capital contable', equity]]) },
   ];
 }
 
@@ -588,6 +600,7 @@ export function standardRatioFormula(key: string): string {
     key === 'past_due_portfolio' ? 'ratio:pastDuePortfolio/managedPortfolio' :
     key === 'net_past_due_portfolio' ? 'expr:["(","ref:pastDuePortfolio","-","ref:loanLossReserves",")","/","ref:managedPortfolio"]' :
     key === 'past_due_coverage' ? 'ratio:loanLossReserves/pastDuePortfolio' :
+    key === 'past_due_30_portfolio' ? 'ratio:pastDue30Portfolio/managedPortfolio' :
     key === 'debt_coverage_productive_assets' ? 'ratio:productiveAssets/totalLiabilities' :
     key === 'funding_cost' ? 'expr:["ref:interestExpense","/","(","ref:banksFundsShortTerm","+","ref:banksFundsLongTerm",")"]' :
     key === 'portfolio_yield' ? 'ratio:interestIncome/managedPortfolio' :
