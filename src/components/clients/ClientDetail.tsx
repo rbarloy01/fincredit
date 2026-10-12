@@ -19,6 +19,7 @@ const LoanTapePanel = lazyWithChunkRetry(() => import('../loantape/LoanTapePanel
 const InstitutionalLiabilitiesPanel = lazyWithChunkRetry(() => import('../liabilities/InstitutionalLiabilitiesPanel'), 'institutional-liabilities-panel');
 const ClientReportView = lazyWithChunkRetry(() => import('../report/ReportView'), 'client-report-view');
 const CrmPanel = lazyWithChunkRetry(() => import('../crm/CrmPanel'), 'crm-panel');
+const AforoPanel = lazyWithChunkRetry(() => import('../aforo/AforoPanel'), 'aforo-panel');
 
 interface Props {
   clientId: string;
@@ -29,7 +30,7 @@ interface Props {
   onEdit?: (client: Client) => void;
 }
 
-type Tab = 'monitor' | 'crm' | 'company_overview' | 'transacciones' | 'estados' | 'auditoria' | 'loantape' | 'pasivos_institucionales' | 'cov_financiero' | 'hacer_no_hacer' | 'reporte';
+type Tab = 'monitor' | 'crm' | 'company_overview' | 'transacciones' | 'estados' | 'auditoria' | 'loantape' | 'aforo' | 'pasivos_institucionales' | 'cov_financiero' | 'hacer_no_hacer' | 'reporte';
 
 import { QUALITY_SETTING_KEY, usableStatements, type StatementQualityRecord } from '../../lib/statementQuality';
 import { MonitoringProvider } from './MonitoringContext';
@@ -42,6 +43,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'estados', label: 'Estados Financieros' },
   { id: 'auditoria', label: 'Conciliación' },
   { id: 'loantape', label: 'Loan Tape' },
+  { id: 'aforo', label: 'Aforo' },
   { id: 'pasivos_institucionales', label: 'Pasivos Institucionales' },
   { id: 'cov_financiero', label: 'Indicadores Financieros' },
   { id: 'hacer_no_hacer', label: 'Hacer / No Hacer' },
@@ -288,6 +290,14 @@ const ClientDetail: React.FC<Props> = ({ clientId, session, aiSettings, onBack, 
               session={session}
               aiSettings={aiSettings}
               onTapesChange={setLoanTapes}
+            />
+          )}
+          {activeTab === 'aforo' && (
+            <AforoPanel
+              client={client}
+              transactions={transactions}
+              session={session}
+              onClientUpdate={handleClientUpdate}
             />
           )}
           {activeTab === 'pasivos_institucionales' && (
