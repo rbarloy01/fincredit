@@ -40,3 +40,10 @@ test('corrección de cuentas por cliente: la cartera de Red Girasol es "Instrume
   assert.equal(getMetric(stmt, 'totalDebt'), 150032 + 2309607);
   setAccountFeedbackCache('rg', {});
 });
+
+test('Utilidad neta CNBV: "Participación en el resultado neto de otras entidades" (= 0) no gana a "RESULTADO NETO"', async () => {
+  (globalThis as any).localStorage ??= { getItem: () => null, setItem() {}, removeItem() {} };
+  const { getMetric } = await import('../src/lib/financialMetrics');
+  const stmt: any = { id: 'rg21', clientId: 'rg', period: '2021', periodDate: '2021-12-31', fileName: '', rawLineItems: rg2021.raw_line_items, mappedData: {}, extraAccounts: [] };
+  assert.equal(getMetric(stmt, 'netIncome'), -3988151);
+});

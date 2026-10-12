@@ -261,17 +261,31 @@ function matchesAlias(itemName: string, alias: string): boolean {
   return alias.includes(itemName) && itemName.length >= alias.length * REVERSE_MATCH_MIN_COVERAGE;
 }
 
+// Regla: una cuenta en CERO que solo trae el alias en medio del nombre ("Participación en el resultado neto de otras
+// entidades" = 0) no gana sobre otra que sí es el concepto ("RESULTADO NETO"). Antes ganaba por aparecer primero en el
+// formato CNBV → utilidad neta 0 y ROE/ROA en 0. Fuera de ese caso se respeta el orden del estado, como siempre.
+function aliasMatchTier(itemName: string, alias: string, value: number | null | undefined): number {
+  const edge = itemName.startsWith(alias) || itemName.endsWith(alias) || alias.includes(itemName);
+  return !edge && !value ? 1 : 0;
+}
+
 export function findConsolidatedMetricValue(stmt: FinancialStatement_DB, metric: ConsolidationMetric): number | null {
   const rules = loadConsolidationRules().filter(r => r.metric === metric);
   const items = asRawLineItems((stmt as any).rawLineItems);
   for (const rule of rules) {
     const aliases = rule.aliases.map(cleanText).filter(Boolean);
-    const found = items.find(item => {
+    let best: { value: number | null; tier: number } | null = null;
+    items.forEach(item => {
       const typeOk = !rule.statementType || rule.statementType === 'any' || rule.statementType === item.statementType;
+      if (!typeOk) return;
       const itemName = cleanText(item.name);
-      return typeOk && aliases.some(alias => matchesAlias(itemName, alias));
+      aliases.forEach(alias => {
+        if (!matchesAlias(itemName, alias)) return;
+        const tier = aliasMatchTier(itemName, alias, item.value);
+        if (!best || tier < best.tier) best = { value: item.value, tier };
+      });
     });
-    if (found) return found.value;
+    if (best) return (best as { value: number | null }).value;
   }
   return null;
 }
