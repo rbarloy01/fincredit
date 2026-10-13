@@ -95,13 +95,13 @@ const CORE_ANALYSIS_KEYS = new Set(['portfolio_balance', 'dpd_quality', 'client_
 
 const SYNONYMS: Record<StandardLoanField, string[]> = {
   loan_id: ['contrato', 'loan id', 'loan number', 'loan no', 'folio', 'numero credito', 'numero de credito', 'numero de prestamo intermediario', 'prestamo intermediario', 'no credito', 'no contrato', 'id prestamo', 'id credito', 'operacion', 'cuenta', 'no cuenta', 'referencia'],
-  client: ['cliente', 'client', 'customer', 'razon social', 'nombre', 'nombre cliente', 'nombre acreditado', 'acreditado', 'deudor', 'borrower', 'obligor', 'client id', 'id cliente', 'apellidos', 'rfc'],
-  amount: ['amount', 'loan amount', 'lended amount', 'principal', 'original amount', 'monto original', 'monto otorgado', 'monto maximo', 'monto autorizado', 'importe dispuesto', 'importe original', 'limite credito', 'linea autorizada', 'costo'],
+  client: ['cliente', 'client', 'customer', 'razon social', 'nombre', 'nombre cliente', 'nombre del cliente', 'nombre o razon social', 'nombre completo', 'nombre acreditado', 'acreditado', 'deudor', 'borrower', 'obligor', 'arrendatario', 'lessee', 'client id', 'id cliente', 'apellidos', 'rfc'],
+  amount: ['amount', 'loan amount', 'lended amount', 'principal', 'original amount', 'monto original', 'monto otorgado', 'monto del credito', 'monto de credito', 'monto credito', 'monto financiado', 'importe del credito', 'monto maximo', 'monto autorizado', 'importe dispuesto', 'importe original', 'limite credito', 'linea autorizada', 'inversion sin iva', 'costo'],
   outstanding_balance: ['capital balance', 'saldo capital', 'saldo insoluto', 'saldo actual', 'saldo vigente', 'saldo total', 'capital vigente', 'capital vencido', 'capital moroso y vencido', 'capital mosoro y vencido', 'capital por pagar', 'capital pendiente', 'saldo insoluto capital', 'principal balance', 'outstanding', 'balance', 'monto activo', 'saldo dispuesto'],
   interest_rate: ['interest rate', 'tasa', 'tasa interes', 'tasa de interes', 'tasa final', 'tasa base', 'tasa anual de interes', 'tasa sobretasa acreditado', 'rate', 'rate %', 'tir', 'tna'],
   loan_status: ['status', 'estado credito', 'estado del credito', 'estado del activo', 'estatus del activo', 'estado activo', 'loan status', 'estatus', 'estatus credito', 'situacion', 'condicion', 'clasificacion'],
   start_date: ['start date', 'origination date', 'fecha inicio', 'fecha otorgamiento', 'fecha apertura', 'fecha disposicion', 'fecha alta', 'disbursement date'],
-  end_date: ['end date', 'maturity date', 'fecha vencimiento', 'fecha fin', 'fecha pago final', 'due date'],
+  end_date: ['end date', 'maturity date', 'fecha vencimiento', 'fecha de vencimiento', 'fecha fin', 'fecha pago final', 'fecha terminacion', 'fecha de terminacion', 'terminacion', 'fecha de termino', 'due date'],
   purpose: ['loan use reason', 'loan use', 'use of proceeds', 'purpose', 'loan purpose', 'destino', 'destino del credito', 'destino de los recursos', 'uso del credito', 'uso de los recursos', 'finalidad', 'proposito'],
   loan_type: ['loan type', 'producto', 'product', 'product type', 'tipo contrato', 'tipo credito', 'tipo prestamo', 'tipo producto', 'linea', 'modalidad', 'subproducto', 'segmento', 'programa', 'plan', 'esquema'],
   days_overdue: ['days overdue', 'days past due', 'dpd', 'mora dias', 'dias mora', 'dias de mora', 'dias en mora', 'dias de retraso', 'dias atraso', 'dias de atraso', 'dias vencidos', 'dias de vencidos', 'dias vencido', 'dias vencida', 'delinquent days'],
@@ -329,7 +329,7 @@ function valueSampleScore(target: StandardLoanField, values: any[]): number {
   const hasWords = (words: string[]) => textValues.some(v => words.some(word => v.includes(word)));
 
   if (target === 'start_date' || target === 'end_date' || target === 'file_date') return datePct >= 0.7 ? 35 : datePct >= 0.3 ? 12 : 0;
-  if (target === 'currency') return hasWords(CURRENCY_WORDS) ? 35 : 0;
+  if (target === 'currency') return textValues.filter(v => CURRENCY_WORDS.includes(v) || v.split(' ').some(t => ['mxn', 'usd', 'eur', 'mxp', 'udis', 'udi'].includes(t))).length / sample.length >= 0.6 ? 35 : 0;
   if (target === 'loan_status') return hasWords(STATUS_WORDS) ? 30 : 0;
   if (target === 'loan_type') return hasWords(PRODUCT_WORDS) ? 25 : 0;
   if (target === 'state') return textValues.some(v => MEXICAN_STATES.has(v)) ? 30 : 0;
@@ -353,6 +353,7 @@ function headerHeuristicScore(target: StandardLoanField, norm: string): number {
   if (target === 'loan_id' && /^(id|no|num|numero|folio)$/.test(norm)) return 70;
   if (target === 'outstanding_balance' && /^total$/.test(norm)) return 45;
   if (target === 'client' && /(cliente|acreditado|deudor|razon social|empresa|nombre)/.test(norm) && !/(credito|contrato|producto|estatus|estado)/.test(norm)) return 35;
+  if (target === 'client' && /^(usuario|arrendatario|lessee)$/.test(norm)) return 60;
   if (target === 'amount' && /(monto|importe|limite|linea|autorizad|otorgad|dispuest|original)/.test(norm) && !/(saldo|insoluto|vencid|vigente|actual)/.test(norm)) return 35;
   if (target === 'outstanding_balance' && /(saldo|insoluto|balance|capital|principal|cartera)/.test(norm) && !/(tasa|dias)/.test(norm) && !overdueAmount) return 40;
   if (target === 'interest_rate' && /(tasa|rate|tir|tna)/.test(norm)) return 40;
@@ -476,7 +477,17 @@ function pickColumns(headers: string[], rows: any[] = [], overrides: MappingOver
         }
         // Una fecha de corte / reporte describe el archivo, no al crédito: nunca es inicio ni vencimiento.
         const cutoffAsLoanDate = (target === 'start_date' || target === 'end_date') && /(corte|reporte|archivo)/.test(h.norm) ? -1000 : 0;
-        return { ...h, score: headerScore.score + valueScore + clientAdjust + cutoffAsLoanDate, headerScore, valueScore, idFallbackScore };
+        // "Principal Pagado al Corte" no es el monto del crédito (Finware); "Pagado" / "Fecha de último pago" no es el vencimiento (Astro Autos).
+        const paidAsAmount = target === 'amount' && /(pagad|cobrad|amortizad|vencid|interes|moratori|comision|saldo|insoluto|pago)/.test(h.norm) ? -1000 : 0;
+        //  "Último vencimiento" / "Último pago teórico" sí son el vencimiento; "Fecha de último pago" (historial) no.
+        const paymentAsLoanDate = (target === 'start_date' || target === 'end_date') && /(pagad|cobr|ultimo pago|1er pago|primer pago|reestructura)/.test(h.norm) && !/(pago final|vencimiento|teoric|programad)/.test(h.norm) ? -1000 : 0;
+        // Una columna sin encabezado ("col_21") nunca es una fecha del crédito.
+        const unnamedDate = (target === 'start_date' || target === 'end_date') && /^col \d+$/.test(h.norm) ? -1000 : 0;
+        // Un importe ("Comisión asesor 7%", "Monto", "Tasa") puede parecer fecha serial de Excel: nunca es fecha del crédito (Lendmex).
+        const amountAsDate = (target === 'start_date' || target === 'end_date') && /(comision|monto|importe|saldo|tasa|tir|interes|iva|capital|pago mensual|renta)/.test(h.norm) && !/fecha/.test(h.norm) ? -1000 : 0;
+        // "Plazo (días)" es la duración del crédito, no los días de atraso.
+        const termAsDpd = target === 'days_overdue' && /(plazo|term|duracion|vigencia)/.test(h.norm) && !/(atras|mora|vencid|dpd)/.test(h.norm) ? -1000 : 0;
+        return { ...h, score: headerScore.score + valueScore + clientAdjust + cutoffAsLoanDate + paidAsAmount + paymentAsLoanDate + unnamedDate + amountAsDate + termAsDpd, headerScore, valueScore, idFallbackScore };
       })
       .filter(h => h.score >= 30)
       .sort((a, b) => b.score - a.score);
@@ -635,9 +646,10 @@ export function standardizeLoanTape(rows: any[], fileName?: string, overrides: M
       state: get('state') ? String(get('state')).trim() : null,
       file_date: rowFileDate,
     };
-  // Un renglón es crédito solo si trae algo que lo identifique o lo mida (ID, cliente, monto o saldo). Fórmulas
-  // copiadas hacia abajo ("Meses", "Segmentación") dejaban filas fantasma que heredaban la fecha del nombre del archivo.
-  }).filter(row => [row.loan_id, row.client, row.amount, row.outstanding_balance].some(v => v !== null && v !== undefined && v !== ''));
+  // Un renglón es crédito solo si trae algo que lo identifique (ID, cliente) o un saldo. Fórmulas copiadas hacia abajo
+  // ("Meses", "Segmentación") dejaban filas fantasma; un renglón con SOLO un monto (sin ID, cliente ni saldo) es un
+  // subtotal o un renglón vacío, no un crédito (Ventus: 9 "créditos" sin acreditado).
+  }).filter(row => [row.loan_id, row.client, row.outstanding_balance].some(v => v !== null && v !== undefined && v !== ''));
 
   return { standardized, mappingReport: notes, dpdValidation };
 }
