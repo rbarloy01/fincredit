@@ -66,6 +66,36 @@ async function parsePdfText(file: File): Promise<string> {
   return prioritizeDocumentText(pages);
 }
 
+// Texto del PDF CON renglones (agrupa por posición vertical y ordena por x): los desgloses "cuenta → importe" necesitan
+// que cada cuenta quede en el mismo renglón que su importe. extractPdfText junta todo en una línea.
+export async function extractPdfLines(file: File): Promise<string> {
+  const pdfjs = window.pdfjsLib;
+  if (!pdfjs?.getDocument) return '';
+  try {
+    const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+    const out: string[] = [];
+    for (let n = 1; n <= Math.min(pdf.numPages, 20); n += 1) {
+      const page = await pdf.getPage(n);
+      const content = await page.getTextContent();
+      const rows = new Map<number, Array<{ x: number; s: string }>>();
+      content.items.forEach((it: any) => {
+        const str = String(it.str || '');
+        if (!str.trim()) return;
+        const y = Math.round((it.transform?.[5] ?? 0) / 3) * 3;   // misma línea con tolerancia de ±3 pt
+        rows.set(y, [...(rows.get(y) || []), { x: it.transform?.[4] ?? 0, s: str }]);
+      });
+      [...rows.entries()].sort((a, b) => b[0] - a[0]).forEach(([, items]) => {
+        out.push(items.sort((a, b) => a.x - b.x).map(i => i.s.trim()).join('   '));
+      });
+      page.cleanup?.();
+    }
+    return out.join('\n');
+  } catch (error) {
+    console.warn('No se pudo leer el PDF por renglones.', error);
+    return '';
+  }
+}
+
 export async function extractPdfText(file: File): Promise<string> {
   try {
     return await Promise.race([

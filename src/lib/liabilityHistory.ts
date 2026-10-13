@@ -18,6 +18,7 @@ export interface LiabilitySnapshot {
   source?: string;              // documento de origen
   lines: LiabilityLine[];       // fondeo institucional por acreedor (en pesos)
   totalLiabilities?: number | null;   // total del pasivo del documento (contexto)
+  composition?: { fondeo: number; impuestos: number; operativo: number; empleados: number; otro: number };   // del desglose (reglas)
   createdAt: string;
 }
 export interface LiabilityHistoryStore { snapshots: LiabilitySnapshot[] }
@@ -134,6 +135,8 @@ export function analyzeLiabilityHistory(clientId: string, store: LiabilityHistor
     else insights.push('Falta el loan tape de ese corte (con días de atraso) para medir el aforo vigente.');
     const lastCheck = checks.at(-1);
     if (lastCheck?.ok === false) insights.push(`⚠ ${lastCheck.detail}.`);
+    const comp = snaps.at(-1)?.composition; const totalL = snaps.at(-1)?.totalLiabilities;
+    if (comp && totalL) insights.push(`Del pasivo total (${money(totalL)}), el fondeo con costo es ${pct(comp.fondeo / totalL)}; el resto no es fondeo: impuestos ${money(comp.impuestos)}, operativo ${money(comp.operativo)}, empleados ${money(comp.empleados)}${comp.otro ? `, sin clasificar ${money(comp.otro)}` : ''}.`);
     if (snaps.length === 1) insights.push('Con el siguiente corte se calcula la variación mes a mes por acreedor.');
   }
   return { cutoffs, totals, lenders, latest, portfolio, checks, impliedCost, insights };

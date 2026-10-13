@@ -21,11 +21,12 @@ interface Props {
   clientName: string;
   liabilities: InstitutionalLiability_DB[];
   onSyncBalances?: (lines: LiabilityLine[], cutoff: string) => Promise<void>;
+  reloadKey?: number;
 }
 
 type DraftLine = { lender: string; term: LiabilityTerm; balance: string };
 
-export default function LiabilityHistoryPanel({ clientId, clientName, liabilities, onSyncBalances }: Props) {
+export default function LiabilityHistoryPanel({ clientId, clientName, liabilities, onSyncBalances, reloadKey = 0 }: Props) {
   const [store, setStore] = useState<LiabilityHistoryStore>({ snapshots: [] });
   const [statements, setStatements] = useState<FinancialStatement_DB[]>([]);
   const [editing, setEditing] = useState(false);
@@ -38,7 +39,7 @@ export default function LiabilityHistoryPanel({ clientId, clientName, liabilitie
   useEffect(() => {
     void loadLiabilityHistory(clientId).then(setStore);
     void db.getStatements(clientId).then(setStatements).catch(() => setStatements([]));
-  }, [clientId]);
+  }, [clientId, reloadKey]);
 
   const a = useMemo(() => analyzeLiabilityHistory(clientId, store, statements), [clientId, store, statements]);
 

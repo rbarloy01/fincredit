@@ -18,7 +18,9 @@ import type { LiabilityLine } from '../../lib/liabilityHistory';
 import { loadExportModule } from '../../lib/exportLoader';
 import WorkingOverlay from '../common/WorkingOverlay';
 import { type AISettings, extractInstitutionalLiabilities } from '../../services/ai';
-import { extractPdfText, isUsefulExtractedText, renderPdfPreviewImages } from '../../lib/documentParsing';
+import { extractPdfLines, extractPdfText, isUsefulExtractedText, renderPdfPreviewImages } from '../../lib/documentParsing';
+import { linesFromRows, linesFromText, parseLiabilityBreakdown, screenAiLiabilityRows, type LiabilityParseResult } from '../../lib/liabilityRules';
+import { loadLiabilityHistory, saveLiabilityHistory, upsertSnapshot } from '../../lib/liabilityHistory';
 import { sheetToRows } from '../../lib/sheetRows';
 
 interface Props {
@@ -277,6 +279,63 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
     throw new Error(`${file.name}: solo se aceptan PDF, Excel (.xlsx, .xls) o CSV.`);
   };
 
+  const [historyKey, setHistoryKey] = useState(0);
+
+  // Reglas de negocio (sin IA): si el archivo es un desglose del pasivo, se entiende completo — unidad, corte, jerarquía,
+  // fondeadores y cuadre — y alimenta el historial mensual y los saldos por fondeador.
+  const tryBreakdown = async (file: File): Promise<LiabilityParseResult | null> => {
+    const name = file.name.toLowerCase();
+    let text = ''; let raw: ReturnType<typeof linesFromText> = [];
+    if (name.endsWith('.pdf') || file.type === 'application/pdf') {
+      text = await extractPdfLines(file);
+      raw = linesFromText(text);
+    } else if (/\.(xlsx|xls|csv)$/.test(name)) {
+      const XLSX = await import('xlsx');
+      const wb = XLSX.read(new Uint8Array(await file.arrayBuffer()), { type: 'array' });
+      const rows = wb.SheetNames.flatMap(n => sheetToRows<any[]>(XLSX, wb.Sheets[n], { header: 1, blankrows: false, defval: null }));
+      text = rows.map(r => (r || []).join(' ')).join('\n');
+      raw = linesFromRows(rows);
+    }
+    if (raw.length < 3) return null;
+    const res = parseLiabilityBreakdown(raw, { text, fileName: file.name });
+    return res.recognized ? res : null;
+  };
+
+  const typeFor = (lender: string): InstitutionalLiability_DB['liabilityType'] =>
+    /bursatil|certificado|obligacion|emision/.test(normalizeKeyPart(lender)) ? 'bono' : /prestamo|credito simple|mutuo|pagare/.test(normalizeKeyPart(lender)) ? 'prestamo_simple' : 'linea_credito';
+
+  const applyBreakdown = async (res: LiabilityParseResult, file: File): Promise<string> => {
+    let store = await loadLiabilityHistory(clientId);
+    const periods = [...res.periods].sort((a, b) => String(a.cutoff).localeCompare(String(b.cutoff)));
+    for (const p of periods) {
+      let cutoff = p.cutoff;
+      if (!cutoff) cutoff = window.prompt(`${file.name}: no encontré la fecha de corte. Escríbela (AAAA-MM-DD):`) || null;
+      if (!cutoff || !/^\d{4}-\d{2}-\d{2}$/.test(cutoff)) throw new Error(`${file.name}: sin fecha de corte válida.`);
+      p.cutoff = cutoff;
+      store = upsertSnapshot(store, { cutoff, source: file.name, lines: p.funding.map(f => ({ lender: f.lender, term: f.term, balance: f.balance })), totalLiabilities: p.totalLiabilities, composition: p.composition, createdAt: new Date().toISOString() });
+    }
+    await saveLiabilityHistory(clientId, store);
+    // Saldos por fondeador = corte más reciente del historial (solo si este archivo trae ese corte).
+    const latest = store.snapshots.at(-1)!;
+    const mine = periods.find(p => p.cutoff === latest.cutoff);
+    let created = 0, updated = 0;
+    if (mine) {
+      for (const f of mine.funding) {
+        const hit = liabilities.find(l => normalizeKeyPart(l.lenderName) === normalizeKeyPart(f.lender));
+        const note = `${f.term === 'corto' ? 'Corto plazo' : f.term === 'largo' ? 'Largo plazo' : 'Plazo no indicado'} · saldo al ${mine.cutoff} desde ${file.name}`;
+        if (hit) { await db.updateInstitutionalLiability(hit.id, { currentBalance: f.balance, notes: [hit.notes, note].filter(Boolean).join('\n') }); updated += 1; }
+        else { await db.createInstitutionalLiability({ clientId, lenderName: f.lender, liabilityType: typeFor(f.lender), originalAmount: null, currentBalance: f.balance, currency: 'MXN', interestRate: null, notes: note }); created += 1; }
+      }
+    }
+    const m = (v: number) => `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 1 })}M`;
+    const p = periods.at(-1)!;
+    const bad = periods.flatMap(x => x.checks.filter(c => !c.ok).map(c => `${x.cutoff}: ${c.detail}`));
+    return `${file.name}: desglose del pasivo entendido con reglas (${res.unitLabel}, ${periods.map(x => x.cutoff).join(', ')}). `
+      + `Fondeo ${m(p.composition.fondeo)} en ${p.funding.length} fondeador(es); no es fondeo: impuestos ${m(p.composition.impuestos)}, operativo ${m(p.composition.operativo)}, empleados ${m(p.composition.empleados)}. `
+      + `${bad.length ? `⚠ No cuadra: ${bad.join(' · ')}. ` : 'Cuadra ✓. '}`
+      + `${created ? `${created} fondeador(es) nuevo(s). ` : ''}${updated ? `${updated} saldo(s) actualizado(s). ` : ''}`;
+  };
+
   const handleFilesSelect = async (files: FileList | File[]) => {
     if (schemaReady === false) return;
     const selected = Array.from(files);
@@ -288,12 +347,22 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
       let savedRows = 0;
       let updatedRows = 0;
       const warnings: string[] = [];
+      const breakdownNotes: string[] = [];
       const existingRows = [...liabilities];
       const bySourceKey = new Map(existingRows.map(row => [liabilityDedupeKey(row as any, row.sourceDocumentId), row]));
       const byFacilityKey = new Map(existingRows.map(row => [liabilityFacilityKey(row as any), row]));
       for (const file of selected) {
         setBusy(`Leyendo ${file.name}...`);
-        const { parsed, unmatchedFields } = await extractRowsFromFile(file);
+        const breakdown = await tryBreakdown(file).catch(() => null);
+        if (breakdown) {
+          breakdownNotes.push(await applyBreakdown(breakdown, file));
+          continue;
+        }
+        const extracted = await extractRowsFromFile(file);
+        // Cualquier IA: las mismas reglas descartan impuestos, proveedores y beneficios a empleados.
+        const screened = screenAiLiabilityRows(extracted.parsed);
+        if (screened.dropped.length) warnings.push(`${file.name}: se descartaron ${screened.dropped.length} renglón(es) que no son fondeo (${screened.dropped.map(d => `${d.row.lenderName} → ${d.kind}`).join(', ')}).`);
+        const parsed = screened.keep; const unmatchedFields = extracted.unmatchedFields;
         if (!parsed.length) {
           warnings.push(`${file.name}: sin filas detectadas.`);
           continue;
@@ -335,11 +404,18 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
         }
       }
 
-      if (!savedRows && !updatedRows) {
+      if (breakdownNotes.length) setHistoryKey(k => k + 1);
+      if (!savedRows && !updatedRows && !breakdownNotes.length) {
         alert('No se detectaron pasivos institucionales en los archivos seleccionados.');
         return;
       }
-      setImportSummary([
+      if (!savedRows && !updatedRows) {
+        setImportSummary(breakdownNotes.join(' '));
+        if (warnings.length) setUploadWarning(warnings.join(' '));
+        await load();
+        return;
+      }
+      setImportSummary([...breakdownNotes,
         savedRows ? `${savedRows} nuevos` : '',
         updatedRows ? `${updatedRows} duplicados actualizados/saltados` : '',
       ].filter(Boolean).join(' · ') + ` desde ${selected.length} archivo${selected.length === 1 ? '' : 's'}.`);
@@ -431,6 +507,7 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
           clientName={clientName || 'Cliente'}
           liabilities={liabilities}
           onSyncBalances={syncBalancesFromHistory}
+          reloadKey={historyKey}
         />
       )}
 

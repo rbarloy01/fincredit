@@ -1,0 +1,60 @@
+Red Girasol, S.A.P.I. de C.V., Institución de Financiamiento Colectivo
+Segregación del Rubro del Pasivo del Estado de Situación Financiera
+Al 31 de julio de 2026 | Cifras en miles de pesos | Moneda: MXN
+
+
+CUENTA                                                                   31-jul-26
+
+Préstamos bancarios y de otros organismos                                37,116
+
+   De corto plazo                                                        44
+
+      Clara CF Tech                                                      44
+
+   De largo plazo                                                        37,073
+
+      Play Business SAPI de CV                                           673
+
+      Hexágono Capital                                                   36,400
+
+Contribuciones por pagar                                                 8,018
+
+   Impuesto al valor agregado                                            7,779
+
+   Impuestos y aportaciones de seguridad social retenidos                239
+
+Acreedores diversos y otras cuentas por pagar                            1,516
+
+   Otros acreedores diversos                                             467
+
+   Fondo de Ahorro Empresa                                               51
+
+   Fondo de Ahorro Empleados                                             51
+
+   Círculo de crédito                                                    15
+
+   Ingenieros Patrimoniales y Asesores Independientes                    230
+
+   Ruan Solutions                                                        28
+
+   Credit Saison México                                                  674
+
+Impuestos a la utilidad                                                  7,331
+
+   ISR Retenido Trabajadores                                             1,156
+
+   ISR Ret. Honorarios Asimilados                                        348
+
+   ISR Retenido Honorarios                                               110
+
+   ISR Retenido Inversionistas                                           5,717
+
+Pasivos por beneficios a los empleados                                   736
+
+   Beneficios directos a corto plazo                                     292
+
+   Beneficios por terminación                                            444
+
+
+Total Pasivo                                                             54,718
+

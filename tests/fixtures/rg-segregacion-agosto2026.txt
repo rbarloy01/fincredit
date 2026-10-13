@@ -1,0 +1,54 @@
+Red Girasol, S.A.P.I. de C.V., Institución de Financiamiento Colectivo
+Segregación del Rubro del Pasivo del Estado de Situación Financiera
+Al 31 de agosto de 2026 | Cifras en miles de pesos | Moneda: MXN
+
+
+CUENTA                                                                   31-ago-26
+
+Préstamos bancarios y de otros organismos                                35,038
+
+   De corto plazo                                                        81
+
+      Clara CF Tech                                                      81
+
+   De largo plazo                                                        34,956
+
+      Play Business SAPI de CV                                           290
+
+      Hexágono Capital                                                   34,667
+
+Contribuciones por pagar                                                 8,903
+
+   Impuesto al valor agregado                                            8,522
+
+   Impuestos y aportaciones de seguridad social                          381
+
+Acreedores diversos y otras cuentas por pagar                            1,820
+
+   Otros acreedores diversos                                             565
+
+   Fondo de Ahorro Empresa                                               105
+
+   Fondo de Ahorro Empleados                                             105
+
+   Credit Saison México                                                  1,046
+
+Impuestos a la utilidad                                                  7,935
+
+   ISR Retenido Trabajadores                                             1,283
+
+   ISR Ret. Honorarios Asimilados                                        348
+
+   ISR Retenido Honorarios                                               110
+
+   ISR Retenido Inversionistas                                           6,193
+
+Pasivos por beneficios a los empleados                                   791
+
+   Beneficios directos a corto plazo                                     347
+
+   Beneficios por terminación                                            444
+
+
+Total Pasivo                                                             54,486
+
