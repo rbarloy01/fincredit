@@ -47,3 +47,13 @@ test('Utilidad neta CNBV: "Participación en el resultado neto de otras entidade
   const stmt: any = { id: 'rg21', clientId: 'rg', period: '2021', periodDate: '2021-12-31', fileName: '', rawLineItems: rg2021.raw_line_items, mappedData: {}, extraAccounts: [] };
   assert.equal(getMetric(stmt, 'netIncome'), -3988151);
 });
+
+test('Deuda: un solo renglón de préstamos no se cuenta dos veces; inversionistas sí son deuda; nunca el pasivo total', async () => {
+  (globalThis as any).localStorage ??= { getItem: () => null, setItem() {}, removeItem() {} };
+  const { getMetric } = await import('../src/lib/financialMetrics');
+  const st = (items: any[]): any => ({ id: 'd', clientId: 'x', period: '', periodDate: '2025-12-31', fileName: '', rawLineItems: items.map(([name, value]) => ({ name, value, statementType: 'balance_general' })), mappedData: {}, extraAccounts: [] });
+  assert.equal(getMetric(st([['Préstamos bancarios y de otros organismos', 100], ['Total pasivo', 150]]), 'totalDebt'), 100);
+  assert.equal(getMetric(st([['Préstamos bancarios de corto plazo', 40], ['Préstamos bancarios de largo plazo', 60], ['Acreedores inversionistas', 50], ['Total pasivo', 170]]), 'totalDebt'), 150);
+  assert.equal(getMetric(st([['Total activo a corto plazo', 80], ['Proveedores', 10], ['Total a corto plazo', 30], ['Total pasivo', 30]]), 'totalDebt'), null);
+  assert.equal(getMetric(st([['Total activo a corto plazo', 80], ['Total activo', 200], ['Total pasivo', 30]]), 'totalAssets'), 200);
+});

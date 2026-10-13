@@ -398,7 +398,17 @@ function stage3Portfolio(stmt: FinancialStatement_DB): number | null {
   const items = stagedPortfolioItems(stmt, '3');
   if (!items.length) return null;
   const total = items.find(item => norm(item.name).includes('total'));
-  return total ? (total.value as number) : items.reduce((sum, item) => sum + (item.value as number), 0);
+  if (total) return total.value as number;
+  // Subtotal de etapa 3 + sus renglones de detalle (Afix): sumar todo duplicaba la cartera vencida. Con jerarquía se
+  // suman solo los renglones de etapa 3 cuyo padre no es otro renglón de etapa 3; sin jerarquía, si un renglón es igual a
+  // la suma de los demás, ese es el subtotal.
+  const names = new Set(items.map(i => i.name));
+  if (items.some(i => (i as any).parent)) {
+    return items.filter(i => !names.has((i as any).parent)).reduce((sum, i) => sum + (i.value as number), 0);
+  }
+  const sumAll = items.reduce((sum, i) => sum + (i.value as number), 0);
+  const subtotal = items.find(i => Math.abs((i.value as number) * 2 - sumAll) < 1 && items.length > 1);
+  return subtotal ? (subtotal.value as number) : sumAll;
 }
 
 function hasStagedPortfolio(stmt: FinancialStatement_DB): boolean {
@@ -406,6 +416,46 @@ function hasStagedPortfolio(stmt: FinancialStatement_DB): boolean {
 }
 
 const ABSOLUTE_KEYS = new Set(['interestExpense', 'adminSellingOperatingExpenses', 'loanLossReserves']);
+
+// Reglas de deuda (2026-10-12, carga de acreditadas desde Drive):
+//  - "Préstamos de corto plazo" no puede emparejar como largo plazo ni al revés (el match aproximado lo hacía y la deuda
+//    salía al doble cuando el cliente solo reporta uno de los dos).
+//  - Un subtotal parcial ("Total activo a corto plazo", "Total pasivo circulante") nunca es el total.
+//  - El fondeo de una SOFOM no siempre es bancario: acreedores inversionistas, mutuos, pagarés, certificados bursátiles,
+//    obligaciones y préstamos de socios también son pasivo con costo (Finet, GFI, Ideaconv, Kapital Partners, Lendmex).
+const SHORT_TERM_RE = /cortoplazo|circulante|corriente/;
+const LONG_TERM_RE = /largoplazo|nocirculante|nocorriente/;
+// Un renglón de fondeo debe decir que es fondeo: "Total a corto plazo" (o peor, "Total ACTIVO a corto plazo") no es deuda.
+const NOT_FUNDING = '^(?!.*(prestamo|banc|fondeo|fondos|deuda|financiamiento|certificado|obligacion|pasivoconcosto|credito|pagare|emision|bursatil))';
+const ST_EXCLUDE_RE = new RegExp(`${NOT_FUNDING}|largoplazo|nocirculante|nocorriente|activo`);
+const LT_EXCLUDE_RE = new RegExp(`${NOT_FUNDING}|cortoplazo|circulante|corriente|activo`);
+const PARTIAL_TOTAL_RE = /cortoplazo|largoplazo|circulante|corriente|fijo|diferido|nomonetario|menos/;
+const OTHER_FUNDING_RE = /inversionista|mutuo|pagare|certificadosbursatiles|pasivosbursatiles|obligacionesemitidas|obligacionessubordinadas|emisiondedeuda|prestamosdesocios|prestamosdeaccionistas|prestamosderelacionadas|fondeoprivado|deudaprivada/;
+
+// Fondeo no bancario: suma de las cuentas de detalle del balance que lo identifican (sin subtotales que ya las incluyen).
+function otherFunding(stmt: FinancialStatement_DB, alreadyCounted: Array<number | null>): number | null {
+  const items = rawLineItems(stmt).filter(i => (i.statementType || 'balance_general') === 'balance_general' && typeof i.value === 'number' && i.value);
+  const hits = items.filter(i => OTHER_FUNDING_RE.test(norm(i.name)) && !/total|subtotal|suma/.test(norm(i.name)) && !/intereses/.test(norm(i.name)));
+  if (!hits.length) return null;
+  // Si un renglón es padre de otro que también coincide, se cuenta solo el detalle.
+  const names = new Set(hits.map(i => i.name));
+  const counted = alreadyCounted.filter((v): v is number => v !== null && v !== 0).map(Math.abs);
+  if (counted.length > 1) counted.push(counted.reduce((a, v) => a + v, 0));
+  const isCounted = (v: number | null | undefined) => typeof v === 'number' && counted.some(c => Math.abs(Math.abs(v) - c) < 1);
+  const byName = new Map(items.map(i => [i.name, i]));
+  const ancestorCounted = (i: { parent?: string | null }) => {
+    for (let p = i.parent, guard = 0; p && guard < 12; guard += 1) {
+      const node = byName.get(p);
+      if (!node) return false;
+      if (isCounted(node.value as number)) return true;
+      p = (node as any).parent;
+    }
+    return false;
+  };
+  const hasChildren = (i: { name: string }) => items.some(c => (c as any).parent === i.name);
+  const leaves = hits.filter(i => !hits.some(c => (c as any).parent === i.name && names.has(c.name)) && !hasChildren(i) && !isCounted(i.value as number) && !ancestorCounted(i as any));
+  return leaves.reduce((a, i) => a + Math.abs(i.value as number), 0);
+}
 
 export function getMetric(stmt: FinancialStatement_DB, key: string): number | null {
   // Corrección del analista para este cliente ("el capital contable es la cuenta X"): manda sobre todo lo automático.
@@ -437,12 +487,29 @@ export function getMetric(stmt: FinancialStatement_DB, key: string): number | nu
     // Literal: el match aproximado confundía "activo a corto plazo" con "total activo" (razón corriente = 15x en arrendadoras sin clasificación).
     case 'currentAssets': return firstValue(nz(m.currentAssets), findConsolidatedMetricValue(stmt, 'currentAssets'), findRawRequiringSubstring(stmt, ['activo circulante', 'activo corriente', 'total activo a corto plazo', 'activo a corto plazo', 'activo corto plazo'], ['balance_general']), raw(metricAliases('currentAssets'), ['balance_general']));
     case 'currentLiabilities': return firstValue(m.currentLiabilities, findConsolidatedMetricValue(stmt, 'currentLiabilities'), raw(['pasivo circulante', 'pasivo corriente', 'total pasivo a corto plazo', 'pasivo a corto plazo', ...metricAliases('currentLiabilities')], ['balance_general']));
-    case 'totalDebt': return firstValue(m.totalDebt, addValues(getMetric(stmt, 'banksFundsShortTerm'), getMetric(stmt, 'banksFundsLongTerm')), raw(['deuda total', 'prestamos total', 'préstamos total', 'pasivo con costo', 'deuda', ...metricAliases('totalDebt')], ['balance_general']), findConsolidatedMetricValue(stmt, 'totalDebt'));
-    case 'banksFundsShortTerm': return firstValue(raw(['prestamos total corto plazo', 'préstamos total corto plazo', 'prestamos (total corto plazo)', 'prestamos corto plazo', 'préstamos corto plazo', 'bancos y fondos corto plazo', 'bancos y fondos cp', 'fondeo corto plazo', 'prestamos bancarios y de otros organismos de corto plazo', 'prestamos interbancarios y de otros organismos de corto plazo', ...metricAliases('banksFundsShortTerm')], ['balance_general']), findConsolidatedMetricValue(stmt, 'banksFundsShortTerm'));
-    case 'banksFundsLongTerm': return firstValue(raw(['prestamos total largo plazo', 'préstamos total largo plazo', 'prestamos (total largo plazo)', 'prestamos largo plazo', 'préstamos largo plazo', 'bancos y fondos largo plazo', 'bancos y fondos lp', 'fondeo largo plazo', 'prestamos bancarios y de otros organismos de largo plazo', 'prestamos interbancarios y de otros organismos de largo plazo', ...metricAliases('banksFundsLongTerm')], ['balance_general']), findConsolidatedMetricValue(stmt, 'banksFundsLongTerm'));
-    case 'totalLiabilities': return firstValue(raw(['total de pasivo', 'total, de pasivo', 'total pasivo', 'suma del pasivo', 'pasivo total', ...metricAliases('totalLiabilities')], ['balance_general']), findConsolidatedMetricValue(stmt, 'totalLiabilities'), getMetric(stmt, 'totalDebt'));
+    case 'totalDebt': {
+      const st = getMetric(stmt, 'banksFundsShortTerm'), lt = getMetric(stmt, 'banksFundsLongTerm');
+      // Si corto y largo plazo emparejan el MISMO renglón (un solo "Préstamos bancarios" sin plazo), se cuenta una vez.
+      const ltOnly = lt !== null && st !== null && Math.abs(lt - st) < 1 ? null : lt;
+      const other = otherFunding(stmt, [st, ltOnly]);
+      let debt = addValues(st, ltOnly, other);
+      // Regla: la deuda con costo nunca excede el pasivo total; si lo hace, hay componentes traslapados → se queda el mayor que cabe.
+      const liabilities = findRaw(stmt, ['total de pasivo', 'total pasivo', 'suma del pasivo', 'pasivo total'], ['balance_general'], PARTIAL_TOTAL_RE);
+      if (debt !== null && liabilities !== null && liabilities > 0 && debt > liabilities * 1.001) {
+        const fits = [addValues(st, ltOnly), other, st, ltOnly].filter((v): v is number => v !== null && v <= liabilities * 1.001);
+        debt = fits.length ? Math.max(...fits) : null;
+      }
+      const fallback = firstValue(nz(m.totalDebt), raw(['deuda total', 'prestamos total', 'préstamos total', 'pasivo con costo', 'deuda', ...metricAliases('totalDebt')], ['balance_general']), findConsolidatedMetricValue(stmt, 'totalDebt'));
+      // Regla: sin renglón de fondeo identificado, la deuda es N/D — nunca el pasivo total (eso inflaba apalancamiento y
+      // Deuda/Capital en clientes que no reportan préstamos por separado).
+      const fallbackIsLiabilities = fallback !== null && liabilities !== null && Math.abs(Math.abs(fallback) - liabilities) < 1;
+      return firstValue(debt, fallbackIsLiabilities ? null : fallback);
+    }
+    case 'banksFundsShortTerm': return firstValue(findRaw(stmt, ['prestamos total corto plazo', 'préstamos total corto plazo', 'prestamos (total corto plazo)', 'prestamos corto plazo', 'préstamos corto plazo', 'bancos y fondos corto plazo', 'bancos y fondos cp', 'fondeo corto plazo', 'prestamos bancarios y de otros organismos de corto plazo', 'prestamos interbancarios y de otros organismos de corto plazo', ...metricAliases('banksFundsShortTerm')], ['balance_general'], ST_EXCLUDE_RE), findConsolidatedMetricValue(stmt, 'banksFundsShortTerm'));
+    case 'banksFundsLongTerm': return firstValue(findRaw(stmt, ['prestamos total largo plazo', 'préstamos total largo plazo', 'prestamos (total largo plazo)', 'prestamos largo plazo', 'préstamos largo plazo', 'bancos y fondos largo plazo', 'bancos y fondos lp', 'fondeo largo plazo', 'prestamos bancarios y de otros organismos de largo plazo', 'prestamos interbancarios y de otros organismos de largo plazo', ...metricAliases('banksFundsLongTerm')], ['balance_general'], LT_EXCLUDE_RE), findConsolidatedMetricValue(stmt, 'banksFundsLongTerm'));
+    case 'totalLiabilities': return firstValue(findRaw(stmt, ['total de pasivo', 'total, de pasivo', 'total pasivo', 'suma del pasivo', 'pasivo total', ...metricAliases('totalLiabilities')], ['balance_general'], PARTIAL_TOTAL_RE), findConsolidatedMetricValue(stmt, 'totalLiabilities'), getMetric(stmt, 'totalDebt'));
     // Activos totales / capital contable en exactamente 0 = extracción fallida (Red Girasol abr-26), no un dato: se usa el renglón del balance.
-    case 'totalAssets': return firstValue(nz(m.totalAssets), findConsolidatedMetricValue(stmt, 'totalAssets'), raw(['total activo', 'activos totales', 'suma del activo', ...metricAliases('totalAssets')], ['balance_general']));
+    case 'totalAssets': return firstValue(nz(m.totalAssets), findRaw(stmt, ['total activo', 'activos totales', 'suma del activo', ...metricAliases('totalAssets')], ['balance_general'], PARTIAL_TOTAL_RE), findConsolidatedMetricValue(stmt, 'totalAssets'));
     // "Total de Pasivo + Capital" NO es capital contable (tiene las palabras "total" y "capital"): ICAP salía 100% (Kredi jul-23).
     case 'equity': {
       // Un "capital" igual al renglón combinado "pasivo + capital" (o "liabilities and capital") es el total del balance,
@@ -543,7 +610,8 @@ export function standardRatios(stmt: FinancialStatement_DB, siblings: FinancialS
   const loanLossReserves = getMetric(stmt, 'loanLossReserves');
   const netPortfolio = getMetric(stmt, 'netPortfolio');
   const productiveAssets = getMetric(stmt, 'productiveAssets');
-  const fundingDebt = addValues(banksFundsShortTerm, banksFundsLongTerm) ?? totalDebt;
+  // Deuda con costo: bancos y fondos (corto + largo, sin contar dos veces el mismo renglón) + fondeo no bancario.
+  const fundingDebt = totalDebt;
   const costOfFunding = div(scale(interest), fundingDebt);
   const portfolioYield = div(scale(interestIncome), managedPortfolio);
   const miss = (items: Array<[string, number | null]>) => items.filter(([, value]) => value === null).map(([label]) => label);
@@ -563,7 +631,7 @@ export function standardRatios(stmt: FinancialStatement_DB, siblings: FinancialS
     { key: 'debt_ebitda', label: 'Deuda / EBITDA', value: div(totalDebt, scale(ebitda)), formula: `Deuda total / EBITDA${annualNote}`, missing: miss([['Deuda total', totalDebt], ['EBITDA', ebitda]]) },
     { key: 'dscr', label: 'DSCR', value: div(ebitda, interest), formula: 'EBITDA / gasto financiero', missing: miss([['EBITDA', ebitda], ['Gasto financiero', interest]]) },
     { key: 'current_ratio', label: 'Razón Corriente', value: div(currentAssets, currentLiabilities), formula: 'Activo corriente / Pasivo corriente', missing: miss([['Activo corriente', currentAssets], ['Pasivo corriente', currentLiabilities]]) },
-    { key: 'leverage', label: 'Apalancamiento', value: div(fundingDebt, totalAssets), formula: '(Bancos y fondos CP + LP) / total activo', missing: miss([['Bancos y fondos CP + LP', fundingDebt], ['Activos totales', totalAssets]]) },
+    { key: 'leverage', label: 'Apalancamiento', value: div(fundingDebt, totalAssets), formula: 'Deuda con costo (bancos, fondos e inversionistas) / total activo', missing: miss([['Deuda con costo', fundingDebt], ['Activos totales', totalAssets]]) },
     { key: 'debt_equity', label: 'Deuda / Capital', value: div(totalDebt, equity), formula: 'Deuda total / capital contable', missing: miss([['Deuda total', totalDebt], ['Capital contable', equity]]) },
     { key: 'capitalization', label: 'ICAP', value: div(equity, totalAssets), formula: 'Capital contable / activos totales', missing: miss([['Capital contable', equity], ['Activos totales', totalAssets]]) },
     { key: 'adjusted_capitalization', label: 'ICAP Ajustado', value: div(equity, netPortfolio), formula: 'Capital contable / cartera neta', missing: miss([['Capital contable', equity], ['Cartera neta', netPortfolio]]) },
@@ -574,7 +642,7 @@ export function standardRatios(stmt: FinancialStatement_DB, siblings: FinancialS
     { key: 'net_past_due_portfolio', label: 'Cartera Vencida Neta', value: div(subtractValues(pastDuePortfolio, loanLossReserves), managedPortfolio), formula: `(Cartera vencida - estimación preventiva) / cartera administrada${tapeNote}`, missing: miss([['Cartera vencida', pastDuePortfolio], ['Estimación preventiva', loanLossReserves], ['Cartera administrada', managedPortfolio]]) },
     { key: 'past_due_coverage', label: 'Índice de Cobertura de Cartera Vencida', value: div(loanLossReserves, pastDuePortfolio), formula: `Estimación preventiva / cartera vencida${tapeNote}`, missing: miss([['Estimación preventiva', loanLossReserves], ['Cartera vencida', pastDuePortfolio]]) },
     { key: 'debt_coverage_productive_assets', label: 'Cobertura de Deuda', value: div(productiveAssets, totalLiabilities), formula: 'Activos productivos / total pasivo', missing: miss([['Activos productivos', productiveAssets], ['Total pasivo', totalLiabilities]]) },
-    { key: 'funding_cost', label: 'Costo de Fondeo Aproximado', value: costOfFunding, formula: `Gasto financiero / bancos y fondos CP + LP${annualNote}`, missing: miss([['Gasto financiero', interest], ['Bancos y fondos CP + LP', fundingDebt]]) },
+    { key: 'funding_cost', label: 'Costo de Fondeo Aproximado', value: costOfFunding, formula: `Gasto financiero / deuda con costo (bancos, fondos e inversionistas)${annualNote}`, missing: miss([['Gasto financiero', interest], ['Deuda con costo', fundingDebt]]) },
     { key: 'portfolio_yield', label: 'Rendimiento de Cartera (Yield)', value: portfolioYield, formula: `Ingresos por intereses / cartera administrada${annualNote}${tapeNote}`, missing: miss([['Ingresos por intereses', interestIncome], ['Cartera administrada', managedPortfolio]]) },
     { key: 'financial_spread', label: 'Spread Financiero Aproximado', value: portfolioYield !== null && costOfFunding !== null ? portfolioYield - costOfFunding : null, formula: `Rendimiento de cartera - costo de fondeo aproximado${annualNote}`, missing: miss([['Rendimiento de cartera', portfolioYield], ['Costo de fondeo', costOfFunding]]) },
     { key: 'immediate_liquidity', label: 'Liquidez Inmediata', value: div(addValues(getMetric(stmt, 'cash'), getMetric(stmt, 'availableInvestments')), currentLiabilities), formula: '(Bancos + inversiones disponibles no comprometidas) / pasivo corriente', missing: miss([['Bancos + inversiones disponibles', addValues(getMetric(stmt, 'cash'), getMetric(stmt, 'availableInvestments'))], ['Pasivo corriente', currentLiabilities]]) },
@@ -587,7 +655,7 @@ export function standardRatioFormula(key: string): string {
     key === 'debt_ebitda' ? 'ratio:totalDebt/ebitda' :
     key === 'dscr' ? 'ratio:ebitda/interestExpense' :
     key === 'current_ratio' ? 'ratio:currentAssets/currentLiabilities' :
-    key === 'leverage' ? 'expr:["(","ref:banksFundsShortTerm","+","ref:banksFundsLongTerm",")","/","ref:totalAssets"]' :
+    key === 'leverage' ? 'ratio:totalDebt/totalAssets' :
     key === 'debt_equity' ? 'ratio:totalDebt/equity' :
     key === 'capitalization' ? 'ratio:equity/totalAssets' :
     key === 'adjusted_capitalization' ? 'ratio:equity/netPortfolio' :
@@ -602,9 +670,9 @@ export function standardRatioFormula(key: string): string {
     key === 'past_due_coverage' ? 'ratio:loanLossReserves/pastDuePortfolio' :
     key === 'past_due_30_portfolio' ? 'ratio:pastDue30Portfolio/managedPortfolio' :
     key === 'debt_coverage_productive_assets' ? 'ratio:productiveAssets/totalLiabilities' :
-    key === 'funding_cost' ? 'expr:["ref:interestExpense","/","(","ref:banksFundsShortTerm","+","ref:banksFundsLongTerm",")"]' :
+    key === 'funding_cost' ? 'ratio:interestExpense/totalDebt' :
     key === 'portfolio_yield' ? 'ratio:interestIncome/managedPortfolio' :
-    key === 'financial_spread' ? 'expr:["ref:interestIncome","/","ref:managedPortfolio","-","ref:interestExpense","/","(","ref:banksFundsShortTerm","+","ref:banksFundsLongTerm",")"]' :
+    key === 'financial_spread' ? 'expr:["ref:interestIncome","/","ref:managedPortfolio","-","ref:interestExpense","/","ref:totalDebt"]' :
     key === 'immediate_liquidity' ? 'expr:["(","ref:cash","+","ref:availableInvestments",")","/","ref:currentLiabilities"]' :
     key === 'past_due_to_equity' ? 'ratio:pastDuePortfolio/equity' :
     key
