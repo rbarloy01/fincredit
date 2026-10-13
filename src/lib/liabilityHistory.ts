@@ -46,7 +46,7 @@ export interface LiabilityHistoryAnalysis {
   totals: number[];
   lenders: LenderSeries[];
   latest: { cutoff: string; total: number; delta: number | null; deltaPct: number | null; lenders: number; topLender: string | null; topShare: number; hhi: number } | null;
-  portfolio: Array<{ cutoff: string; portfolio: number | null; ratio: number | null }>;   // cartera del loan tape / fondeo
+  portfolio: Array<{ cutoff: string; portfolio: number | null; ratio: number | null }>;   // cartera VIGENTE del loan tape / fondeo (aforo vigente)
   checks: HistoryCheck[];
   impliedCost: Array<{ from: string; to: string; rate: number }>;   // costo de fondeo implícito (anualizado)
   insights: string[];
@@ -87,7 +87,8 @@ export function analyzeLiabilityHistory(clientId: string, store: LiabilityHistor
   // Fondeo vs cartera del loan tape del mismo corte (cuántas veces la cartera cubre el fondeo).
   const portfolio = snaps.map((s, i) => {
     const p = tapePointForPeriod(clientId, s.cutoff);
-    const bal = p && isTapePointUsable(p) ? p.balance : p?.balance ?? null;
+    // Aforo vigente = cartera vigente (0-30 días) ÷ fondeo; solo si el tape trae días de atraso.
+    const bal = p && isTapePointUsable(p) ? p.vigente : null;
     return { cutoff: s.cutoff, portfolio: bal, ratio: bal && totals[i] ? bal / totals[i] : null };
   });
 
@@ -129,8 +130,8 @@ export function analyzeLiabilityHistory(clientId: string, store: LiabilityHistor
     if (newL.length) insights.push(`Fondeador nuevo: ${newL.map(l => l.lender).join(', ')}.`);
     if (gone.length) insights.push(`Ya no aparece: ${gone.map(l => l.lender).join(', ')} (liquidado o no reportado).`);
     const lastP = portfolio.at(-1);
-    if (lastP?.ratio) insights.push(`La cartera del loan tape (${money(lastP.portfolio!)}) cubre ${lastP.ratio.toFixed(2)}x el fondeo institucional.`);
-    else insights.push('Falta el loan tape de ese corte para medir cuántas veces la cartera cubre el fondeo.');
+    if (lastP?.ratio) insights.push(`Aforo vigente ${lastP.ratio.toFixed(2)}x: la cartera vigente (0-30 días) del loan tape, ${money(lastP.portfolio!)}, cubre ${lastP.ratio.toFixed(2)} veces el fondeo institucional.`);
+    else insights.push('Falta el loan tape de ese corte (con días de atraso) para medir el aforo vigente.');
     const lastCheck = checks.at(-1);
     if (lastCheck?.ok === false) insights.push(`⚠ ${lastCheck.detail}.`);
     if (snaps.length === 1) insights.push('Con el siguiente corte se calcula la variación mes a mes por acreedor.');
@@ -156,7 +157,7 @@ export function buildLiabilityHistorySheets(clientName: string, a: LiabilityHist
     ['TOTAL', '', ...a.totals, a.latest?.delta ?? 0, a.latest?.deltaPct ?? 'N/D', 1], { sum: a.cutoffs.map((_, i) => i + 2) });
   if (a.cutoffs.length > 1) s.chart(t, { title: 'Saldo por acreedor y corte', kind: 'column', series: a.cutoffs.map((c, i) => ({ col: 2 + i, name: c, color: [AXC.sky, AXC.blue, AXC.deep, AXC.cyan, AXC.ink][i % 5] })), yFmt: '$#,##0' });
   s.blank();
-  s.table('FONDEO VS CARTERA DEL LOAN TAPE', ['Corte', 'Fondeo institucional', 'Cartera loan tape', 'Cartera / fondeo (x)'],
+  s.table('AFORO VIGENTE (CARTERA VIGENTE DEL LOAN TAPE / FONDEO)', ['Corte', 'Fondeo institucional', 'Cartera vigente (0-30 días)', 'Aforo vigente (x)'],
     a.portfolio.map((p, i) => [p.cutoff, a.totals[i], p.portfolio ?? 'N/D', p.ratio === null ? 'N/D' : F(p.ratio, FMT.dec2)]), [undefined, 'money', 'money', 'dec2']);
   s.blank();
   s.table('CUADRE CONTRA EL BALANCE', ['Corte', 'Revisión', 'Resultado', 'Detalle'], a.checks.map(c => [c.cutoff, c.label, c.ok === null ? 'Sin dato' : c.ok ? 'Cuadra' : 'No cuadra', c.detail]), [undefined, undefined, undefined, undefined]);

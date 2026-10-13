@@ -140,7 +140,7 @@ export default function LiabilityHistoryPanel({ clientId, clientName, liabilitie
               { k: 'Vs corte anterior', v: signed(lt?.delta ?? null, moneyM), d: lt?.deltaPct !== null && lt?.deltaPct !== undefined ? signed(lt.deltaPct, n => `${(n * 100).toFixed(1)}%`) : 'Requiere 2 cortes', tone: lt?.delta ? (lt.delta < 0 ? 'text-emerald-700' : 'text-amber-700') : '' },
               { k: 'Fondeadores', v: String(lt?.lenders ?? '—'), d: `HHI ${lt ? lt.hhi.toFixed(2) : '—'}` },
               { k: 'Principal fondeador', v: pct(lt?.topShare), d: lt?.topLender || '—', tone: (lt?.topShare || 0) >= 0.6 ? 'text-rose-700' : '' },
-              { k: 'Cartera / fondeo', v: a.portfolio.at(-1)?.ratio ? `${a.portfolio.at(-1)!.ratio!.toFixed(2)}x` : 'N/D', d: a.portfolio.at(-1)?.portfolio ? `Cartera ${moneyM(a.portfolio.at(-1)!.portfolio!)}` : 'Sin loan tape del corte' },
+              { k: 'Aforo vigente', v: a.portfolio.at(-1)?.ratio ? `${a.portfolio.at(-1)!.ratio!.toFixed(2)}x` : 'N/D', d: a.portfolio.at(-1)?.portfolio ? `Cartera vigente ${moneyM(a.portfolio.at(-1)!.portfolio!)} ÷ fondeo` : 'Sin loan tape del corte' },
             ].map(t => (
               <div key={t.k} className="border border-slate-200 rounded-xl p-3">
                 <p className="text-[10px] font-black uppercase tracking-wider text-slate-500">{t.k}</p>
