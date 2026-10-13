@@ -430,6 +430,7 @@ const NOT_FUNDING = '^(?!.*(prestamo|banc|fondeo|fondos|deuda|financiamiento|cer
 const ST_EXCLUDE_RE = new RegExp(`${NOT_FUNDING}|largoplazo|nocirculante|nocorriente|activo`);
 const LT_EXCLUDE_RE = new RegExp(`${NOT_FUNDING}|cortoplazo|circulante|corriente|activo`);
 const PARTIAL_TOTAL_RE = /cortoplazo|largoplazo|circulante|corriente|fijo|diferido|nomonetario|menos/;
+const INCOME_LINE_RE = /ingreso|ganad|cobrad|productosfinancieros/;
 const OTHER_FUNDING_RE = /inversionista|mutuo|pagare|certificadosbursatiles|pasivosbursatiles|obligacionesemitidas|obligacionessubordinadas|emisiondedeuda|prestamosdesocios|prestamosdeaccionistas|prestamosderelacionadas|fondeoprivado|deudaprivada/;
 
 // Fondeo no bancario: suma de las cuentas de detalle del balance que lo identifican (sin subtotales que ya las incluyen).
@@ -467,7 +468,7 @@ export function getMetric(stmt: FinancialStatement_DB, key: string): number | nu
   const m = asObject<FinancialStatement_DB['mappedData']>((stmt as any).mappedData);
   const raw = (names: string[], types?: string[]) => findRaw(stmt, names, types);
   switch (key) {
-    case 'revenue': return firstValue(m.revenue, findConsolidatedMetricValue(stmt, 'revenue'), raw(['ingresos', 'ventas', ...metricAliases('revenue')], ['estado_resultados']));
+    case 'revenue': return firstValue(nz(m.revenue), findConsolidatedMetricValue(stmt, 'revenue'), raw(['ingresos', 'ventas', ...metricAliases('revenue')], ['estado_resultados']));
     case 'interestIncome': return firstValue(findConsolidatedMetricValue(stmt, 'interestIncome'), raw(['ingresos por intereses', 'intereses cobrados', 'ingreso por interes', ...metricAliases('interestIncome')], ['estado_resultados']));
     case 'feeIncome': return firstValue(findConsolidatedMetricValue(stmt, 'feeIncome'), raw(['ingresos por comisiones', 'comisiones cobradas', 'ingreso por comision', ...metricAliases('feeIncome')], ['estado_resultados']));
     // Arrendadoras: el ingreso principal es la renta, no los intereses; sin sumarla, los márgenes salen en cientos de %.
@@ -480,13 +481,20 @@ export function getMetric(stmt: FinancialStatement_DB, key: string): number | nu
     // (unlike adjustedOperatingIncome below), so require "ajustad" literally.
     case 'adjustedFinancialMargin': return firstValue(findRawRequiringSubstring(stmt, ['ajustad', ...metricAliases('adjustedFinancialMargin')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'adjustedFinancialMargin'));
     case 'adjustedOperatingIncome': return firstValue(raw(['utilidad o perdida de operacion', 'utilidad o pérdida de operación', 'utilidad de operacion', 'utilidad operativa ajustada', 'utilidad operacion ajustada', 'utilidad de operacion ajustada', 'resultado de operacion', ...metricAliases('adjustedOperatingIncome')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'adjustedOperatingIncome'));
-    case 'adminSellingOperatingExpenses': return absoluteValue(firstValue(raw(['gastos de operacion total', 'gastos de operación total', 'gastos de operacion (total)', 'gastos de administracion venta y operacion', 'gastos adm venta opn', 'gastos administrativos', 'gastos de operacion', ...metricAliases('adminSellingOperatingExpenses')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'adminSellingOperatingExpenses')));
+    case 'adminSellingOperatingExpenses': return absoluteValue(firstValue(raw(['gastos de operacion total', 'gastos de operación total', 'gastos de operacion (total)', 'gastos de administracion venta y operacion', 'gastos adm venta opn', 'gastos administrativos', 'gastos de operacion', ...metricAliases('adminSellingOperatingExpenses')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'adminSellingOperatingExpenses'),
+      // "Gastos generales" solo si no hay otra cuenta de gasto operativo: en unos estados es el total (Pro Mujer, Besta) y en otros una parte (Fondo Monei).
+      findRawRequiringSubstring(stmt, ['gastos generales'], ['estado_resultados'])));
     case 'ebitda': return firstValue(nz(m.ebitda), findConsolidatedMetricValue(stmt, 'ebitda'), raw(['ebitda', ...metricAliases('ebitda')], ['estado_resultados']), raw(['utilidad operacion', 'utilidad de operacion', 'resultado de operacion', 'utilidad antes de intereses'], ['estado_resultados']));
-    case 'interestExpense': return absoluteValue(firstValue(m.interestExpense, raw(['gastos por intereses', 'gasto por intereses', 'gasto financiero', 'intereses pagados', 'intereses devengados', 'resultado integral de financiamiento', ...metricAliases('interestExpense')], ['estado_resultados']), findConsolidatedMetricValue(stmt, 'interestExpense')));
-    case 'netIncome': return firstValue(m.netIncome, findConsolidatedMetricValue(stmt, 'netIncome'), raw(['utilidad neta', 'resultado neto', 'utilidad o perdida', 'utilidad (o perdida)', 'perdida del ejercicio', ...metricAliases('netIncome')], ['estado_resultados']));
+    // Regla: el gasto financiero nunca es un renglón de ingreso ("Ingresos por intereses", "Intereses ganados"): el alias
+    // genérico "intereses" lo tomaba (Pro Mujer: gasto financiero = 115.7M de ingresos).
+    case 'interestExpense': {
+      const notIncome = (v: number | null) => (v !== null && Math.abs(v) > 0 && Math.abs(v) === Math.abs(getMetric(stmt, 'interestIncome') ?? NaN) ? null : v);
+      return absoluteValue(firstValue(nz(m.interestExpense), findRaw(stmt, ['gastos por intereses', 'gasto por intereses', 'gasto por interes neto', 'gasto financiero', 'intereses pagados', 'intereses devengados', 'resultado integral de financiamiento', ...metricAliases('interestExpense')], ['estado_resultados'], INCOME_LINE_RE), notIncome(findConsolidatedMetricValue(stmt, 'interestExpense'))));
+    }
+    case 'netIncome': return firstValue(nz(m.netIncome), findConsolidatedMetricValue(stmt, 'netIncome'), raw(['utilidad neta', 'resultado neto', 'utilidad o perdida', 'utilidad (o perdida)', 'perdida del ejercicio', ...metricAliases('netIncome')], ['estado_resultados']));
     // Literal: el match aproximado confundía "activo a corto plazo" con "total activo" (razón corriente = 15x en arrendadoras sin clasificación).
     case 'currentAssets': return firstValue(nz(m.currentAssets), findConsolidatedMetricValue(stmt, 'currentAssets'), findRawRequiringSubstring(stmt, ['activo circulante', 'activo corriente', 'total activo a corto plazo', 'activo a corto plazo', 'activo corto plazo'], ['balance_general']), raw(metricAliases('currentAssets'), ['balance_general']));
-    case 'currentLiabilities': return firstValue(m.currentLiabilities, findConsolidatedMetricValue(stmt, 'currentLiabilities'), raw(['pasivo circulante', 'pasivo corriente', 'total pasivo a corto plazo', 'pasivo a corto plazo', ...metricAliases('currentLiabilities')], ['balance_general']));
+    case 'currentLiabilities': return firstValue(nz(m.currentLiabilities), findConsolidatedMetricValue(stmt, 'currentLiabilities'), raw(['pasivo circulante', 'pasivo corriente', 'total pasivo a corto plazo', 'pasivo a corto plazo', ...metricAliases('currentLiabilities')], ['balance_general']));
     case 'totalDebt': {
       const st = getMetric(stmt, 'banksFundsShortTerm'), lt = getMetric(stmt, 'banksFundsLongTerm');
       // Si corto y largo plazo emparejan el MISMO renglón (un solo "Préstamos bancarios" sin plazo), se cuenta una vez.

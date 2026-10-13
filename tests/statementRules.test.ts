@@ -57,3 +57,13 @@ test('Deuda: un solo renglón de préstamos no se cuenta dos veces; inversionist
   assert.equal(getMetric(st([['Total activo a corto plazo', 80], ['Proveedores', 10], ['Total a corto plazo', 30], ['Total pasivo', 30]]), 'totalDebt'), null);
   assert.equal(getMetric(st([['Total activo a corto plazo', 80], ['Total activo', 200], ['Total pasivo', 30]]), 'totalAssets'), 200);
 });
+
+test('Gasto financiero nunca es un renglón de ingreso; un resumen "mapped" en 0 no bloquea la cuenta real', async () => {
+  (globalThis as any).localStorage ??= { getItem: () => null, setItem() {}, removeItem() {} };
+  const { getMetric } = await import('../src/lib/financialMetrics');
+  const er = (items: any[], mapped: any = {}): any => ({ id: 'e', clientId: 'x', period: '', periodDate: '2025-12-31', fileName: '', rawLineItems: items.map(([name, value]) => ({ name, value, statementType: 'estado_resultados' })), mappedData: mapped, extraAccounts: [] });
+  assert.equal(getMetric(er([['Ingresos por intereses de créditos otorgados', 100], ['Costo de otorgamiento de crédito', -20], ['Gasto por interés, neto', -5]]), 'interestExpense'), 5);
+  assert.equal(getMetric(er([['Ingresos por intereses de créditos otorgados', 100]]), 'interestExpense'), null);
+  assert.equal(getMetric(er([['Utilidad neta', -7]], { netIncome: 0 }), 'netIncome'), -7);
+  assert.equal(getMetric(er([['Ingresos por intereses', 100], ['Gastos generales', -40], ['Utilidad neta', 60]]), 'adminSellingOperatingExpenses'), 40);
+});
