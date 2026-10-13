@@ -13,6 +13,8 @@ import { buildCockpitData } from '../../lib/loanTapeCockpit';
 import { analyzePortfolio } from '../../lib/loanTapeReport';
 import { reserveDownloadTarget } from '../../lib/browserDownload';
 import LiabilitiesCockpit from './LiabilitiesCockpit';
+import LiabilityHistoryPanel from './LiabilityHistoryPanel';
+import type { LiabilityLine } from '../../lib/liabilityHistory';
 import { loadExportModule } from '../../lib/exportLoader';
 import WorkingOverlay from '../common/WorkingOverlay';
 import { type AISettings, extractInstitutionalLiabilities } from '../../services/ai';
@@ -363,6 +365,18 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
     }
   };
 
+  // El corte más reciente del historial actualiza el saldo actual de cada pasivo (mismo acreedor por nombre).
+  const syncBalancesFromHistory = async (lines: LiabilityLine[], cutoff: string) => {
+    const norm = (v: string) => normalizeKeyPart(v);
+    await Promise.all(lines.map(line => {
+      const hit = liabilities.find(l => norm(l.lenderName) === norm(line.lender));
+      if (!hit || hit.currentBalance === line.balance) return Promise.resolve();
+      const note = `Saldo actualizado desde el historial (corte ${cutoff}).`;
+      return db.updateInstitutionalLiability(hit.id, { currentBalance: line.balance, notes: hit.notes ? `${hit.notes}\n${note}` : note });
+    }));
+    await load();
+  };
+
   return (
     <div className="space-y-6">
       <WorkingOverlay show={!!busy} title={busy || 'Procesando'} />
@@ -409,6 +423,15 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
         <div className="flex items-start gap-2 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold px-4 py-3 rounded-xl">
           <Check className="w-4 h-4 flex-shrink-0 mt-0.5" /> {importSummary}
         </div>
+      )}
+
+      {schemaReady !== false && (
+        <LiabilityHistoryPanel
+          clientId={clientId}
+          clientName={clientName || 'Cliente'}
+          liabilities={liabilities}
+          onSyncBalances={syncBalancesFromHistory}
+        />
       )}
 
       {loading ? (
