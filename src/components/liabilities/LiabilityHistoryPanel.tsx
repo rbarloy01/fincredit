@@ -7,6 +7,7 @@ import {
   loadLiabilityHistory, saveLiabilityHistory, upsertSnapshot,
 } from '../../lib/liabilityHistory';
 import { loadExportModule } from '../../lib/exportLoader';
+import FundingCostCard from './FundingCostCard';
 import { reserveDownloadTarget } from '../../lib/browserDownload';
 
 const PALETTE = ['#1430E6', '#16B7EA', '#1B5BF5', '#8FB4FF', '#0E1B3D', '#7A5CFF', '#00A3A3', '#5D6B8A'];
@@ -130,6 +131,8 @@ export default function LiabilityHistoryPanel({ clientId, clientName, liabilitie
           </div>
         </div>
       )}
+
+      <FundingCostCard statements={statements} snapshots={store.snapshots} liabilities={liabilities} />
 
       {!a.cutoffs.length ? (
         <p className="text-sm text-slate-400 py-6 text-center">Aún no hay cortes. Agrega la segregación del pasivo de cada mes para ver la evolución por acreedor.</p>
