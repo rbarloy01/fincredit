@@ -1302,13 +1302,37 @@ export function computeStatementReconciliation(
   concepts: DefinedConcept[] = [],
 ): StatementReconciliation {
   const itemsBySegment = new Map<string, Array<{ name: string; statementType?: string | null; value?: number | null; sectionPath?: string }>>();
+  // Regla: con jerarquía, la sección (Activo / Pasivo / Capital) sale del árbol — el renglón pertenece a la sección de su
+  // ancestro raíz ("Total activo", "Total pasivo", "Total capital contable") —, no del nombre: "Préstamos a la LLC" es un
+  // ACTIVO aunque diga "préstamos" (Flieben Capital: el pasivo salía al doble).
+  const balanceItems = (stmt.rawLineItems || []).filter(i => (i.statementType || 'balance_general') === 'balance_general');
+  const byName = new Map(balanceItems.map(i => [i.name, i]));
+  const treeSegment = (item: any): string | null => {
+    if (!balanceItems.some(i => (i as any).parent)) return null;
+    let cur = item; const seen = new Set<string>();
+    for (let guard = 0; guard < 20; guard += 1) {
+      const n = nkey(cur.name);
+      if (/activo/.test(n) && /total|suma/.test(n) && !/pasivo|capital/.test(n)) return 'ACTIVO';
+      if (/pasivo/.test(n) && /total|suma/.test(n) && !/capital/.test(n)) return 'PASIVO';
+      if (/capital/.test(n) && /total|suma/.test(n) && !/pasivo/.test(n)) return 'CAPITAL';
+      const parent = (cur as any).parent;
+      if (!parent || seen.has(parent) || !byName.has(parent)) return null;
+      seen.add(parent); cur = byName.get(parent);
+    }
+    return null;
+  };
   (stmt.rawLineItems || []).forEach(item => {
-    const segment = exportSegment(item);
+    const segment = ((item.statementType || 'balance_general') === 'balance_general' && treeSegment(item)) || exportSegment(item);
     if (!itemsBySegment.has(segment)) itemsBySegment.set(segment, []);
-    itemsBySegment.get(segment)!.push({ name: item.name, statementType: item.statementType, value: item.value, sectionPath: item.sectionPath });
+    itemsBySegment.get(segment)!.push({ name: item.name, statementType: item.statementType, value: item.value, sectionPath: item.sectionPath, parent: (item as any).parent } as any);
   });
 
   const picked = pickSectionTotals(stmt);
+  // Renglones que son padre de otro (solo si el estado trae jerarquía del balance).
+  const bgItems = (stmt.rawLineItems || []).filter(i => (i.statementType || 'balance_general') === 'balance_general');
+  const hierarchyParents: Set<string> | null = bgItems.some(i => (i as any).parent)
+    ? new Set(bgItems.filter(i => (i as any).parent).map(i => `balance_general||${(i as any).parent}`))
+    : null;
   const grandOf = (segment: string) => (segment === 'ACTIVO' ? picked.activo : segment === 'PASIVO' ? picked.pasivo : segment === 'CAPITAL' ? picked.capital : null);
   const detailFor = (segment: string, extraFilter?: (name: string) => boolean, countLoneTotals = false) => {
     const segmentItems = itemsBySegment.get(segment) || [];
@@ -1327,6 +1351,21 @@ export function computeStatementReconciliation(
     };
     const keys: string[] = [];
     let excluded = 0;
+    // Regla: con jerarquía (parent), subtotal = el renglón que TIENE detalle debajo; todo lo demás es hoja y suma, aunque se
+    // llame "Capital contribuido" o "Total…". Por nombre fallaba: un subtotal con un hijo en 0 se sumaba dos veces (Red
+    // Girasol mar-25, pasivo −24.5M) y un "Capital contribuido" sin desglose se descartaba (oct/nov-25, capital −51.3M).
+    if (hierarchyParents) {
+      segmentItems.forEach(item => {
+        if (extraFilter && !extraFilter(item.name)) return;
+        const key = `${item.statementType || 'otro'}||${item.name}`;
+        // Hojas = renglones DEL árbol (tienen padre) sin detalle propio. Los renglones sin padre son totales o memoria
+        // ("Total del pasivo a corto plazo" informativo) y no se suman.
+        const inTree = !!(item as any).parent;
+        if (hierarchyParents.has(key) || !inTree) { excluded += 1; return; }
+        keys.push(key);
+      });
+      return { keys, excluded };
+    }
     segmentItems.forEach(item => {
       if (extraFilter && !extraFilter(item.name)) return;
       const key = `${item.statementType || 'otro'}||${item.name}`;
