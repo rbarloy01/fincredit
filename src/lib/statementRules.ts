@@ -23,9 +23,20 @@ export interface HierarchyCheck {
   ok: boolean;
 }
 
-// Redondeos de la fuente: hasta $5 o 0.05% del renglón (lo que sea mayor).
-export const ROUNDING_TOLERANCE = { absolute: 5, relative: 0.0005 } as const;
-export const withinRounding = (gap: number, base: number) => Math.abs(gap) <= Math.max(ROUNDING_TOLERANCE.absolute, Math.abs(base) * ROUNDING_TOLERANCE.relative);
+// Redondeos de la fuente: hasta $5 o 0.05% del renglón (lo que sea mayor) — y si el documento viene en miles (todos los
+// importes múltiplos de 1,000), hasta 2 unidades de la cifra mostrada: "−863 vs −864" en miles es redondeo, no error
+// (Red Girasol jul/ago-26: la conciliación marcaba "no cuadra" por $1,000 en estados en miles de pesos).
+export const ROUNDING_TOLERANCE = { absolute: 5, relative: 0.0005, unitMultiple: 2 } as const;
+export const withinRounding = (gap: number, base: number, unit = 1) =>
+  Math.abs(gap) <= Math.max(ROUNDING_TOLERANCE.absolute, Math.abs(base) * ROUNDING_TOLERANCE.relative, unit > 1 ? unit * ROUNDING_TOLERANCE.unitMultiple : 0);
+
+// Unidad en que viene el documento: 1,000 si (casi) todos los importes son múltiplos de mil; si no, pesos.
+export function roundingUnit(items: Array<{ value: number | null | undefined }>): number {
+  const vals = items.map(i => i.value).filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v !== 0);
+  if (vals.length < 5) return 1;
+  const thousands = vals.filter(v => Math.abs(v) % 1000 === 0).length;
+  return thousands / vals.length >= 0.95 ? 1000 : 1;
+}
 
 const plain = (v: string) => v.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
 const NET_RESULT = /resultado neto|utilidad neta|perdida neta|utilidad \(perdida\) neta|net income/;
@@ -33,6 +44,7 @@ const NET_RESULT = /resultado neto|utilidad neta|perdida neta|utilidad \(perdida
 export function checkHierarchy(all: HierarchyItem[], statementType: string): HierarchyCheck | null {
   const items = all.filter(i => i.statementType === statementType && typeof i.value === 'number' && Number.isFinite(i.value as number));
   if (!items.some(i => i.parent)) return null;
+  const unit = roundingUnit(all);
   const byParent = new Map<string, HierarchyItem[]>();
   items.forEach(i => { if (i.parent) byParent.set(i.parent, [...(byParent.get(i.parent) || []), i]); });
   const byName = new Map(items.map(i => [i.name, i]));
@@ -45,7 +57,7 @@ export function checkHierarchy(all: HierarchyItem[], statementType: string): Hie
     nodesChecked += 1;
     const childrenSum = children.reduce((a, c) => a + (c.value as number), 0);
     const gap = (node.value as number) - childrenSum;
-    if (!withinRounding(gap, node.value as number)) failures.push({ name: parentName, reported: node.value as number, childrenSum, gap });
+    if (!withinRounding(gap, node.value as number, unit)) failures.push({ name: parentName, reported: node.value as number, childrenSum, gap });
   });
 
   // Total final: resultado neto (ER) o el total sin padre que tenga componentes.
@@ -67,6 +79,6 @@ export function checkHierarchy(all: HierarchyItem[], statementType: string): Hie
     const sum = leafSum(top.name);
     topResult = { name: top.name, reported: top.value as number, leafSum: sum, gap: (top.value as number) - sum };
   }
-  const topOk = !topResult || withinRounding(topResult.gap, topResult.reported);
+  const topOk = !topResult || withinRounding(topResult.gap, topResult.reported, unit);
   return { top: topResult, nodesChecked, failures, leaves, ok: failures.length === 0 && topOk };
 }

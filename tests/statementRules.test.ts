@@ -67,3 +67,18 @@ test('Gasto financiero nunca es un renglón de ingreso; un resumen "mapped" en 0
   assert.equal(getMetric(er([['Utilidad neta', -7]], { netIncome: 0 }), 'netIncome'), -7);
   assert.equal(getMetric(er([['Ingresos por intereses', 100], ['Gastos generales', -40], ['Utilidad neta', 60]]), 'adminSellingOperatingExpenses'), 40);
 });
+
+test('Redondeo: en estados en miles, 1 unidad ($1,000) de diferencia es redondeo; en pesos no', () => {
+  const tree = (k: number) => ([
+    { name: 'Ingresos por intereses', value: 4383 * k, statementType: 'estado_resultados', parent: 'Margen financiero' },
+    { name: 'Gastos por intereses', value: -5827 * k, statementType: 'estado_resultados', parent: 'Margen financiero' },
+    { name: 'Resultado por valuación', value: 580 * k, statementType: 'estado_resultados', parent: 'Margen financiero' },
+    { name: 'Margen financiero', value: -863 * k, statementType: 'estado_resultados', parent: 'Resultado neto' },
+    { name: 'Otros', value: 0, statementType: 'estado_resultados', parent: 'Resultado neto' },
+    { name: 'Resultado neto', value: -863 * k, statementType: 'estado_resultados' },
+  ]);
+  assert.equal(checkHierarchy(tree(1000), 'estado_resultados')!.ok, true);   // miles: −863 vs −864 es redondeo
+  assert.equal(checkHierarchy(tree(1), 'estado_resultados')!.ok, true);      // pesos: $1 también es redondeo
+  const pesos = tree(1).map(i => i.name === 'Margen financiero' ? { ...i, value: -1863 } : i);
+  assert.equal(checkHierarchy(pesos, 'estado_resultados')!.ok, false);       // pesos: $999 NO es redondeo
+});
