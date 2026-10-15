@@ -1,6 +1,6 @@
 import type { Covenant_DB, FinancialStatement_DB } from '../db/index';
 import { feedbackValue } from './accountFeedback';
-import { isTapePointUsable, tapeDpdCoverage, tapeMetric, tapePointForPeriod } from './tapePortfolioCache';
+import { TAPE_MAX_BALANCE_GAP, isTapePointUsable, tapeBalanceGap, tapeIsOffBalanceManaged, tapeDpdCoverage, tapeMetric, tapePointForPeriod } from './tapePortfolioCache';
 import { findConsolidatedMetricValue, metricAliases } from './accountConsolidation';
 import { parseNullableFinancialNumber } from './numberParsing';
 
@@ -458,13 +458,21 @@ function otherFunding(stmt: FinancialStatement_DB, alreadyCounted: Array<number 
   return leaves.reduce((a, i) => a + Math.abs(i.value as number), 0);
 }
 
+// El loan tape del corte cuadra con la cartera del balance (±15%). Sin cartera en el balance, se acepta el tape.
+function tapeReconcilesWithStatement(stmt: FinancialStatement_DB): boolean {
+  const p = tapePointForPeriod(stmt.clientId, stmt.periodDate);
+  if (!p) return false;
+  const gap = tapeBalanceGap(p, getMetric(stmt, 'loanPortfolio'));
+  return gap === null || Math.abs(gap) <= TAPE_MAX_BALANCE_GAP || tapeIsOffBalanceManaged(gap);
+}
+
 export function getMetric(stmt: FinancialStatement_DB, key: string): number | null {
   // Corrección del analista para este cliente ("el capital contable es la cuenta X"): manda sobre todo lo automático.
   const corrected = feedbackValue(stmt.clientId, rawLineItems(stmt), key);
   if (corrected !== null) return ABSOLUTE_KEYS.has(key) ? Math.abs(corrected) : corrected;
   // Cartera vencida y cartera administrada salen del loan tape del mismo corte cuando existe (regla del usuario).
   const fromTape = tapeMetric(stmt.clientId, stmt.periodDate, key);
-  if (fromTape !== null) return fromTape;
+  if (fromTape !== null && tapeReconcilesWithStatement(stmt)) return fromTape;
   const m = asObject<FinancialStatement_DB['mappedData']>((stmt as any).mappedData);
   const raw = (names: string[], types?: string[]) => findRaw(stmt, names, types);
   switch (key) {
@@ -625,7 +633,12 @@ export function standardRatios(stmt: FinancialStatement_DB, siblings: FinancialS
   const miss = (items: Array<[string, number | null]>) => items.filter(([, value]) => value === null).map(([label]) => label);
   // Cartera vencida / administrada del loan tape del mismo corte (si existe): se indica en la fórmula de cada indicador.
   const tape = tapePointForPeriod(stmt.clientId, stmt.periodDate);
-  const tapeNote = tape && isTapePointUsable(tape)
+  const tapeGap = tape ? tapeBalanceGap(tape, getMetric(stmt, 'loanPortfolio')) : null;
+  const tapeNote = tape && isTapePointUsable(tape) && tapeIsOffBalanceManaged(tapeGap)
+    ? ` · cartera administrada del loan tape (corte ${tape.cutoff}, ${tape.loans.toLocaleString('es-MX')} créditos; ${((tapeGap as number) + 1).toFixed(1)}x la cartera del balance: incluye cartera fuera de balance)`
+    : tape && isTapePointUsable(tape) && tapeGap !== null && Math.abs(tapeGap) > TAPE_MAX_BALANCE_GAP
+    ? ` · cartera del estado financiero: el loan tape del corte ${tape.cutoff} no cuadra con el balance (${tapeGap > 0 ? '+' : ''}${Math.round(tapeGap * 100)}% vs cartera del balance)`
+    : tape && isTapePointUsable(tape)
     ? ` · cartera del loan tape (corte ${tape.cutoff}, ${tape.loans.toLocaleString('es-MX')} créditos vivos; vencida = 90+ días)`
     : tape ? ` · cartera del estado financiero: el loan tape del corte ${tape.cutoff} trae días de atraso solo para ${Math.round(tapeDpdCoverage(tape) * 100)}% del saldo` : '';
   const pastDue30Portfolio = getMetric(stmt, 'pastDue30Portfolio');

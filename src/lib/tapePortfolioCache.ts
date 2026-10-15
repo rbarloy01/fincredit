@@ -20,6 +20,16 @@ export type TapePortfolio = Record<string, TapePortfolioPoint>;
 // Regla: el loan tape solo sustituye al estado financiero si trae días de atraso para la gran mayoría del saldo.
 // Un tape sin DPD (14 de 27 clientes al 2026-10-12) daría cartera vencida 0% — falta de dato, no cartera sana.
 export const TAPE_MIN_DPD_COVERAGE = 0.8;
+// Regla: además, el saldo del loan tape debe cuadrar con la cartera del balance del mismo corte (±15%). Un tape incompleto
+// (Afix dic-24→abr-25: 120M debajo del balance) o que incluye intereses/IVA (may-25 en adelante: +28-56M) daría un IMOR
+// sobre una cartera equivocada; entonces manda el estado financiero.
+export const TAPE_MAX_BALANCE_GAP = 0.15;
+// Más de +60% sobre el balance no es error del tape: es cartera administrada FUERA de balance (plataforma de
+// financiamiento colectivo como Red Girasol, cartera cedida o en fideicomiso). Ahí el tape es la cartera administrada.
+export const TAPE_OFF_BALANCE_GAP = 0.6;
+export const tapeIsOffBalanceManaged = (gap: number | null) => gap !== null && gap > TAPE_OFF_BALANCE_GAP;
+export const tapeBalanceGap = (p: TapePortfolioPoint, statementPortfolio: number | null) =>
+  statementPortfolio && statementPortfolio > 0 ? (p.balance - statementPortfolio) / statementPortfolio : null;
 export const tapeDpdCoverage = (p: TapePortfolioPoint) => (p.balance > 0 ? 1 - p.sinDato / p.balance : 0);
 export const isTapePointUsable = (p: TapePortfolioPoint | null | undefined): boolean => !!p && p.balance > 0 && tapeDpdCoverage(p) >= TAPE_MIN_DPD_COVERAGE;
 
