@@ -73,7 +73,7 @@ function fmtCompact(n: number): string {
   return new Intl.NumberFormat('es-MX', {
     notation: 'compact',
     compactDisplay: 'short',
-    maximumFractionDigits: 1,
+    maximumFractionDigits: 2,
   }).format(n);
 }
 
@@ -82,7 +82,7 @@ function fmtMoney(n: number): string {
 }
 
 function fmtPct(n: number): string {
-  return `${(n * 100).toLocaleString('es-MX', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
+  return `${(n * 100).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
 }
 
 function fmtRatio(n: number): string {

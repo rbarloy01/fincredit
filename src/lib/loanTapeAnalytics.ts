@@ -692,7 +692,7 @@ function fmtMoney(value: number) {
 }
 
 function fmtPct(value: number) {
-  return `${(value * 100).toFixed(1)}%`;
+  return `${(value * 100).toFixed(2)}%`;
 }
 
 function trend(current: number, previous: number, higherIsWorse = false) {
@@ -706,7 +706,7 @@ function fmtChange(current: number, previous: number, kind: 'money' | 'pct' | 'n
   if (!Number.isFinite(previous) || previous === 0) return undefined;
   const delta = current - previous;
   if (kind === 'money') return `${delta >= 0 ? '+' : ''}${fmtMoney(delta)}`;
-  if (kind === 'pct') return `${delta >= 0 ? '+' : ''}${(delta * 100).toFixed(1)} pp`;
+  if (kind === 'pct') return `${delta >= 0 ? '+' : ''}${(delta * 100).toFixed(2)} pp`;
   return `${delta >= 0 ? '+' : ''}${delta.toFixed(0)}`;
 }
 
@@ -1076,7 +1076,7 @@ export function answerLoanTapeQuestion(question: string, rows: StandardLoan[], a
   if (/(falta|missing|calidad|map|columna|confiable|readiness|listo)/.test(q)) {
     const missing = profile.missingFields.filter(f => f.severity !== 'low').slice(0, 8);
     if (!missing.length) return `El tape está bastante usable: score ${profile.readinessScore}/100, ${profile.mappedFields.length} campos mapeados y ${profile.validationCount} alertas de validación.`;
-    return `Score de preparación: ${profile.readinessScore}/100.\n\nLo que falta o pega más:\n${missing.map(f => `- ${f.field}: ${f.mapped ? `${(f.missingPct * 100).toFixed(1)}% filas vacías` : 'no mapeado'}; ${f.impact}`).join('\n')}`;
+    return `Score de preparación: ${profile.readinessScore}/100.\n\nLo que falta o pega más:\n${missing.map(f => `- ${f.field}: ${f.mapped ? `${(f.missingPct * 100).toFixed(2)}% filas vacías` : 'no mapeado'}; ${f.impact}`).join('\n')}`;
   }
   if (/(top|mayor|grande|concentracion|cliente)/.test(q)) {
     const top = [...latest].sort((a, b) => (b.outstanding_balance || 0) - (a.outstanding_balance || 0)).slice(0, 10)
@@ -1101,7 +1101,7 @@ export function answerLoanTapeQuestion(question: string, rows: StandardLoan[], a
     return `${lines.join('\n')}\n\nDetalle más relevante:\n${answerRows([...(a.dpd_deterioration || []), ...(a.new_loans || [])].slice(0, 10), ['loan_id', 'days_overdue_prev', 'days_overdue_latest', 'outstanding_balance', 'category'])}`;
   }
   if (/(producto|tipo|segmento)/.test(q)) {
-    const productRows = loanTypeProfile(latest).slice(0, 10).map(r => ({ ...r, balance: fmtMoney(r.balance), pct: fmtPct(r.pct), avg_interest_rate: r.avg_interest_rate === null ? 'N/D' : fmtPct(r.avg_interest_rate), avg_days_overdue: r.avg_days_overdue?.toFixed(1) ?? 'N/D' }));
+    const productRows = loanTypeProfile(latest).slice(0, 10).map(r => ({ ...r, balance: fmtMoney(r.balance), pct: fmtPct(r.pct), avg_interest_rate: r.avg_interest_rate === null ? 'N/D' : fmtPct(r.avg_interest_rate), avg_days_overdue: r.avg_days_overdue?.toFixed(2) ?? 'N/D' }));
     return `Perfil por producto:\n${answerRows(productRows, ['name', 'count', 'balance', 'pct', 'avg_interest_rate', 'avg_days_overdue'])}`;
   }
   return analysis?.executiveSummary || `Resumen: ${latest.length} registros activos, saldo ${fmtMoney(total)}. Preguntas útiles: "qué falta", "top concentración", "mora", "cambios vs mes anterior", "por producto".`;
@@ -1294,8 +1294,8 @@ export function analyzeLoanTapesLocally(tapes: LoanTape_DB[], selectedTapeId?: s
       { name: 'Concentracion max cliente', latestValue: fmtPct(maxClientPct), previousValue: previousRows.length ? fmtPct(previousMaxClientPct) : undefined, change: fmtChange(maxClientPct, previousMaxClientPct, 'pct'), trend: trend(maxClientPct, previousMaxClientPct, true), status: maxClientPct > RISK_THRESHOLDS.clientConcentrationAlert ? 'critical' : maxClientPct > RISK_THRESHOLDS.clientConcentrationWarn ? 'warning' : 'good', congruent: true },
       { name: 'Concentracion Top 10 clientes', latestValue: top10ClientsPct === null ? 'N/D' : fmtPct(top10ClientsPct), previousValue: undefined, change: undefined, trend: 'stable', status: top10ClientsPct !== null && top10ClientsPct > RISK_THRESHOLDS.top10Alert ? 'critical' : top10ClientsPct !== null && top10ClientsPct > RISK_THRESHOLDS.top10Warn ? 'warning' : 'good', congruent: true },
       { name: 'Concentracion Top 10 creditos', latestValue: top10Pct === null ? 'N/D' : fmtPct(top10Pct), previousValue: previousRows.length && top10Pct !== null ? fmtPct(previousTop10Pct) : undefined, change: top10Pct === null ? undefined : fmtChange(top10Pct, previousTop10Pct, 'pct'), trend: top10Pct === null ? 'stable' : trend(top10Pct, previousTop10Pct, true), status: top10Pct !== null && top10Pct > RISK_THRESHOLDS.top10Alert ? 'critical' : top10Pct !== null && top10Pct > RISK_THRESHOLDS.top10Warn ? 'warning' : 'good', congruent: true },
-      { name: 'DPD ponderado por saldo', latestValue: weightedDpd === null ? 'N/D' : `${weightedDpd.toFixed(1)} dias`, previousValue: previousWeightedDpd === null ? undefined : `${previousWeightedDpd.toFixed(1)} dias`, change: weightedDpd !== null && previousWeightedDpd !== null ? fmtChange(weightedDpd, previousWeightedDpd, 'number') : undefined, trend: weightedDpd !== null && previousWeightedDpd !== null ? trend(weightedDpd, previousWeightedDpd, true) : 'stable', status: weightedDpd !== null && weightedDpd > RISK_THRESHOLDS.waDpdAlert ? 'critical' : weightedDpd !== null && weightedDpd > RISK_THRESHOLDS.waDpdWarn ? 'warning' : 'good', congruent: true },
-      { name: 'Tasa ponderada por saldo', latestValue: weightedRate === null ? 'N/D' : fmtPct(weightedRate), previousValue: previousWeightedRate === null ? undefined : fmtPct(previousWeightedRate), change: weightedRate !== null && previousWeightedRate !== null ? `${weightedRate - previousWeightedRate >= 0 ? '+' : ''}${((weightedRate - previousWeightedRate) * 100).toFixed(1)} pp` : undefined, trend: weightedRate !== null && previousWeightedRate !== null ? trend(weightedRate, previousWeightedRate) : 'stable', status: 'good', congruent: true },
+      { name: 'DPD ponderado por saldo', latestValue: weightedDpd === null ? 'N/D' : `${weightedDpd.toFixed(2)} dias`, previousValue: previousWeightedDpd === null ? undefined : `${previousWeightedDpd.toFixed(2)} dias`, change: weightedDpd !== null && previousWeightedDpd !== null ? fmtChange(weightedDpd, previousWeightedDpd, 'number') : undefined, trend: weightedDpd !== null && previousWeightedDpd !== null ? trend(weightedDpd, previousWeightedDpd, true) : 'stable', status: weightedDpd !== null && weightedDpd > RISK_THRESHOLDS.waDpdAlert ? 'critical' : weightedDpd !== null && weightedDpd > RISK_THRESHOLDS.waDpdWarn ? 'warning' : 'good', congruent: true },
+      { name: 'Tasa ponderada por saldo', latestValue: weightedRate === null ? 'N/D' : fmtPct(weightedRate), previousValue: previousWeightedRate === null ? undefined : fmtPct(previousWeightedRate), change: weightedRate !== null && previousWeightedRate !== null ? `${weightedRate - previousWeightedRate >= 0 ? '+' : ''}${((weightedRate - previousWeightedRate) * 100).toFixed(2)} pp` : undefined, trend: weightedRate !== null && previousWeightedRate !== null ? trend(weightedRate, previousWeightedRate) : 'stable', status: 'good', congruent: true },
     ].concat(latestIsSummary ? [] : imorMetricRows(latest, previousRows))),
     findings,
     congruencyChecks: [],
@@ -1329,7 +1329,7 @@ function imorMetricRows(latest: StandardLoan[], previous: StandardLoan[]) {
 }
 
 // "Umbral de alerta" de cada métrica: sale de portfolioRules (no hay límite contractual capturado por métrica).
-const pctTxt = (v: number) => `${(v * 100).toLocaleString('es-MX', { maximumFractionDigits: 1 })}%`;
+const pctTxt = (v: number) => `${(v * 100).toLocaleString('es-MX', { maximumFractionDigits: 2 })}%`;
 const METRIC_THRESHOLDS: Record<string, string> = {
   '% cartera vencida': `Atención ≥${pctTxt(RISK_THRESHOLDS.vencidaWarn)} · Alerta >${pctTxt(RISK_THRESHOLDS.vencidaAlert)}`,
   '% cartera atrasada': `Atención >${pctTxt(RISK_THRESHOLDS.atrasadaWarn)}`,

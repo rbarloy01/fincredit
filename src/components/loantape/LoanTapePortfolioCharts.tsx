@@ -16,11 +16,11 @@ const tooltipStyle = { borderRadius: 12, borderColor: '#e2e8f0', boxShadow: '0 1
 
 const moneyCompact = (v: number) => `$${(Math.abs(v) / 1e6).toLocaleString('es-MX', { maximumFractionDigits: v >= 1e7 ? 0 : 1 })}M`;
 const money = (v: number) => `$${Math.round(v || 0).toLocaleString('es-MX')}`;
-const pct1 = (v: number) => `${((v || 0) * 100).toFixed(1)}%`;
+const pct1 = (v: number) => `${((v || 0) * 100).toFixed(2)}%`;
 const pct0 = (v: number) => `${Math.round((v || 0) * 100)}%`;
-const compactMoney = (v: number) => (Math.abs(v) >= 1e6 ? `${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 1 })}M` : `${Math.round(v / 1e3).toLocaleString('es-MX')}K`);
+const compactMoney = (v: number) => (Math.abs(v) >= 1e6 ? `${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 2 })}M` : `${Math.round(v / 1e3).toLocaleString('es-MX')}K`);
 const moneyRange = (lo: number, hi: number) => `$${compactMoney(lo)}–${compactMoney(hi)}`;
-const pctRange = (lo: number, hi: number) => `${(lo * 100).toFixed(1)}–${(hi * 100).toFixed(1)}%`;
+const pctRange = (lo: number, hi: number) => `${(lo * 100).toFixed(2)}–${(hi * 100).toFixed(2)}%`;
 const termRange = (lo: number, hi: number) => `${Math.round(lo)}–${Math.round(hi)} m`;
 // X axis that never overprints: thin out and tilt the labels when there are many categories.
 const xAxisProps = (count: number) => ({ interval: (count > 8 ? 'preserveStartEnd' : 0) as 'preserveStartEnd' | 0, angle: count > 5 ? -30 : 0, textAnchor: (count > 5 ? 'end' : 'middle') as 'end' | 'middle', height: count > 5 ? 54 : 30, minTickGap: 12 });

@@ -26,9 +26,9 @@ export function percentile(xs: number[], p: number): number | null {
   return s[lo] + (s[hi] - s[lo]) * (idx - lo);
 }
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
-const fmt = (v: number | null, pct: boolean) => (v === null || !Number.isFinite(v) ? 'N/D' : pct ? `${(v * 100).toFixed(1)}%` : `${v.toFixed(2)}x`);
+const fmt = (v: number | null, pct: boolean) => (v === null || !Number.isFinite(v) ? 'N/D' : pct ? `${(v * 100).toFixed(2)}%` : `${v.toFixed(2)}x`);
 const pctOf = (key: string) => KEYS.find(k => k.key === key)?.pct ?? true;
-const mM = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? 'N/D' : `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 1 })}M`);
+const mM = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? 'N/D' : `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 2 })}M`);
 
 // Share of the cohort that is in a WORSE position than this value (0-100): higher = better placed.
 export function placement(values: number[], value: number, key: string): number | null {

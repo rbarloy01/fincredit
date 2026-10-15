@@ -153,7 +153,7 @@ const covenantLooksPercent = (cov: Covenant_DB) => {
 
 const fmtPercent = (value: number, scaleFraction = true) => {
   const display = scaleFraction && Math.abs(value) <= 1 ? value * 100 : value;
-  return `${display.toLocaleString('es-MX', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}%`;
+  return `${display.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
 };
 
 const fmtCovenantValue = (cov: Covenant_DB, value: number | null) => {

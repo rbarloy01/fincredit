@@ -25,7 +25,7 @@ function scoreBadgeClass(score: string) {
 function fmtCurrency(value: number, currency: string): string {
   const prefix = currency === 'MXN' ? '$' : currency === 'USD' ? 'USD ' : '€';
   if (value >= 1_000_000) return `${prefix}${(value / 1_000_000).toFixed(2)}M`;
-  if (value >= 1_000) return `${prefix}${(value / 1_000).toFixed(1)}K`;
+  if (value >= 1_000) return `${prefix}${(value / 1_000).toFixed(2)}K`;
   return `${prefix}${value.toLocaleString('es-MX')}`;
 }
 

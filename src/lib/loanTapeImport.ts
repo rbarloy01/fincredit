@@ -674,7 +674,7 @@ export function importLoanTapeSheets(sheets: SheetInput[], fileName: string, opt
   for (const c of genericCandidates.filter(c => kept.keep.includes(c))) {
     const v = c.dpdValidation;
     if (!v) continue;
-    const pctTxt = `${(Math.max(v.mismatchPct, v.mismatchBalancePct) * 100).toFixed(1)}%`;
+    const pctTxt = `${(Math.max(v.mismatchPct, v.mismatchBalancePct) * 100).toFixed(2)}%`;
     if (!v.ok && !v.strong) {
       if (severity === 'ok') severity = 'warning';
       messages.push(`⚠ Los días de atraso ("${v.dpdHeader}") no coinciden con el estatus "${v.evidenceHeader}" en ${v.mismatches} de ${v.compared} créditos (${pctTxt}). Puede ser la definición de estatus del cliente; confírmalo antes de usar la calidad de cartera.`);

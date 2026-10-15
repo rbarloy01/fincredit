@@ -75,9 +75,9 @@ function quarterSlices<T>(monthly: T[], reduce: (slice: T[]) => number): number[
   return out;
 }
 
-const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
+const pct = (v: number) => `${(v * 100).toFixed(2)}%`;
 const pp = (v: number) => `${(v * 100).toFixed(2)} pp`;
-const mm = (v: number) => `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 1 })} M`;
+const mm = (v: number) => `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 2 })} M`;
 
 export function analyzeAssetLiability(portfolio: PortfolioAnalysis | null, liab: LiabilitiesAnalysis, asOf: Date = new Date()): AssetLiabilityAnalysis | null {
   if (!portfolio || !portfolio.rows.length || liab.kpi.totalBalance <= 0) return null;
@@ -211,7 +211,7 @@ export function analyzeAssetLiability(portfolio: PortfolioAnalysis | null, liab:
     insights.push({
       severity: 'warning',
       title: 'Descalce de plazos',
-      detail: `La cartera tiene plazo remanente ponderado ${termGapMonths.toFixed(1)} meses mayor que los pasivos.`,
+      detail: `La cartera tiene plazo remanente ponderado ${termGapMonths.toFixed(2)} meses mayor que los pasivos.`,
       recommendation: 'El fondeo vence antes que la cartera: riesgo de refinanciamiento.',
     });
   }

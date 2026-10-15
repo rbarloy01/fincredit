@@ -2442,7 +2442,7 @@ function buildCagrRows(periods: Array<{ label: string; stmt: FinancialStatement_
   const years = yearsBetween(first.stmt.periodDate, last.stmt.periodDate);
   const rows: SheetDef['rows'] = [
     ['CRECIMIENTO (CAGR)'],
-    [`Tasa de crecimiento anual compuesta de ${first.label} a ${last.label} (~${years.toFixed(1)} años). Solo aplica a montos absolutos, no a razones.`],
+    [`Tasa de crecimiento anual compuesta de ${first.label} a ${last.label} (~${years.toFixed(2)} años). Solo aplica a montos absolutos, no a razones.`],
     [],
     ['Métrica', `CAGR ${first.label} → ${last.label}`],
   ];
@@ -2517,7 +2517,7 @@ function renderTrendChartPng(title: string, labels: string[], values: Array<numb
     ctx.lineTo(padding.left + plotW, y);
     ctx.stroke();
     const value = min + (i / gridLines) * range;
-    const label = isPercent ? `${(value * 100).toFixed(1)}%` : value.toLocaleString('es-MX', { maximumFractionDigits: 2 });
+    const label = isPercent ? `${(value * 100).toFixed(2)}%` : value.toLocaleString('es-MX', { maximumFractionDigits: 2 });
     ctx.fillText(label, 4, y + 3);
   }
 
@@ -3286,7 +3286,7 @@ function buildLoanTapePdfPages(tapes: LoanTape_DB[], clientName: string): HTMLDi
     appendPdfSection(overview, 'Campos críticos faltantes',
       (profile.missingFields.filter(field => field.severity !== 'low').slice(0, 9).map(field => [
         `${field.field} · ${field.severity}`,
-        `${field.mapped ? `${(field.missingPct * 100).toFixed(1)}% vacío` : 'No mapeado'}. ${field.impact}`,
+        `${field.mapped ? `${(field.missingPct * 100).toFixed(2)}% vacío` : 'No mapeado'}. ${field.impact}`,
       ]) as Array<[string, string]>).concat(
         profile.missingFields.every(field => field.severity === 'low')
           ? [['Estado', 'No hay campos críticos faltantes relevantes.']]

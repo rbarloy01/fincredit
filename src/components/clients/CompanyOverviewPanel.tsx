@@ -24,7 +24,7 @@ function fmtCurrency(value: number | null | undefined, currency: string): string
   if (value == null || !Number.isFinite(value)) return 'Sin dato';
   const prefix = currency === 'MXN' ? '$' : currency === 'USD' ? 'USD ' : currency === 'EUR' ? 'EUR ' : `${currency} `;
   if (Math.abs(value) >= 1_000_000) return `${prefix}${(value / 1_000_000).toFixed(2)}M`;
-  if (Math.abs(value) >= 1_000) return `${prefix}${(value / 1_000).toFixed(1)}K`;
+  if (Math.abs(value) >= 1_000) return `${prefix}${(value / 1_000).toFixed(2)}K`;
   return `${prefix}${value.toLocaleString('es-MX')}`;
 }
 

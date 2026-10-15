@@ -635,7 +635,7 @@ export function standardRatios(stmt: FinancialStatement_DB, siblings: FinancialS
   const tape = tapePointForPeriod(stmt.clientId, stmt.periodDate);
   const tapeGap = tape ? tapeBalanceGap(tape, getMetric(stmt, 'loanPortfolio')) : null;
   const tapeNote = tape && isTapePointUsable(tape) && tapeIsOffBalanceManaged(tapeGap)
-    ? ` · cartera administrada del loan tape (corte ${tape.cutoff}, ${tape.loans.toLocaleString('es-MX')} créditos; ${((tapeGap as number) + 1).toFixed(1)}x la cartera del balance: incluye cartera fuera de balance)`
+    ? ` · cartera administrada del loan tape (corte ${tape.cutoff}, ${tape.loans.toLocaleString('es-MX')} créditos; ${((tapeGap as number) + 1).toFixed(2)}x la cartera del balance: incluye cartera fuera de balance)`
     : tape && isTapePointUsable(tape) && tapeGap !== null && Math.abs(tapeGap) > TAPE_MAX_BALANCE_GAP
     ? ` · cartera del estado financiero: el loan tape del corte ${tape.cutoff} no cuadra con el balance (${tapeGap > 0 ? '+' : ''}${Math.round(tapeGap * 100)}% vs cartera del balance)`
     : tape && isTapePointUsable(tape)

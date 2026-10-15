@@ -35,7 +35,7 @@ function money(value: number, currency = 'MXN') {
 
 function pct(value: number | null | undefined) {
   if (value === null || value === undefined || !Number.isFinite(value)) return 'N/A';
-  return `${(value * 100).toFixed(1)}%`;
+  return `${(value * 100).toFixed(2)}%`;
 }
 
 function compactNumber(value: number | null | undefined) {
@@ -100,7 +100,7 @@ function covenantOperatorLabel(operator: Covenant_DB['operator']) {
 
 function covenantValueLabel(value: number | null, covenant: Covenant_DB) {
   if (value === null || !Number.isFinite(value)) return 'N/A';
-  if (isPercentCovenant(covenant) && Math.abs(value) <= 3) return `${(value * 100).toFixed(1)}%`;
+  if (isPercentCovenant(covenant) && Math.abs(value) <= 3) return `${(value * 100).toFixed(2)}%`;
   return value.toLocaleString('es-MX', { maximumFractionDigits: 2 });
 }
 
@@ -201,7 +201,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
     ...(daysSince(latestStatement?.periodDate) > 45 ? [{ severity: 'warning', title: 'Estados financieros vencidos', detail: latestStatement ? `Último periodo hace ${daysSince(latestStatement.periodDate)} días` : 'Sin estados financieros cargados' }] : []),
     ...(loanTapes.length === 0 ? [{ severity: 'warning', title: 'Loan tape faltante', detail: 'No hay loan tape cargada para monitoreo' }] : []),
     ...(latestTape && !tapeAnalysis ? [{ severity: 'warning', title: 'Loan tape sin analizar', detail: 'Carga hecha, falta correr análisis de cartera' }] : []),
-    ...(vencidaPct > 0 ? [{ severity: vencidaPct > 0.1 ? 'critical' : 'warning', title: 'Cartera vencida detectada', detail: `${(vencidaPct * 100).toFixed(1)}% del saldo con más de 90 DPD` }] : []),
+    ...(vencidaPct > 0 ? [{ severity: vencidaPct > 0.1 ? 'critical' : 'warning', title: 'Cartera vencida detectada', detail: `${(vencidaPct * 100).toFixed(2)}% del saldo con más de 90 DPD` }] : []),
     ...(utilization !== null && utilization > 1 ? [{ severity: 'critical', title: 'Loan tape excede línea contratada', detail: `Utilización calculada ${pct(utilization)} sobre ${money(facilityAmount, client.currency)}` }] : []),
     ...(maxClient?.pct > 0.2 ? [{ severity: 'warning', title: 'Concentración alta por cliente', detail: `${maxClient.name}: ${pct(maxClient.pct)} del saldo` }] : []),
     ...(highValidationIssues > 0 ? [{ severity: 'warning', title: 'Calidad de datos del tape', detail: `${highValidationIssues} validaciones críticas en el archivo` }] : []),
@@ -576,11 +576,11 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
               </div>
               <div className="rounded-xl bg-amber-50 p-4">
                 <p className="text-[10px] font-black text-amber-600 uppercase tracking-widest">Atrasada</p>
-                <p className="text-xl font-black text-amber-800 mt-1">{(atrasadaPct * 100).toFixed(1)}%</p>
+                <p className="text-xl font-black text-amber-800 mt-1">{(atrasadaPct * 100).toFixed(2)}%</p>
               </div>
               <div className="rounded-xl bg-rose-50 p-4">
                 <p className="text-[10px] font-black text-rose-600 uppercase tracking-widest">Vencida</p>
-                <p className="text-xl font-black text-rose-800 mt-1">{(vencidaPct * 100).toFixed(1)}%</p>
+                <p className="text-xl font-black text-rose-800 mt-1">{(vencidaPct * 100).toFixed(2)}%</p>
               </div>
               <div className="rounded-xl bg-indigo-50 p-4">
                 <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest">Alertas tape</p>
@@ -620,7 +620,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
                   {Object.entries(tapeQuality).map(([name, item]: any) => (
                     <div key={name} className="flex justify-between px-4 py-3 text-sm">
                       <span className="font-bold capitalize text-slate-600">{name}</span>
-                      <span className="font-mono font-black text-slate-900">{(item.pct * 100).toFixed(1)}%</span>
+                      <span className="font-mono font-black text-slate-900">{(item.pct * 100).toFixed(2)}%</span>
                     </div>
                   ))}
                 </div>
@@ -632,7 +632,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
                   {(tapeConcentrations.by_client || []).slice(0, 5).map((row: any) => (
                     <div key={row.name} className="flex justify-between gap-3 px-4 py-3 text-sm">
                       <span className="font-bold text-slate-600 truncate">{row.name}</span>
-                      <span className="font-mono font-black text-slate-900">{(row.pct * 100).toFixed(1)}%</span>
+                      <span className="font-mono font-black text-slate-900">{(row.pct * 100).toFixed(2)}%</span>
                     </div>
                   ))}
                   {!maxClient && <p className="px-4 py-3 text-sm text-slate-400">Sin concentración calculada.</p>}
@@ -645,7 +645,7 @@ const CreditUnderwritingPanel: React.FC<Props> = ({ client, transactions, statem
                   {(tapeAnalysis.dpd_distribution || []).map((row: any) => (
                     <div key={row.bucket} className="flex justify-between px-4 py-3 text-sm">
                       <span className="font-bold text-slate-600">{row.bucket}</span>
-                      <span className="font-mono font-black text-slate-900">{(row.pct * 100).toFixed(1)}%</span>
+                      <span className="font-mono font-black text-slate-900">{(row.pct * 100).toFixed(2)}%</span>
                     </div>
                   ))}
                 </div>

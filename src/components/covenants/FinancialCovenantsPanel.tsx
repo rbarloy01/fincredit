@@ -31,7 +31,7 @@ const Sparkline: React.FC<{ series: Array<{ period: string; value: number | null
   if (pts.length < 2) return <span className="text-[10px] font-bold text-slate-300">sin serie</span>;
   const min = Math.min(...pts.map(p => p.v)); const max = Math.max(...pts.map(p => p.v)); const span = max - min || 1;
   const w = 84; const h = 26; const step = series.length > 1 ? w / (series.length - 1) : w;
-  const path = pts.map((p, idx) => `${idx === 0 ? 'M' : 'L'}${(p.i * step).toFixed(1)},${(h - 3 - ((p.v - min) / span) * (h - 6)).toFixed(1)}`).join(' ');
+  const path = pts.map((p, idx) => `${idx === 0 ? 'M' : 'L'}${(p.i * step).toFixed(2)},${(h - 3 - ((p.v - min) / span) * (h - 6)).toFixed(2)}`).join(' ');
   const last = pts[pts.length - 1];
   return (
     <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className={className} aria-label="Tendencia de los últimos cortes">
@@ -982,7 +982,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
                     : 'text-slate-500 bg-slate-50 border-slate-200';
               const deltaText = row.delta === null
                 ? 'sin comparativo'
-                : `${row.delta > 0 ? '+' : ''}${fmtCov(row.delta, cov)}${row.deltaPct !== null ? ` (${row.deltaPct > 0 ? '+' : ''}${(row.deltaPct * 100).toFixed(1)}%)` : ''}`;
+                : `${row.delta > 0 ? '+' : ''}${fmtCov(row.delta, cov)}${row.deltaPct !== null ? ` (${row.deltaPct > 0 ? '+' : ''}${(row.deltaPct * 100).toFixed(2)}%)` : ''}`;
               const previousText = row.previousValue === null ? '0' : fmtCov(row.previousValue, cov);
               const currentText = fmtCov(row.value, cov);
               const distanceText = distance === null ? '0' : fmtCov(distance, cov);
@@ -1043,7 +1043,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
           .filter(r => !fmap.onlyFav || isFav(r.cov))
           .filter(r => !fmap.onlyIssues || r.explain.severity !== 'ok')
           .filter(r => !q || `${r.cov.name} ${r.explain.text}`.toLowerCase().includes(q));
-        const money = (v: number | null) => (v === null ? 'sin dato' : Math.abs(v) >= 1e6 ? `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 1 })}M` : Math.abs(v) >= 1e3 ? `$${(v / 1e3).toLocaleString('es-MX', { maximumFractionDigits: 0 })}K` : v.toLocaleString('es-MX', { maximumFractionDigits: 2 }));
+        const money = (v: number | null) => (v === null ? 'sin dato' : Math.abs(v) >= 1e6 ? `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 2 })}M` : Math.abs(v) >= 1e3 ? `$${(v / 1e3).toLocaleString('es-MX', { maximumFractionDigits: 0 })}K` : v.toLocaleString('es-MX', { maximumFractionDigits: 2 }));
         return (
           <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
             <button type="button" onClick={() => setFmap(f => ({ ...f, open: !f.open }))} className="flex w-full items-start justify-between gap-4 px-5 py-4 text-left hover:bg-slate-50">
@@ -1216,7 +1216,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
                             }`}>{last.movementLabel}</span>
                             <span className="block font-mono text-slate-500">
                               {last.delta === null ? 'sin comparativo' : `${last.delta > 0 ? '+' : ''}${last.delta.toLocaleString('es-MX', { maximumFractionDigits: 2 })}`}
-                              {last.deltaPct !== null ? ` (${(last.deltaPct * 100).toFixed(1)}%)` : ''}
+                              {last.deltaPct !== null ? ` (${(last.deltaPct * 100).toFixed(2)}%)` : ''}
                             </span>
                           </div>
                         );

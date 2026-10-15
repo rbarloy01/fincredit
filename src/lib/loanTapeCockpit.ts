@@ -290,8 +290,8 @@ export function snapshotAnalysis(tapes: LoanTape_DB[], period: string): Structur
 }
 
 const money = (v: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 0 }).format(v || 0);
-const pctS = (v: number) => `${(v * 100).toFixed(1)}%`;
-const pp = (a: number, b: number) => `${(a - b) >= 0 ? '+' : ''}${((a - b) * 100).toFixed(1)} pp`;
+const pctS = (v: number) => `${(v * 100).toFixed(2)}%`;
+const pp = (a: number, b: number) => `${(a - b) >= 0 ? '+' : ''}${((a - b) * 100).toFixed(2)} pp`;
 
 // Deterministic descriptive-quantitative narrative. Facts and deltas ONLY — no judgment.
 export function buildCockpitNarrative(data: CockpitData, selectedPeriods?: string[]): string[] {
@@ -302,12 +302,12 @@ export function buildCockpitNarrative(data: CockpitData, selectedPeriods?: strin
   lines.push(`Período descrito: ${first.label} → ${last.label} (${sel.length} corte${sel.length > 1 ? 's' : ''}).`);
   if (sel.length > 1) {
     const dPct = first.saldo ? (last.saldo - first.saldo) / first.saldo : 0;
-    lines.push(`Saldo: ${money(first.saldo)} → ${money(last.saldo)} (${dPct >= 0 ? '+' : ''}${(dPct * 100).toFixed(1)}%).`);
+    lines.push(`Saldo: ${money(first.saldo)} → ${money(last.saldo)} (${dPct >= 0 ? '+' : ''}${(dPct * 100).toFixed(2)}%).`);
     lines.push(`Cartera vencida (>90d): ${pctS(first.venPct)} → ${pctS(last.venPct)} (${pp(last.venPct, first.venPct)}).`);
     lines.push(`Cartera atrasada (1-90d): ${pctS(first.atrPct)} → ${pctS(last.atrPct)} (${pp(last.atrPct, first.atrPct)}).`);
     lines.push(`Créditos vivos: ${first.creditos} → ${last.creditos}. Clientes: ${first.clientes} → ${last.clientes}.`);
     const runoffs = sel.map(s => s.runoff).filter((v): v is number => v !== null);
-    if (runoffs.length) lines.push(`Variación mensual de saldo (runoff) promedio: ${(runoffs.reduce((a, b) => a + b, 0) / runoffs.length * 100).toFixed(1)}%.`);
+    if (runoffs.length) lines.push(`Variación mensual de saldo (runoff) promedio: ${(runoffs.reduce((a, b) => a + b, 0) / runoffs.length * 100).toFixed(2)}%.`);
   } else {
     lines.push(`Saldo: ${money(last.saldo)} en ${last.creditos} créditos vivos (${liveLoansDetail(last.registros, last.creditos)}) y ${last.clientes} clientes.`);
     lines.push(`Vigente ${pctS(last.vigPct)} · atrasada ${pctS(last.atrPct)} · vencida (>90d) ${pctS(last.venPct)}.`);

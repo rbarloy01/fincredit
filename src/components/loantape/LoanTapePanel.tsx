@@ -218,7 +218,7 @@ const SEVERITY_COLORS: Record<string, string> = {
 };
 
 const fmtMoney = (value: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 0 }).format(value || 0);
-const fmtPct = (value: number) => `${((value || 0) * 100).toFixed(1)}%`;
+const fmtPct = (value: number) => `${((value || 0) * 100).toFixed(2)}%`;
 const fmtNum = (value: number) => Number.isFinite(Number(value)) ? Number(value).toFixed(2) : '—';
 const fmtSignal = (value: string) => value === 'high' ? 'Alta' : value === 'medium' ? 'Media' : value === 'low' ? 'Baja' : '—';
 const fmtDate = (value?: string) => {

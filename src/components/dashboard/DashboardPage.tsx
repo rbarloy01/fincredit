@@ -23,8 +23,8 @@ function fmtCurrency(value: number, currency = 'MXN') {
 function fmtCompact(value: number, currency = 'MXN') {
   const prefix = currency === 'USD' ? 'USD ' : currency === 'EUR' ? 'EUR ' : '$';
   const abs = Math.abs(value);
-  if (abs >= 1_000_000_000) return `${prefix}${(value / 1_000_000_000).toFixed(1)}B`;
-  if (abs >= 1_000_000) return `${prefix}${(value / 1_000_000).toFixed(1)}M`;
+  if (abs >= 1_000_000_000) return `${prefix}${(value / 1_000_000_000).toFixed(2)}B`;
+  if (abs >= 1_000_000) return `${prefix}${(value / 1_000_000).toFixed(2)}M`;
   if (abs >= 1_000) return `${prefix}${(value / 1_000).toFixed(0)}k`;
   return `${prefix}${Math.round(value).toLocaleString('es-MX')}`;
 }

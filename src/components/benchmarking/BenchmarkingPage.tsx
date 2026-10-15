@@ -659,7 +659,7 @@ function percentile(values: Array<number | null | undefined>, p: number) {
 function formatMetric(value: number | null, key: string) {
   if (value === null) return 'N/A';
   const opts = percentRatioKeys.has(key)
-    ? { style: 'percent' as const, maximumFractionDigits: 1 }
+    ? { style: 'percent' as const, maximumFractionDigits: 2 }
     : { maximumFractionDigits: 2 };
   return value.toLocaleString('es-MX', opts);
 }
@@ -667,7 +667,7 @@ function formatMetric(value: number | null, key: string) {
 function formatMoneyCompact(value: number) {
   return value.toLocaleString('es-MX', {
     notation: 'compact',
-    maximumFractionDigits: 1,
+    maximumFractionDigits: 2,
   });
 }
 
@@ -679,20 +679,20 @@ function formatBenchmarkMetric(value: number | null, key: string) {
 const benchmarkTooltipStyle = { borderRadius: 12, borderColor: '#e2e8f0', boxShadow: '0 12px 30px rgba(15, 23, 42, 0.10)' };
 
 function formatBenchmarkAxisValue(value: number, unit: '%' | 'x' | 'mixed') {
-  if (unit === '%') return `${Number(value).toLocaleString('es-MX', { maximumFractionDigits: 1 })}%`;
-  if (unit === 'x') return `${Number(value).toLocaleString('es-MX', { maximumFractionDigits: 1 })}x`;
-  return Number(value).toLocaleString('es-MX', { maximumFractionDigits: 1 });
+  if (unit === '%') return `${Number(value).toLocaleString('es-MX', { maximumFractionDigits: 2 })}%`;
+  if (unit === 'x') return `${Number(value).toLocaleString('es-MX', { maximumFractionDigits: 2 })}x`;
+  return Number(value).toLocaleString('es-MX', { maximumFractionDigits: 2 });
 }
 
 function formatBenchmarkTrendAxis(value: number, key: string) {
   if (percentRatioKeys.has(key)) return formatPercent(value);
-  return `${Number(value).toLocaleString('es-MX', { maximumFractionDigits: 1 })}x`;
+  return `${Number(value).toLocaleString('es-MX', { maximumFractionDigits: 2 })}x`;
 }
 
 function formatPercent(value: number) {
   return value.toLocaleString('es-MX', {
     style: 'percent',
-    maximumFractionDigits: 1,
+    maximumFractionDigits: 2,
   });
 }
 
@@ -2031,7 +2031,7 @@ const BenchmarkingPage: React.FC = () => {
                 <YAxis type="category" dataKey="shortRatio" tick={{ fontSize: 11, fill: '#64748b' }} width={120} />
 	                <Tooltip
 	                  formatter={(value: any, _name: any, item: any) => [
-	                    `${Number(value).toLocaleString('es-MX', { maximumFractionDigits: 1 })}% (${item.payload.observations} obs.)`,
+	                    `${Number(value).toLocaleString('es-MX', { maximumFractionDigits: 2 })}% (${item.payload.observations} obs.)`,
 	                    'Cobertura',
 	                  ]}
 	                  labelFormatter={label => String(label)}

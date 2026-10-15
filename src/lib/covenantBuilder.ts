@@ -60,7 +60,7 @@ export interface BuilderDraft { name: string; formula: string; kind: LimitKind; 
 export interface PreviewRow { period: string; value: number | null; display: string; status: 'cumple' | 'alerta' | 'incumple' | 'sin_limite' | 'sin_dato' }
 export interface BuilderPreview { rows: PreviewRow[]; warnings: string[]; computable: boolean }
 
-export const formatUnit = (value: number | null, unit: LimitUnit) => (value === null || !Number.isFinite(value) ? 'sin dato' : unit === 'percent' ? `${(value * 100).toFixed(1)}%` : `${value.toFixed(2)}x`);
+export const formatUnit = (value: number | null, unit: LimitUnit) => (value === null || !Number.isFinite(value) ? 'sin dato' : unit === 'percent' ? `${(value * 100).toFixed(2)}%` : `${value.toFixed(2)}x`);
 
 export function previewDraft(draft: BuilderDraft, statements: FinancialStatement_DB[], monitored = true, last = 6): BuilderPreview {
   const ordered = [...statements].sort((a, b) => a.periodDate.localeCompare(b.periodDate));

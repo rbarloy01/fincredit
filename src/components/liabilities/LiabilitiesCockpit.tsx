@@ -10,8 +10,8 @@ import ChartCard from '../loantape/ChartCard';
 
 const C = { green: '#059669', amber: '#f59e0b', red: '#ef4444', indigo: '#4f46e5', cyan: '#06b6d4', slate: '#94a3b8', lime: '#84cc16' };
 const SERIES = ['#4f46e5', '#06b6d4', '#059669', '#f59e0b', '#ef4444', '#64748b', '#8b5cf6', '#14b8a6'];
-const moneyM = (v: number) => `${new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 1 }).format((v || 0) / 1e6)} M`;
-const pctS = (v: number | null) => (v === null || !Number.isFinite(v) ? 'N/D' : `${(v * 100).toLocaleString('es-MX', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`);
+const moneyM = (v: number) => `${new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 2 }).format((v || 0) / 1e6)} M`;
+const pctS = (v: number | null) => (v === null || !Number.isFinite(v) ? 'N/D' : `${(v * 100).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`);
 const pct2 = (v: number | null) => (v === null || !Number.isFinite(v) ? 'N/D' : `${(v * 100).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`);
 const xS = (v: number | null) => (v === null || !Number.isFinite(v) ? 'N/D' : `${v.toFixed(2)}x`);
 const tooltipStyle = { borderRadius: 12, borderColor: '#e2e8f0', boxShadow: '0 12px 30px rgba(15, 23, 42, 0.10)' };
@@ -40,7 +40,7 @@ export default function LiabilitiesCockpit({ analysis: a, insights, assetLiabili
     { k: 'Utilización', v: pctS(k.utilization), d: <span className="text-slate-400">Disponible {moneyM(k.available)}</span> },
     { k: 'Vence ≤ 12m', v: pctS(k.due12mPct), d: <span className={sevTone(k.due12mPct, 0.25, 0.5)}>{moneyM(k.due12mBalance)}</span> },
     { k: 'Concentración Top-1', v: pctS(k.top1Pct), d: <span className={sevTone(k.top1Pct, 0.5, 0.7)}>HHI {k.hhi.toFixed(3)}</span> },
-    { k: 'Plazo remanente', v: k.waRemainingMonths === null ? 'N/D' : `${k.waRemainingMonths.toFixed(1)} m`, d: k.overdueBalance > 0 ? <span className="text-rose-600">Vencido {moneyM(k.overdueBalance)}</span> : <span className="text-slate-400">Ponderado por saldo</span> },
+    { k: 'Plazo remanente', v: k.waRemainingMonths === null ? 'N/D' : `${k.waRemainingMonths.toFixed(2)} m`, d: k.overdueBalance > 0 ? <span className="text-rose-600">Vencido {moneyM(k.overdueBalance)}</span> : <span className="text-slate-400">Ponderado por saldo</span> },
   ];
 
   const insightGroups = useMemo(() => {
@@ -76,7 +76,7 @@ export default function LiabilitiesCockpit({ analysis: a, insights, assetLiabili
               { k: 'Spread', v: al.spread === null ? 'N/D' : `${(al.spread * 100).toFixed(2)} pp`, d: `Margen anual ${moneyM(al.annualMargin)}`, tone: sevTone(al.spread, 0.03, 0, false) },
               { k: 'Aforo vigente', v: xS(al.aforoVigente), d: `Vigente ${moneyM(al.asset.vigente)}`, tone: sevTone(al.aforoVigente, 1.2, 1, false) },
               { k: 'Cobranza / servicio', v: xS(al.serviceCoverage), d: `${moneyM(al.asset.monthlyCollections)} vs ${moneyM(al.liability.monthlyDebtService)} /mes`, tone: sevTone(al.serviceCoverage, 1.2, 1, false) },
-              { k: 'Descalce de plazo', v: al.termGapMonths === null ? 'N/D' : `${al.termGapMonths > 0 ? '+' : ''}${al.termGapMonths.toFixed(1)} m`, d: 'Activo − pasivo', tone: sevTone(al.termGapMonths, 6, 12) },
+              { k: 'Descalce de plazo', v: al.termGapMonths === null ? 'N/D' : `${al.termGapMonths > 0 ? '+' : ''}${al.termGapMonths.toFixed(2)} m`, d: 'Activo − pasivo', tone: sevTone(al.termGapMonths, 6, 12) },
             ].map(t => (
               <div key={t.k} className="bg-slate-50 border border-slate-200 rounded-xl p-3">
                 <p className="text-[10px] font-black uppercase tracking-wider text-slate-500">{t.k}</p>

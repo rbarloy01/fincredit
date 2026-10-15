@@ -327,7 +327,7 @@ const InstitutionalLiabilitiesPanel: React.FC<Props> = ({ clientId, clientName, 
         else { await db.createInstitutionalLiability({ clientId, lenderName: f.lender, liabilityType: typeFor(f.lender), originalAmount: null, currentBalance: f.balance, currency: 'MXN', interestRate: null, notes: note }); created += 1; }
       }
     }
-    const m = (v: number) => `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 1 })}M`;
+    const m = (v: number) => `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 2 })}M`;
     const p = periods.at(-1)!;
     const bad = periods.flatMap(x => x.checks.filter(c => !c.ok).map(c => `${x.cutoff}: ${c.detail}`));
     return `${file.name}: desglose del pasivo entendido con reglas (${res.unitLabel}, ${periods.map(x => x.cutoff).join(', ')}). `

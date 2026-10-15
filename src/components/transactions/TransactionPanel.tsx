@@ -61,7 +61,7 @@ const fmtDate = (d: string) => {
 const fmtAmount = (n: number, currency: string) => {
   const prefix = currency === 'MXN' ? '$' : currency === 'USD' ? 'USD ' : '€';
   if (n >= 1_000_000) return `${prefix}${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1_000) return `${prefix}${(n / 1_000).toFixed(1)}K`;
+  if (n >= 1_000) return `${prefix}${(n / 1_000).toFixed(2)}K`;
   return `${prefix}${n.toLocaleString('es-MX')}`;
 };
 

@@ -120,7 +120,7 @@ export interface FavoriteInsight {
 
 export type ValueFormatter = (value: number | null, cov: Covenant_DB) => string;
 const OPERATOR_SYMBOL: Record<string, string> = { gte: '≥', gt: '>', lte: '≤', lt: '<' };
-const defaultFormat: ValueFormatter = value => (value === null ? 'N/D' : Math.abs(value) < 5 ? `${(value * 100).toFixed(1)}%` : value.toFixed(2));
+const defaultFormat: ValueFormatter = value => (value === null ? 'N/D' : Math.abs(value) < 5 ? `${(value * 100).toFixed(2)}%` : value.toFixed(2));
 
 export function buildFavoriteInsights(
   covenants: Covenant_DB[],

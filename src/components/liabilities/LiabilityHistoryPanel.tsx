@@ -12,8 +12,8 @@ import { reserveDownloadTarget } from '../../lib/browserDownload';
 
 const PALETTE = ['#1430E6', '#16B7EA', '#1B5BF5', '#8FB4FF', '#0E1B3D', '#7A5CFF', '#00A3A3', '#5D6B8A'];
 const money = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `$${Math.round(v).toLocaleString('es-MX')}`);
-const moneyM = (v: number) => (Math.abs(v) >= 1e6 ? `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 1 })}M` : `$${Math.round(v / 1e3).toLocaleString('es-MX')}K`);
-const pct = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `${(v * 100).toFixed(1)}%`);
+const moneyM = (v: number) => (Math.abs(v) >= 1e6 ? `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 2 })}M` : `$${Math.round(v / 1e3).toLocaleString('es-MX')}K`);
+const pct = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `${(v * 100).toFixed(2)}%`);
 const signed = (v: number | null, f: (n: number) => string) => (v === null ? '—' : `${v > 0 ? '+' : v < 0 ? '−' : ''}${f(Math.abs(v))}`);
 const input = 'border border-slate-200 rounded-lg px-2 py-1.5 text-sm w-full focus:outline-none focus:ring-2 focus:ring-indigo-300';
 
@@ -141,7 +141,7 @@ export default function LiabilityHistoryPanel({ clientId, clientName, liabilitie
           <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
             {[
               { k: 'Fondeo institucional', v: lt ? moneyM(lt.total) : '—', d: `Corte ${lt?.cutoff}` },
-              { k: 'Vs corte anterior', v: signed(lt?.delta ?? null, moneyM), d: lt?.deltaPct !== null && lt?.deltaPct !== undefined ? signed(lt.deltaPct, n => `${(n * 100).toFixed(1)}%`) : 'Requiere 2 cortes', tone: lt?.delta ? (lt.delta < 0 ? 'text-emerald-700' : 'text-amber-700') : '' },
+              { k: 'Vs corte anterior', v: signed(lt?.delta ?? null, moneyM), d: lt?.deltaPct !== null && lt?.deltaPct !== undefined ? signed(lt.deltaPct, n => `${(n * 100).toFixed(2)}%`) : 'Requiere 2 cortes', tone: lt?.delta ? (lt.delta < 0 ? 'text-emerald-700' : 'text-amber-700') : '' },
               { k: 'Fondeadores', v: String(lt?.lenders ?? '—'), d: `HHI ${lt ? lt.hhi.toFixed(2) : '—'}` },
               { k: 'Principal fondeador', v: pct(lt?.topShare), d: lt?.topLender || '—', tone: (lt?.topShare || 0) >= 0.6 ? 'text-rose-700' : '' },
               { k: 'Aforo vigente', v: a.portfolio.at(-1)?.ratio ? `${a.portfolio.at(-1)!.ratio!.toFixed(2)}x` : 'N/D', d: a.portfolio.at(-1)?.portfolio ? `Cartera vigente ${moneyM(a.portfolio.at(-1)!.portfolio!)} ÷ fondeo` : 'Sin loan tape del corte' },

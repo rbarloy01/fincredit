@@ -230,7 +230,7 @@ export default function AforoPanel({ client, transactions, session, onClientUpda
               <LineChart data={history.map(h => ({ corte: h.cut.cutoff, aforo: h.result.ratio }))}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
                 <XAxis dataKey="corte" fontSize={10} />
-                <YAxis fontSize={10} tickFormatter={(v: number) => `${v.toFixed(1)}x`} width={40} />
+                <YAxis fontSize={10} tickFormatter={(v: number) => `${v.toFixed(2)}x`} width={40} />
                 <Tooltip formatter={(v: number) => xS(v)} />
                 {terms.requiredRatio !== null && <ReferenceLine y={terms.requiredRatio} stroke="#ef4444" strokeDasharray="4 4" />}
                 <Line dataKey="aforo" stroke="#4f46e5" strokeWidth={2} dot={{ r: 3 }} />

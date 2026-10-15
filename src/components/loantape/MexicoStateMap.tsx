@@ -18,8 +18,8 @@ const mix = (a: string, b: string, t: number) => {
   const [x, y] = [hex(a), hex(b)];
   return `rgb(${x.map((v, i) => Math.round(v + (y[i] - v) * t)).join(',')})`;
 };
-const money = (v: number) => (Math.abs(v) >= 1e6 ? `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 1 })}M` : `$${Math.round(v).toLocaleString('es-MX')}`);
-const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
+const money = (v: number) => (Math.abs(v) >= 1e6 ? `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 2 })}M` : `$${Math.round(v).toLocaleString('es-MX')}`);
+const pct = (v: number) => `${(v * 100).toFixed(2)}%`;
 
 export default function MexicoStateMap({ rows }: { rows: StandardLoan[] }) {
   const [metric, setMetric] = useState<Metric>('saldo');

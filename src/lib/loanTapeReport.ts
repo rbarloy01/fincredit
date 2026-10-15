@@ -104,9 +104,9 @@ function quantile(values: number[], q: number): number | null {
 const classOf = (dpd: number | null): QualityClass['key'] => classifyDpd(dpd);
 
 const money0 = (v: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 0 }).format(v || 0);
-const moneyM = (v: number) => `${v < 0 ? '-' : ''}$${(Math.abs(v) / 1_000_000).toLocaleString('es-MX', { maximumFractionDigits: 1 })} M`;
+const moneyM = (v: number) => `${v < 0 ? '-' : ''}$${(Math.abs(v) / 1_000_000).toLocaleString('es-MX', { maximumFractionDigits: 2 })} M`;
 const pctS = (v: number, d = 1) => `${(v * 100).toFixed(d)}%`;
-const ppS = (a: number, b: number) => `${a - b >= 0 ? '+' : ''}${((a - b) * 100).toFixed(1)} pp`;
+const ppS = (a: number, b: number) => `${a - b >= 0 ? '+' : ''}${((a - b) * 100).toFixed(2)} pp`;
 
 function equalWidth(rows: StandardLoan[], value: (r: StandardLoan) => number | null, n: number, label: (lo: number, hi: number) => string): Bucket[] {
   const items = rows.map(r => ({ r, v: value(r) })).filter((x): x is { r: StandardLoan; v: number } => x.v !== null);
@@ -340,7 +340,7 @@ export function buildLoanTapeInsights(a: PortfolioAnalysis, data: CockpitData, a
   if (a.prevKpi) {
     add('Calidad de cartera', ven.pct > a.prevKpi.vencidaPct + 0.005 ? 'warn' : ven.pct < a.prevKpi.vencidaPct - 0.005 ? 'good' : 'info', `Vs. ${a.prevLabel}: vencida ${ppS(ven.pct, a.prevKpi.vencidaPct)} (de ${pctS(a.prevKpi.vencidaPct)} a ${pctS(ven.pct)}); atrasada ${ppS(atr.pct, a.prevKpi.atrasadaPct)}.`);
   }
-  if (k.waDpd !== null) add('Calidad de cartera', k.waDpd > RISK_THRESHOLDS.waDpdAlert ? 'alert' : k.waDpd > RISK_THRESHOLDS.waDpdWarn ? 'warn' : 'info', `DPD ponderado por saldo: ${k.waDpd.toFixed(1)} días.`);
+  if (k.waDpd !== null) add('Calidad de cartera', k.waDpd > RISK_THRESHOLDS.waDpdAlert ? 'alert' : k.waDpd > RISK_THRESHOLDS.waDpdWarn ? 'warn' : 'info', `DPD ponderado por saldo: ${k.waDpd.toFixed(2)} días.`);
   const over180 = a.dpd.find(d => d.bucket === '>180');
   if (over180 && over180.balance > 0) add('Calidad de cartera', 'alert', `${moneyM(over180.balance)} (${pctS(over180.pct)}) con más de 180 días de atraso en ${over180.count} crédito(s).`);
   const venClients = [...a.clients].filter(c => c.venPct > 0).sort((x, y) => y.venPct * y.balance - x.venPct * x.balance)[0];
@@ -361,7 +361,7 @@ export function buildLoanTapeInsights(a: PortfolioAnalysis, data: CockpitData, a
   // Concentración
   const top1 = a.topN.find(t => t.label === 'Top 1'); const top5 = a.topN.find(t => t.label === 'Top 5'); const top10 = a.topN.find(t => t.label === 'Top 10');
   if (top1) add('Concentración', top1.pct > RISK_THRESHOLDS.clientConcentrationAlert ? 'alert' : top1.pct > RISK_THRESHOLDS.clientConcentrationWarn ? 'warn' : 'info', `Cliente #1: ${a.clients[0].name} con ${pctS(top1.pct)} del saldo${top5 ? `; Top 5 ${pctS(top5.pct)}` : ''}${top10 ? `; Top 10 ${pctS(top10.pct)}` : ''}.`);
-  if (a.effectiveClients !== null) add('Concentración', a.hhi > RISK_THRESHOLDS.hhiHigh ? 'alert' : a.hhi > RISK_THRESHOLDS.hhiModerate ? 'warn' : 'good', `HHI ${a.hhi.toFixed(3)} (${a.hhi > RISK_THRESHOLDS.hhiHigh ? 'concentración alta' : a.hhi > RISK_THRESHOLDS.hhiModerate ? 'concentración moderada' : 'cartera diversificada'}): equivale a ${a.effectiveClients.toFixed(1)} clientes del mismo tamaño.`);
+  if (a.effectiveClients !== null) add('Concentración', a.hhi > RISK_THRESHOLDS.hhiHigh ? 'alert' : a.hhi > RISK_THRESHOLDS.hhiModerate ? 'warn' : 'good', `HHI ${a.hhi.toFixed(3)} (${a.hhi > RISK_THRESHOLDS.hhiHigh ? 'concentración alta' : a.hhi > RISK_THRESHOLDS.hhiModerate ? 'concentración moderada' : 'cartera diversificada'}): equivale a ${a.effectiveClients.toFixed(2)} clientes del mismo tamaño.`);
   const big = a.clients.filter(c => c.pct > 0.05);
   if (a.clients.length) add('Concentración', 'info', `${big.length} cliente(s) superan 5% del saldo${big.length ? `: ${big.slice(0, 4).map(c => `${c.name} (${pctS(c.pct)})`).join(', ')}` : ''}.`);
   add('Concentración', k.maxLoanPct > RISK_THRESHOLDS.largestLoanWarn ? 'warn' : 'info', `Crédito más grande: ${moneyM(k.maxLoan)} (${pctS(k.maxLoanPct)} del saldo). Ticket promedio ${money0(k.avgTicket)}.`);
@@ -401,7 +401,7 @@ export function buildLoanTapeInsights(a: PortfolioAnalysis, data: CockpitData, a
   if (byRate.length > 1) add('Tasas', 'info', `Producto con mayor tasa: ${byRate[0].name} (${pctS(byRate[0].waRate as number, 2)}); menor: ${byRate[byRate.length - 1].name} (${pctS(byRate[byRate.length - 1].waRate as number, 2)}).`);
 
   // Plazo y vencimientos
-  if (k.waTermMonths !== null) add('Plazo y vencimientos', 'info', `Plazo original ponderado ${k.waTermMonths.toFixed(1)} meses${k.waRemainingMonths !== null ? `; plazo remanente ponderado ${k.waRemainingMonths.toFixed(1)} meses` : ''}.`);
+  if (k.waTermMonths !== null) add('Plazo y vencimientos', 'info', `Plazo original ponderado ${k.waTermMonths.toFixed(2)} meses${k.waRemainingMonths !== null ? `; plazo remanente ponderado ${k.waRemainingMonths.toFixed(2)} meses` : ''}.`);
   if (a.maturing90.count || a.maturing12.balance) add('Plazo y vencimientos', a.maturing12.pct > RISK_THRESHOLDS.maturing12mWarn ? 'warn' : 'info', `Vencen en 90 días: ${moneyM(a.maturing90.balance)} (${a.maturing90.count} créditos); en 12 meses: ${moneyM(a.maturing12.balance)} (${pctS(a.maturing12.pct)} del saldo).`);
   if (a.endedWithBalance.count) add('Plazo y vencimientos', 'warn', `${a.endedWithBalance.count} crédito(s) ya pasaron su fecha de vencimiento y aún tienen saldo (${moneyM(a.endedWithBalance.balance)}).`);
   const peak = [...a.maturity].sort((x, y) => y.balance - x.balance)[0];
@@ -409,14 +409,14 @@ export function buildLoanTapeInsights(a: PortfolioAnalysis, data: CockpitData, a
 
   // Originación y maduración
   if (k.amortizadoPct !== null) add('Originación y maduración', 'info', `Monto original colocado ${moneyM(k.montoOriginal)}; saldo actual ${moneyM(k.saldo)} (${pctS(k.amortizadoPct)} ya amortizado).`);
-  if (k.waAgeMonths !== null) add('Originación y maduración', 'info', `Antigüedad ponderada de la cartera: ${k.waAgeMonths.toFixed(1)} meses desde el otorgamiento.`);
+  if (k.waAgeMonths !== null) add('Originación y maduración', 'info', `Antigüedad ponderada de la cartera: ${k.waAgeMonths.toFixed(2)} meses desde el otorgamiento.`);
   const lastM = a.originationMonthly[a.originationMonthly.length - 1];
   if (lastM) add('Originación y maduración', 'info', `Originación más reciente (${lastM.period}): ${moneyM(lastM.amount)} en ${lastM.count} créditos${lastM.growth !== null ? ` (${lastM.growth >= 0 ? '+' : ''}${(lastM.growth * 100).toFixed(0)}% vs. mes previo)` : ''}.`);
 
   // Saldo y calidad del dato
   if (a.prevKpi && a.prevKpi.saldo) {
     const d = (k.saldo - a.prevKpi.saldo) / a.prevKpi.saldo;
-    add('Saldo', Math.abs(d) > 0.15 ? 'warn' : 'info', `Saldo ${moneyM(a.prevKpi.saldo)} → ${moneyM(k.saldo)} (${d >= 0 ? '+' : ''}${(d * 100).toFixed(1)}%); créditos ${a.prevKpi.creditos} → ${k.creditos}; clientes ${a.prevKpi.clientes} → ${k.clientes}.`);
+    add('Saldo', Math.abs(d) > 0.15 ? 'warn' : 'info', `Saldo ${moneyM(a.prevKpi.saldo)} → ${moneyM(k.saldo)} (${d >= 0 ? '+' : ''}${(d * 100).toFixed(2)}%); créditos ${a.prevKpi.creditos} → ${k.creditos}; clientes ${a.prevKpi.clientes} → ${k.clientes}.`);
   } else {
     add('Saldo', 'info', `Saldo ${moneyM(k.saldo)} en ${k.creditos} créditos vivos (${liveLoansDetail(k.registros, k.creditos)}) y ${k.clientes} clientes (${a.focusLabel}). Sin corte previo para comparar.`);
   }

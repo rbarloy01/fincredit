@@ -8,7 +8,7 @@ import { parseRateFormula, type ReferenceSeries } from '../../lib/referenceRates
 import { fetchReferenceSeries } from '../../lib/referenceRatesClient';
 import { tapePortfolioCached } from '../../lib/tapePortfolioCache';
 
-const pct = (v: number | null | undefined) => (v === null || v === undefined ? 'N/D' : `${(v * 100).toFixed(1)}%`);
+const pct = (v: number | null | undefined) => (v === null || v === undefined ? 'N/D' : `${(v * 100).toFixed(2)}%`);
 const moneyM = (v: number | null | undefined) => (v === null || v === undefined ? 'N/D' : Math.abs(v) >= 1e6 ? `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 2 })}M` : `$${Math.round(v / 1e3).toLocaleString('es-MX')}K`);
 
 interface Props { clientId: string; statements: FinancialStatement_DB[]; snapshots: LiabilitySnapshot[]; liabilities: InstitutionalLiability_DB[] }
@@ -43,7 +43,7 @@ export default function FundingCostCard({ clientId, statements, snapshots, liabi
     );
   }
   const l = a.latest!;
-  const series = a.periods.slice(-12).map(p => ({ corte: p.cutoff.slice(0, 7), gasto: Math.round(p.periodExpense / p.months), costo: p.rate === null ? null : Math.round(p.rate * 1000) / 10 }));
+  const series = a.periods.slice(-12).map(p => ({ corte: p.cutoff.slice(0, 7), gasto: Math.round(p.periodExpense / p.months), costo: p.rate === null ? null : Math.round(p.rate * 10000) / 100 }));
   return (
     <div className="border border-slate-200 rounded-xl p-4 space-y-3">
       <div>
@@ -111,7 +111,7 @@ export default function FundingCostCard({ clientId, statements, snapshots, liabi
                   <td className="text-right font-mono">{r.tiie.tiie28 === null || r.tiie.tiie28 === undefined ? '…' : `${r.tiie.tiie28.toFixed(2)}%`}</td>
                   <td className="text-right font-mono">{pct(r.assetRate)}</td>
                   {r.lenders.map(l => (
-                    <td key={l.lender} className="text-right font-mono">{pct(l.rate)}{l.spread !== null && <span className={`block text-[10px] ${l.spread < 0 ? 'text-rose-600' : 'text-emerald-700'}`}>spread {(l.spread * 100).toFixed(1)} pp</span>}</td>
+                    <td key={l.lender} className="text-right font-mono">{pct(l.rate)}{l.spread !== null && <span className={`block text-[10px] ${l.spread < 0 ? 'text-rose-600' : 'text-emerald-700'}`}>spread {(l.spread * 100).toFixed(2)} pp</span>}</td>
                   ))}
                 </tr>
               ))}

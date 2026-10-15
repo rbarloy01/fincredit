@@ -45,14 +45,14 @@ const fmtMoneyAxis = (value: number) => new Intl.NumberFormat('es-MX', {
   style: 'currency',
   currency: 'MXN',
   notation: 'compact',
-  maximumFractionDigits: 1,
+  maximumFractionDigits: 2,
 }).format(value || 0);
 const fmtNumber = (value: number) => new Intl.NumberFormat('es-MX', { maximumFractionDigits: 2 }).format(value || 0);
 const tooltipStyle = { borderRadius: 12, borderColor: '#e2e8f0', boxShadow: '0 12px 30px rgba(15, 23, 42, 0.10)' };
 
 function formatBlockValue(value: any, format?: string) {
   if (format === 'money') return fmtMoney(Number(value) || 0);
-  if (format === 'pct') return `${((Number(value) || 0) * 100).toLocaleString('es-MX', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
+  if (format === 'pct') return `${((Number(value) || 0) * 100).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
   if (format === 'number') return fmtNumber(Number(value) || 0);
   return String(value ?? '—');
 }

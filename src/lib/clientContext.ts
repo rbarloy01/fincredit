@@ -34,8 +34,8 @@ export interface ClientContextInput {
 export interface ClientContextPack { text: string; approxTokens: number; sections: Array<{ title: string; chars: number }>; notes: string[] }
 
 const m0 = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? 'N/D' : `$${Math.round(v).toLocaleString('es-MX')}`);
-const mM = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? 'N/D' : `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 1 })}M`);
-const p1 = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? 'N/D' : `${(v * 100).toFixed(1)}%`);
+const mM = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? 'N/D' : `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 2 })}M`);
+const p1 = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? 'N/D' : `${(v * 100).toFixed(2)}%`);
 
 const RATIO_KEYS = ['revenue', 'ebitda', 'ifnb_financial_margin', 'ifnb_net_margin', 'ifnb_operating_efficiency', 'debt_ebitda', 'dscr', 'current_ratio', 'leverage', 'debt_equity', 'capitalization', 'adjusted_capitalization', 'roa', 'roe', 'past_due_portfolio', 'past_due_coverage', 'portfolio_yield', 'funding_cost', 'immediate_liquidity'];
 const PCT_RATIOS = new Set(['ifnb_financial_margin', 'ifnb_net_margin', 'ifnb_operating_efficiency', 'leverage', 'capitalization', 'roa', 'roe', 'past_due_portfolio', 'portfolio_yield', 'funding_cost']);
@@ -105,7 +105,7 @@ export function buildClientContext(input: ClientContextInput): ClientContextPack
       tapeLines.push(`Cortes disponibles: ${data.labels.join(', ')}. Se describe el último: ${a.focusLabel}.`);
       tapeLines.push('Reglas de clasificación (únicas en todo el sistema):', ...QUALITY_DEFINITION_LINES.map(l => `  · ${l}`));
       tapeLines.push(`Saldo ${m0(k.saldo)} en ${k.creditos} créditos y ${k.clientes} clientes · monto original ${m0(k.montoOriginal)} (${p1(k.amortizadoPct)} amortizado) · ticket promedio ${m0(k.avgTicket)} · crédito mayor ${m0(k.maxLoan)} (${p1(k.maxLoanPct)}).`);
-      tapeLines.push(`Tasa ponderada ${p1(k.waRate)} (simple ${p1(k.simpleRate)}, mediana ${p1(k.medianRate)}) · plazo ponderado ${k.waTermMonths === null ? 'N/D' : k.waTermMonths.toFixed(1) + ' m'} · plazo remanente ${k.waRemainingMonths === null ? 'N/D' : k.waRemainingMonths.toFixed(1) + ' m'} · DPD ponderado ${k.waDpd === null ? 'N/D' : k.waDpd.toFixed(1)} días.`);
+      tapeLines.push(`Tasa ponderada ${p1(k.waRate)} (simple ${p1(k.simpleRate)}, mediana ${p1(k.medianRate)}) · plazo ponderado ${k.waTermMonths === null ? 'N/D' : k.waTermMonths.toFixed(2) + ' m'} · plazo remanente ${k.waRemainingMonths === null ? 'N/D' : k.waRemainingMonths.toFixed(2) + ' m'} · DPD ponderado ${k.waDpd === null ? 'N/D' : k.waDpd.toFixed(2)} días.`);
       tapeLines.push(`Calidad: ${a.quality.map(q => `${q.label} ${p1(q.pct)} (${q.count} cr., ${mM(q.balance)})`).join(' · ')}.`);
       tapeLines.push(`Buckets DPD: ${a.dpd.map(d => `${d.bucket} ${p1(d.pct)}`).join(' · ')}.`);
       tapeLines.push(`Concentración clientes (Top ${a.clients.length ? Math.min(10, a.clients.length) : 0}): ${a.clients.slice(0, 10).map(c => `${c.name} ${p1(c.pct)}`).join('; ')}. HHI ${a.hhi.toFixed(3)}. ${a.topN.map(t => `${t.label} ${p1(t.pct)}`).join(' · ')}.`);

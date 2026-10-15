@@ -53,8 +53,8 @@ export interface LiabilityHistoryAnalysis {
   insights: string[];
 }
 
-const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
-const money = (v: number) => (Math.abs(v) >= 1e6 ? `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 1 })}M` : `$${Math.round(v).toLocaleString('es-MX')}`);
+const pct = (v: number) => `${(v * 100).toFixed(2)}%`;
+const money = (v: number) => (Math.abs(v) >= 1e6 ? `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 2 })}M` : `$${Math.round(v).toLocaleString('es-MX')}`);
 const sameMonth = (a: string, b: string) => a.slice(0, 7) === b.slice(0, 7);
 
 export function analyzeLiabilityHistory(clientId: string, store: LiabilityHistoryStore, statements: FinancialStatement_DB[] = []): LiabilityHistoryAnalysis {

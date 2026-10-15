@@ -134,7 +134,7 @@ export function buildLiabilitiesInsights(liabilities: InstitutionalLiability_DB[
     insights.push({
       severity: topLender.pctOfTotal >= 0.7 ? 'critical' : 'warning',
       title: 'Concentración de fondeo',
-      detail: `${topLender.key} concentra ${(topLender.pctOfTotal * 100).toFixed(1)}% del saldo institucional.`,
+      detail: `${topLender.key} concentra ${(topLender.pctOfTotal * 100).toFixed(2)}% del saldo institucional.`,
       recommendation: 'Validar dependencia del acreedor principal, covenants cruzados y plan de refinanciamiento alterno.',
     });
   }
@@ -143,7 +143,7 @@ export function buildLiabilitiesInsights(liabilities: InstitutionalLiability_DB[
     insights.push({
       severity: shortTermPct >= 0.5 ? 'critical' : 'warning',
       title: 'Vencimientos próximos',
-      detail: `${formatMoney(summary.shortTermBalance)} vence dentro de los próximos 12 meses (${(shortTermPct * 100).toFixed(1)}% del saldo).`,
+      detail: `${formatMoney(summary.shortTermBalance)} vence dentro de los próximos 12 meses (${(shortTermPct * 100).toFixed(2)}% del saldo).`,
       recommendation: 'Pedir calendario de amortización y evidencia de renovación/refinanciamiento para los créditos relevantes.',
     });
   }
@@ -152,7 +152,7 @@ export function buildLiabilitiesInsights(liabilities: InstitutionalLiability_DB[
     insights.push({
       severity: fxPct >= 0.3 ? 'critical' : 'warning',
       title: 'Exposición cambiaria',
-      detail: `${formatMoney(summary.foreignCurrencyBalance)} está denominado en moneda distinta a MXN (${(fxPct * 100).toFixed(1)}% del saldo).`,
+      detail: `${formatMoney(summary.foreignCurrencyBalance)} está denominado en moneda distinta a MXN (${(fxPct * 100).toFixed(2)}% del saldo).`,
       recommendation: 'Revisar cobertura natural, derivados o ingresos en la misma moneda antes de asumir capacidad de pago estable.',
     });
   }

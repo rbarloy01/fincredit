@@ -20,10 +20,10 @@ import LoanTapePortfolioCharts from './LoanTapePortfolioCharts';
 const C = { green: '#059669', amber: '#f59e0b', red: '#ef4444', indigo: '#4f46e5', cyan: '#06b6d4', slate: '#94a3b8' };
 const CLIENT_COLORS = ['#4f46e5', '#06b6d4', '#059669', '#f59e0b', '#ef4444'];
 const money = (v: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 0 }).format(v || 0);
-const moneyM = (v: number) => `${new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 1 }).format((v || 0) / 1e6)} M`;
-const moneyMillions = (v: number) => `${new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 1 }).format(v || 0)} M`;
-const pctS = (v: number) => `${((v || 0) * 100).toLocaleString('es-MX', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
-const pctPoint = (v: number) => `${(Number(v) || 0).toLocaleString('es-MX', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
+const moneyM = (v: number) => `${new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 2 }).format((v || 0) / 1e6)} M`;
+const moneyMillions = (v: number) => `${new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 2 }).format(v || 0)} M`;
+const pctS = (v: number) => `${((v || 0) * 100).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
+const pctPoint = (v: number) => `${(Number(v) || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
 const intS = (v: number) => new Intl.NumberFormat('es-MX', { maximumFractionDigits: 0 }).format(Math.abs(Number(v) || 0));
 const tooltipStyle = { borderRadius: 12, borderColor: '#e2e8f0', boxShadow: '0 12px 30px rgba(15, 23, 42, 0.10)' };
 
@@ -138,13 +138,13 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
   // chart datasets
   const evoData = sel.map(s => ({ period: s.period, label: s.label, saldo: s.saldo, venPct: +(s.venPct * 100).toFixed(2) }));
   const qualData = sel.map(s => ({ period: s.period, label: s.label, Vigente: +s.vigPct.toFixed(4), Atrasada: +s.atrPct.toFixed(4), Vencida: +s.venPct.toFixed(4) }));
-  const hhiData = sel.map(s => ({ period: s.period, label: s.label, HHI: +s.hhi.toFixed(3), Top1: +(s.top1 * 100).toFixed(1) }));
+  const hhiData = sel.map(s => ({ period: s.period, label: s.label, HHI: +s.hhi.toFixed(3), Top1: +(s.top1 * 100).toFixed(2) }));
   const rollData = mig.map(m => ({ period: m.period, label: m.label, Deteriorados: m.deteriorated, Curados: -m.cured }));
   const concData = [
-    { n: 'Top 1', pct: +(focusPoint.top1 * 100).toFixed(1) },
-    { n: 'Top 3', pct: +(focusPoint.top3 * 100).toFixed(1) },
-    { n: 'Top 5', pct: +(focusPoint.top5 * 100).toFixed(1) },
-    { n: 'Top 10', pct: +(focusPoint.top10 * 100).toFixed(1) },
+    { n: 'Top 1', pct: +(focusPoint.top1 * 100).toFixed(2) },
+    { n: 'Top 3', pct: +(focusPoint.top3 * 100).toFixed(2) },
+    { n: 'Top 5', pct: +(focusPoint.top5 * 100).toFixed(2) },
+    { n: 'Top 10', pct: +(focusPoint.top10 * 100).toFixed(2) },
   ];
   const cliData = sel.map(s => {
     const idx = data.periods.indexOf(s.period);
@@ -153,7 +153,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
     return row;
   });
   const vintage = useMemo(() => buildVintage(data, focusPoint.period), [data, focusPoint.period]);
-  const vintData = vintage.map(v => ({ cohort: v.cohort, Vigente: +(v.vig / 1e6).toFixed(2), Atrasada: +(v.atr / 1e6).toFixed(2), Vencida: +(v.ven / 1e6).toFixed(2), venPct: +(v.venPct * 100).toFixed(1) }));
+  const vintData = vintage.map(v => ({ cohort: v.cohort, Vigente: +(v.vig / 1e6).toFixed(2), Atrasada: +(v.atr / 1e6).toFixed(2), Vencida: +(v.ven / 1e6).toFixed(2), venPct: +(v.venPct * 100).toFixed(2) }));
   const narrative = useMemo(() => buildCockpitNarrative(data, selected), [data, selected]);
   const snapFocus = useMemo(() => snapshotAnalysis(tapes, focusPoint.period), [tapes, focusPoint.period]);
   const [groupOverrides, setGroupOverrides] = useState<Record<string, string>>({});
@@ -285,10 +285,10 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
         <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
           {[
             { k: 'Saldo', v: moneyM(focusPoint.saldo), d: kpiDelta(focusPoint.saldo, prevPoint?.saldo ?? null, false, n => moneyM(n)) },
-            { k: `Vencida >${QUALITY_RULES.atrasadaMaxDpd} días`, v: focusPoint.isSummary ? 'N/D' : pctS(focusPoint.venPct), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.venPct, prevPoint?.venPct ?? null, true, n => `${(n * 100).toFixed(1)}pp`) },
-            { k: `Atrasada ${QUALITY_RULES.vigenteMaxDpd + 1}-${QUALITY_RULES.atrasadaMaxDpd} días`, v: focusPoint.isSummary ? 'N/D' : pctS(focusPoint.atrPct), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.atrPct, prevPoint?.atrPct ?? null, true, n => `${(n * 100).toFixed(1)}pp`) },
+            { k: `Vencida >${QUALITY_RULES.atrasadaMaxDpd} días`, v: focusPoint.isSummary ? 'N/D' : pctS(focusPoint.venPct), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.venPct, prevPoint?.venPct ?? null, true, n => `${(n * 100).toFixed(2)}pp`) },
+            { k: `Atrasada ${QUALITY_RULES.vigenteMaxDpd + 1}-${QUALITY_RULES.atrasadaMaxDpd} días`, v: focusPoint.isSummary ? 'N/D' : pctS(focusPoint.atrPct), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.atrPct, prevPoint?.atrPct ?? null, true, n => `${(n * 100).toFixed(2)}pp`) },
             { k: 'Créditos vivos', v: focusPoint.isSummary ? 'N/D' : `${focusPoint.creditos}`, d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : <span>{kpiDelta(focusPoint.creditos, prevPoint?.creditos ?? null)}{focusPoint.registros > focusPoint.creditos && <span className="block text-slate-400 font-semibold">{liveLoansDetail(focusPoint.registros, focusPoint.creditos)}</span>}</span> },
-            { k: 'Concentración Top-1', v: focusPoint.isSummary ? 'N/D' : pctS(focusPoint.top1), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.top1, prevPoint?.top1 ?? null, true, n => `${(n * 100).toFixed(1)}pp`) },
+            { k: 'Concentración Top-1', v: focusPoint.isSummary ? 'N/D' : pctS(focusPoint.top1), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.top1, prevPoint?.top1 ?? null, true, n => `${(n * 100).toFixed(2)}pp`) },
             { k: 'HHI', v: focusPoint.isSummary ? 'N/D' : focusPoint.hhi.toFixed(3), d: focusPoint.isSummary ? <span className="text-slate-400">Resumen</span> : kpiDelta(focusPoint.hhi, prevPoint?.hhi ?? null, true, n => n.toFixed(3)) },
           ].map(t => (
             <div key={t.k} className="bg-white border border-slate-200 rounded-xl p-3">
@@ -349,7 +349,7 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
                   const cell = (v: number | null, pv: number | null | undefined) => (
                     <td className="py-1.5 px-2 text-right font-mono">
                       <span className="font-black text-slate-900">{v === null ? 'N/D' : pctS(v)}</span>
-                      {v !== null && pv !== null && pv !== undefined && <span className={`ml-1.5 text-[10px] font-bold ${v - pv > 1e-9 ? 'text-rose-600' : v - pv < -1e-9 ? 'text-emerald-600' : 'text-slate-400'}`}>{v - pv >= 0 ? '+' : ''}{((v - pv) * 100).toFixed(1)}pp</span>}
+                      {v !== null && pv !== null && pv !== undefined && <span className={`ml-1.5 text-[10px] font-bold ${v - pv > 1e-9 ? 'text-rose-600' : v - pv < -1e-9 ? 'text-emerald-600' : 'text-slate-400'}`}>{v - pv >= 0 ? '+' : ''}{((v - pv) * 100).toFixed(2)}pp</span>}
                     </td>
                   );
                   return (

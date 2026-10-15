@@ -154,7 +154,7 @@ export async function saveAforo(clientId: string, store: AforoStore): Promise<vo
 export function aforoHistoryEntry(cut: AforoCut, result: AforoResult): Client['aforoHistory'][number] {
   return {
     month: cut.cutoff.slice(0, 7),
-    value: result.ratio === null ? 'N/D' : `${(result.ratio * 100).toFixed(1)}%`,
+    value: result.ratio === null ? 'N/D' : `${(result.ratio * 100).toFixed(2)}%`,
     status: result.status === 'cumple' ? 'good' : result.status === 'incumple' ? 'bad' : 'warning',
     ...(cut.transactionId ? { transactionId: cut.transactionId } : {}),
   };

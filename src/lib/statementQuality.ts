@@ -36,7 +36,7 @@ export const QUALITY_SETTING_KEY = 'finmonitor_statement_quality';
 type StatementLike = Pick<FinancialStatement_DB, 'period' | 'periodDate' | 'rawLineItems' | 'mappedData'> & { id?: string };
 
 const money = (v: number) => `$${Math.round(v).toLocaleString('es-MX')}`;
-const ratioText = (r: number) => (r >= 1 ? `${r.toFixed(1)}x` : `1/${(1 / r).toFixed(1)}x`);
+const ratioText = (r: number) => (r >= 1 ? `${r.toFixed(2)}x` : `1/${(1 / r).toFixed(2)}x`);
 
 function assetsOf(stmt: StatementLike): number | null {
   const v = getMetric(stmt as FinancialStatement_DB, 'totalAssets');
