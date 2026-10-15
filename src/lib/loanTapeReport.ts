@@ -335,7 +335,7 @@ export function buildLoanTapeInsights(a: PortfolioAnalysis, data: CockpitData, a
   // Calidad
   const zeroDpd = a.dpd[0];
   if (zeroDpd) add('Calidad de cartera', 'info', `Cómo leer “vigente”: ${pctS(vig.pct)} del saldo está vigente (0-${QUALITY_RULES.vigenteMaxDpd} DPD) = ${pctS(zeroDpd.pct)} al corriente (0 días) + ${pctS(Math.max(0, vig.pct - zeroDpd.pct))} con atraso de 1-${QUALITY_RULES.vigenteMaxDpd} días. Es la misma cifra, vista en dos cortes.`);
-  add('Calidad de cartera', ven.pct > RISK_THRESHOLDS.vencidaAlert ? 'alert' : ven.pct >= RISK_THRESHOLDS.vencidaWarn ? 'warn' : 'good', `Cartera vencida (${QUALITY_RULES.atrasadaMaxDpd + 1}+ DPD): ${pctS(ven.pct)} del saldo (${moneyM(ven.balance)} en ${ven.count} crédito${ven.count === 1 ? '' : 's'}).`);
+  add('Calidad de cartera', ven.pct > RISK_THRESHOLDS.vencidaAlert ? 'alert' : ven.pct >= RISK_THRESHOLDS.vencidaWarn ? 'warn' : 'good', `Cartera vencida (>${QUALITY_RULES.atrasadaMaxDpd} DPD): ${pctS(ven.pct)} del saldo (${moneyM(ven.balance)} en ${ven.count} crédito${ven.count === 1 ? '' : 's'}).`);
   add('Calidad de cartera', atr.pct > RISK_THRESHOLDS.atrasadaWarn ? 'warn' : 'info', `Cartera atrasada (${QUALITY_RULES.vigenteMaxDpd + 1}-${QUALITY_RULES.atrasadaMaxDpd} DPD): ${pctS(atr.pct)} (${moneyM(atr.balance)}, ${atr.count} créditos). Vigente (0-${QUALITY_RULES.vigenteMaxDpd} DPD): ${pctS(vig.pct)}.`);
   if (a.prevKpi) {
     add('Calidad de cartera', ven.pct > a.prevKpi.vencidaPct + 0.005 ? 'warn' : ven.pct < a.prevKpi.vencidaPct - 0.005 ? 'good' : 'info', `Vs. ${a.prevLabel}: vencida ${ppS(ven.pct, a.prevKpi.vencidaPct)} (de ${pctS(a.prevKpi.vencidaPct)} a ${pctS(ven.pct)}); atrasada ${ppS(atr.pct, a.prevKpi.atrasadaPct)}.`);
@@ -591,7 +591,7 @@ export function buildLoanTapeReportSheets(clientName: string, selectedPeriods: s
       }), []);
     s.blank();
     // quality + dpd tables feed the two charts next to the KPIs
-    const qt = s.table(`CALIDAD DE CARTERA (convención 0-${QUALITY_RULES.vigenteMaxDpd} / ${QUALITY_RULES.vigenteMaxDpd + 1}-${QUALITY_RULES.atrasadaMaxDpd} / ${QUALITY_RULES.atrasadaMaxDpd + 1}+ DPD)`, ['Clasificación', 'Créditos', 'Saldo', '% saldo'],
+    const qt = s.table(`CALIDAD DE CARTERA (convención 0-${QUALITY_RULES.vigenteMaxDpd} / ${QUALITY_RULES.vigenteMaxDpd + 1}-${QUALITY_RULES.atrasadaMaxDpd} / >${QUALITY_RULES.atrasadaMaxDpd} DPD)`, ['Clasificación', 'Créditos', 'Saldo', '% saldo'],
       a.quality.map(c => [c.label, c.count, c.balance, c.pct]), [undefined, 'int', 'money', 'pct'],
       ['TOTAL', k.creditos, k.saldo, 1], { sum: [1, 2], pct: [[3, 2]] });
     s.chart(qt, { title: 'Calidad de cartera (% del saldo)', kind: 'doughnut', series: [{ col: 3, labels: true, pointColors: QUALITY_COLORS, fmt: '0.0%' }] });
@@ -671,7 +671,7 @@ export function buildLoanTapeReportSheets(clientName: string, selectedPeriods: s
     s.title(`CALIDAD DE CARTERA Y DPD — ${a.focusLabel}`);
     const qBase = s.baseCell('Saldo total de la cartera (base de los %)', k.saldo);
     s.blank();
-    const dt = s.table('DISTRIBUCIÓN DPD (0 / 1-30 / 31-60 / 61-89 / 90-180 / >180)', ['Bucket', 'Créditos', 'Saldo', '% saldo'], a.dpd.map(d => [d.bucket, d.count, d.balance, d.pct]), [undefined, 'int', 'money', 'pct'],
+    const dt = s.table('DISTRIBUCIÓN DPD (0 al corriente / 1-30 / 31-60 / 61-90 / 91-180 / >180)', ['Bucket', 'Créditos', 'Saldo', '% saldo'], a.dpd.map(d => [d.bucket, d.count, d.balance, d.pct]), [undefined, 'int', 'money', 'pct'],
       ['TOTAL', a.dpd.reduce((x, d) => x + d.count, 0), a.dpd.reduce((x, d) => x + d.balance, 0), a.dpd.reduce((x, d) => x + d.pct, 0)], { sum: [1, 2], pct: [[3, 2]], baseRef: qBase });
     s.chart(dt, { title: 'Saldo y % por bucket DPD', kind: 'column', series: [{ col: 2, labels: true, pointColors: SEMANTIC_DPD, fmt: '$#,##0' }, { col: 3, as: 'line', secondary: true, color: AXC.deep, fmt: '0.0%' }], yFmt: '$#,##0', y2Fmt: '0%' });
     s.blank();
@@ -689,7 +689,7 @@ export function buildLoanTapeReportSheets(clientName: string, selectedPeriods: s
       s.blank();
     }
     if (data.watchlist.length) {
-      s.table('WATCHLIST — VENCIDOS CRÓNICOS (90+ DPD en 2+ cortes)', ['Crédito', 'Cliente', 'Cortes vencido', 'Máx DPD', 'Saldo actual'], data.watchlist.map(w => [w.loan_id, w.client, w.monthsOverdue, w.maxDpd, w.saldoActual]), [undefined, undefined, 'int', 'int', 'money']);
+      s.table('WATCHLIST — VENCIDOS CRÓNICOS (>90 DPD en 2+ cortes)', ['Crédito', 'Cliente', 'Cortes vencido', 'Máx DPD', 'Saldo actual'], data.watchlist.map(w => [w.loan_id, w.client, w.monthsOverdue, w.maxDpd, w.saldoActual]), [undefined, undefined, 'int', 'int', 'money']);
     }
     sheets.push(s.done({ freezeRows: 0 }));
   }
@@ -698,10 +698,10 @@ export function buildLoanTapeReportSheets(clientName: string, selectedPeriods: s
   if (!a.isSummary) {
     const s = new SheetBuilder('IMOR', [26, 12, 18, 18, 18, 12, 12], AXC.red);
     s.title(`IMOR POR ANTIGÜEDAD — ${a.focusLabel}`);
-    s.text(`Antigüedad = (corte − originación) ÷ 30 en meses. IMOR 90+ = saldo con ${QUALITY_RULES.atrasadaMaxDpd + 1}+ días ÷ saldo; IMOR 30+ = saldo con más de ${QUALITY_RULES.vigenteMaxDpd} días (atrasada + vencida) ÷ saldo. Los IMOR son fórmulas.`);
+    s.text(`Antigüedad = (corte − originación) ÷ 30 en meses. IMOR >90 = saldo con más de ${QUALITY_RULES.atrasadaMaxDpd} días ÷ saldo; IMOR 30+ = saldo con más de ${QUALITY_RULES.vigenteMaxDpd} días (atrasada + vencida) ÷ saldo. Los IMOR son fórmulas.`);
     s.blank();
     const ib = imorBreakdown(a.rows);
-    s.table('IMOR DEL CORTE', ['Segmento', 'Créditos', 'Saldo', 'Saldo 90+ días', `Saldo >${QUALITY_RULES.vigenteMaxDpd} días`, 'IMOR 90+', 'IMOR 30+'],
+    s.table('IMOR DEL CORTE', ['Segmento', 'Créditos', 'Saldo', 'Saldo >90 días', `Saldo >${QUALITY_RULES.vigenteMaxDpd} días`, 'IMOR >90', 'IMOR 30+'],
       ib.map(r => [r.label, r.count, r.balance, r.vencida90, r.atrasada30, r.imor90, r.imor30]), [undefined, 'int', 'money', 'money', 'money', 'pct2', 'pct2'],
       undefined, { ratio: [[5, 3, 2], [6, 4, 2]] });
     s.blank();
@@ -822,7 +822,7 @@ export function buildLoanTapeReportSheets(clientName: string, selectedPeriods: s
     s.chart(t, { title: 'Créditos y clientes', kind: 'line', series: [{ col: 2, color: AXC.deep }, { col: 3, color: AXC.cyan }], yFmt: '#,##0', slot: 4 });
     s.blank();
     const dpdRaw = sel.map(p => [p.label, ...p.dpdPct] as Array<string | number | null>);
-    const dh = s.table('MAPA DE CALOR DPD (% del saldo por bucket)', ['Periodo', '0 días', '1-30', '31-60', '61-89', '90-180', '>180'], dpdRaw, [undefined, 'pct', 'pct', 'pct', 'pct', 'pct', 'pct']);
+    const dh = s.table('MAPA DE CALOR DPD (% del saldo por bucket)', ['Periodo', '0 días', '1-30', '31-60', '61-90', '91-180', '>180'], dpdRaw, [undefined, 'pct', 'pct', 'pct', 'pct', 'pct', 'pct']);
     s.chart(dh, { title: 'Distribución DPD por corte (% del saldo)', kind: 'column', grouping: 'percentStacked', series: [1, 2, 3, 4, 5, 6].map((c, i) => ({ col: c, color: SEMANTIC_DPD[i] })), yFmt: '0%', slot: 0, rows: 17 });
     s.blank();
     const mig = data.migration.filter(m => selSet.has(m.period));

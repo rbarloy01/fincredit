@@ -14,12 +14,13 @@ const loan = (id: number, dpd: number | null, balance: number): StandardLoan => 
 // 0 días 600k · 1-30 360k · 31-90 30k · >90 10k  → vigente 96% al corriente 60% (el caso 99.8% vs 96.4%)
 const rows: StandardLoan[] = [loan(1, 0, 600_000), loan(2, 12, 200_000), loan(3, 30, 160_000), loan(4, 45, 20_000), loan(5, 90, 10_000), loan(6, 120, 10_000)];
 
-test('classification boundaries: 0-30 vigente, 31-89 atrasada, 90+ vencida, null = sin dato', () => {
+test('classification boundaries (usuario 2026-10-15): 0-30 vigente, 31-90 atrasada, >90 vencida, null = sin dato', () => {
   assert.equal(classifyDpd(0), 'vigente');
   assert.equal(classifyDpd(30), 'vigente');
   assert.equal(classifyDpd(31), 'atrasada');
   assert.equal(classifyDpd(89), 'atrasada');
-  assert.equal(classifyDpd(90), 'vencida');
+  assert.equal(classifyDpd(90), 'atrasada');   // el día 90 está en el bucket 61-90
+  assert.equal(classifyDpd(91), 'vencida');
   assert.equal(classifyDpd(null), 'sin_dato');
   assert.equal(loanStatusFromDpd(30), 'Vigente');
   assert.equal(loanStatusFromDpd(31), 'Atrasado');
@@ -89,7 +90,7 @@ test('dpdRangeFromText traduce buckets y estatus de cobranza a rangos de días',
   assert.deepEqual(dpdRangeFromText('Retrasado (31 a 60 días)'), [31, 60]);
   assert.deepEqual(dpdRangeFromText('90+ días'), [90, Infinity]);
   assert.deepEqual(dpdRangeFromText('Vencido'), [1, Infinity]);
-  assert.deepEqual(dpdRangeFromText('Castigado'), [90, Infinity]);
+  assert.deepEqual(dpdRangeFromText('Castigado'), [91, Infinity]);
   assert.equal(dpdRangeFromText('collecting'), null);
   assert.equal(dpdRangeFromText('SONORA'), null);
 });
@@ -164,4 +165,11 @@ test('el mapeo corregido por el analista se respeta, y una corrección de mora e
   const wrong = reimportFromSource(tape, { 'no pagos vencidos': 'days_overdue' })!;
   assert.equal(wrong.reconciliation.severity, 'blocker');
   assert.ok(wrong.reconciliation.messages.some(m => m.startsWith('⛔')));
+});
+
+test('buckets de mora del usuario: 0 (al corriente) · 1-30 · 31-60 · 61-90 · 91-180 · >180', () => {
+  assert.deepEqual(DPD_BUCKET_DEFS.map(b => b.bucket), ['0 dias', '1-30', '31-60', '61-90', '91-180', '>180']);
+  const at = (d: number) => DPD_BUCKET_DEFS.find(b => d >= b.min && d <= b.max)!.bucket;
+  assert.equal(at(0), '0 dias'); assert.equal(at(30), '1-30'); assert.equal(at(60), '31-60');
+  assert.equal(at(90), '61-90'); assert.equal(at(91), '91-180'); assert.equal(at(180), '91-180'); assert.equal(at(181), '>180');
 });

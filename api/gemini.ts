@@ -1,11 +1,13 @@
 import { forwardJson, readJson, requireActiveUser, sendJson } from '../server/apiHelpers.js';
 import { syntageProxyHandler } from '../server/syntageProxy.js';
+import { banxicoProxyHandler } from '../server/banxicoProxy.js';
 
 // Fluid compute (plan Hobby) permite hasta 300 s: los modelos gratuitos tardan más de 1 min en documentos.
 export const maxDuration = 300;
 
 export default async function handler(req: any, res: any) {
   if (req.query?.route === 'syntage') return syntageProxyHandler(req, res);
+  if (req.query?.route === 'banxico') return banxicoProxyHandler(req, res);
   if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' });
   try {
     const incoming = await readJson(req);

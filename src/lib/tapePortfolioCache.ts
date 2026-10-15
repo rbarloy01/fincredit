@@ -10,7 +10,7 @@ export interface TapePortfolioPoint {
   balance: number;         // cartera total viva
   vigente: number;
   atrasada: number;
-  vencida: number;         // 90+ días
+  vencida: number;         // más de 90 días (portfolioRules)
   sinDato: number;
   pastDue30: number;       // atrasada + vencida (30+ días)
 }

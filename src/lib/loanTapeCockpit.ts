@@ -28,7 +28,7 @@ function appendAll<T>(target: T[], items: T[]) {
 }
 
 
-export const DPD_BUCKETS = DPD_BUCKET_DEFS.map(b => b.bucket) as unknown as readonly ['0 dias', '1-30', '31-60', '61-89', '90-180', '>180'];
+export const DPD_BUCKETS = DPD_BUCKET_DEFS.map(b => b.bucket) as unknown as readonly ['0 dias', '1-30', '31-60', '61-90', '91-180', '>180'];
 
 export interface CockpitPeriodPoint {
   period: string;          // 'YYYY-MM-DD'

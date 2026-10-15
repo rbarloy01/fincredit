@@ -4,13 +4,13 @@ import test from 'node:test';
 
 const loan = (dpd: number | null, bal: number, file_date = '2026-06-30') => ({ loan_id: String(Math.random()), outstanding_balance: bal, days_overdue: dpd, file_date, loan_status: 'Vigente' }) as any;
 
-test('loan tape: vigente 0-30, atrasada 31-89, vencida 90+ por corte', async () => {
+test('loan tape: vigente 0-30, atrasada 31-90, vencida >90 por corte', async () => {
   const { tapePortfolioPoints } = await import('../src/lib/tapePortfolio');
-  const [p] = tapePortfolioPoints([loan(0, 100), loan(30, 100), loan(31, 50), loan(90, 25), loan(200, 25)], 'lt.xlsx');
+  const [p] = tapePortfolioPoints([loan(0, 100), loan(30, 100), loan(31, 50), loan(90, 25), loan(91, 10), loan(200, 15)], 'lt.xlsx');
   assert.equal(p.balance, 300);
   assert.equal(p.vigente, 200);
-  assert.equal(p.atrasada, 50);
-  assert.equal(p.vencida, 50);
+  assert.equal(p.atrasada, 75);   // 31 y 90 días
+  assert.equal(p.vencida, 25);    // 91 y 200 días
   assert.equal(p.pastDue30, 100);
 });
 

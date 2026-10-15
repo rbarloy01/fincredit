@@ -12,6 +12,10 @@
       "destination": "/api/gemini?route=syntage"
     },
     {
+      "source": "/api/banxico",
+      "destination": "/api/gemini?route=banxico"
+    },
+    {
       "source": "/api/pipeline/import",
       "destination": "/api/documents/process?pipelineImport=1"
     },

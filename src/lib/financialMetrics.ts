@@ -639,7 +639,7 @@ export function standardRatios(stmt: FinancialStatement_DB, siblings: FinancialS
     : tape && isTapePointUsable(tape) && tapeGap !== null && Math.abs(tapeGap) > TAPE_MAX_BALANCE_GAP
     ? ` · cartera del estado financiero: el loan tape del corte ${tape.cutoff} no cuadra con el balance (${tapeGap > 0 ? '+' : ''}${Math.round(tapeGap * 100)}% vs cartera del balance)`
     : tape && isTapePointUsable(tape)
-    ? ` · cartera del loan tape (corte ${tape.cutoff}, ${tape.loans.toLocaleString('es-MX')} créditos vivos; vencida = 90+ días)`
+    ? ` · cartera del loan tape (corte ${tape.cutoff}, ${tape.loans.toLocaleString('es-MX')} créditos vivos; vencida = más de 90 días)`
     : tape ? ` · cartera del estado financiero: el loan tape del corte ${tape.cutoff} trae días de atraso solo para ${Math.round(tapeDpdCoverage(tape) * 100)}% del saldo` : '';
   const pastDue30Portfolio = getMetric(stmt, 'pastDue30Portfolio');
   return [

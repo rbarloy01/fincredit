@@ -9,11 +9,12 @@ import type { StandardLoan } from './loanTapeAnalytics';
 export type QualityKey = 'vigente' | 'atrasada' | 'vencida' | 'sin_dato';
 
 // Monitoring convention (matches the operational cartera-vencida reports):
-//   vigente  = 0-30 DPD   |   atrasada = 31-89 DPD   |   vencida = 90 o más DPD
-// (2026-10-08: el usuario fijó vencida = 90 días o más; Red Girasol sep-26 = 196 créditos, no 193.)
+//   vigente  = 0-30 DPD   |   atrasada = 31-90 DPD   |   vencida = más de 90 DPD (91+)
+// Buckets del usuario (2026-10-15, definitivo): 0 (al corriente) · 1-30 · 31-60 · 61-90 · 91-180 · >180. El día 90 es
+// atrasada (bucket 61-90); vencida empieza en 91. Reemplaza la regla del 2026-10-08 (90+), que el usuario corrigió.
 export const QUALITY_RULES = {
   vigenteMaxDpd: 30,
-  atrasadaMaxDpd: 89,
+  atrasadaMaxDpd: 90,
 } as const;
 
 export const QUALITY_LABELS: Record<QualityKey, string> = {
@@ -39,11 +40,11 @@ export function loanStatusFromDpd(dpd: number | null): 'Vigente' | 'Atrasado' | 
 
 // Fixed DPD aging buckets. "0 días" is a sub-set of vigente, never a competing definition of it.
 export const DPD_BUCKET_DEFS = [
-  { bucket: '0 dias', label: '0 días', min: 0, max: 0 },
+  { bucket: '0 dias', label: '0 días (al corriente)', min: 0, max: 0 },
   { bucket: '1-30', label: '1-30', min: 1, max: 30 },
   { bucket: '31-60', label: '31-60', min: 31, max: 60 },
-  { bucket: '61-89', label: '61-89', min: 61, max: 89 },
-  { bucket: '90-180', label: '90-180', min: 90, max: 180 },
+  { bucket: '61-90', label: '61-90', min: 61, max: 90 },
+  { bucket: '91-180', label: '91-180', min: 91, max: 180 },
   { bucket: '>180', label: '>180', min: 181, max: Infinity },
 ] as const;
 
@@ -227,7 +228,7 @@ export function checkDpdConsistency(pairs: Array<{ range: DpdRange | null; dpd: 
 }
 
 // ── Estatus del crédito vs. días de atraso ──────────────────────────────────────────────────────────────────────────
-// La calidad (vigente/atrasada/vencida) se mide SOLO por días (definición del usuario: vencida = 90+ días). Pero un
+// La calidad (vigente/atrasada/vencida) se mide SOLO por días (definición del usuario: vencida = más de 90 días). Pero un
 // estatus de castigo/incobrable/default con menos de 90 días es una contradicción del propio archivo (Red Girasol
 // sep-26: 10 "irrecoverable" al corriente con quebrantos): no se reclasifica, se reporta para que el analista decida.
 export const WRITE_OFF_STATUS = /(irrecoverable|irrecuper|incobrable|castig|quebrant|write.?off|charged.?off|default|judicial|demanda)/;
@@ -253,7 +254,7 @@ export function liveLoansDetail(registros: number, vivos: number): string {
 // ── IMOR (índice de morosidad) por antigüedad ───────────────────────────────────────────────────────────────────────
 // Definición tomada de los archivos IMOR de Red Girasol (2026): antigüedad = INT((corte − originación) / 30) meses;
 // segmentos "<16 meses" / "16-35 meses" / "36+ meses". Dos índices, ambos sobre saldo:
-//   IMOR 90+ = saldo con 90+ días de atraso (vencida) ÷ saldo del segmento
+//   IMOR >90 = saldo con más de 90 días de atraso (vencida) ÷ saldo del segmento
 //   IMOR 30+ = saldo con más de 30 días (atrasada + vencida) ÷ saldo del segmento
 export const IMOR_SEGMENTS = [
   { key: 'lt16', label: '<16 meses', min: 0, max: 15 },
