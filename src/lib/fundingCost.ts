@@ -17,6 +17,7 @@ import { getMetric, incomeSpan } from './financialMetrics';
 import type { LiabilitySnapshot } from './liabilityHistory';
 import { parseRateFormula, rateForMonth, type MonthlySeries, type ReferenceSeries } from './referenceRates';
 import type { TapePortfolio } from './tapePortfolioCache';
+import { effectiveWaRate } from './loanTapeRates';
 
 export type ReferenceRates = Partial<Record<ReferenceSeries, MonthlySeries>>;
 
@@ -167,7 +168,9 @@ export function lenderRatesByCutoff(liabilities: InstitutionalLiability_DB[], ta
   const lines = liabilities.filter(l => (l.currentBalance || 0) > 0);
   return cutoffs.map(c => {
     const month = c.slice(0, 7);
-    const assetRate = tape[c]?.waRate ?? null;
+    // Tasa de la cartera: reportada + TIIE del mes sobre la parte a TIIE + sobretasa (loanTapeRates.ts).
+    const pt = tape[c];
+    const assetRate = pt?.waRate === null || pt?.waRate === undefined ? null : effectiveWaRate({ waReported: pt.waRate, variableShare: pt.variableShare || 0 }, refRates.tiie28?.[month]);
     const lenders = lines.map(l => {
       const f = parseRateFormula(l.rateDescription);
       const rate = f ? rateForMonth(f, refRates[f.series]?.[month]) : l.interestRate ?? null;

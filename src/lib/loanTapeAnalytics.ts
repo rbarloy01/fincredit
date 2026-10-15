@@ -24,8 +24,9 @@ export interface StandardLoan {
   file_date: string | null;
   source_granularity?: 'loan' | 'product_summary' | 'state_summary';
   source_share?: number | null;
+  rate_base?: string | null;   // base de la tasa del crédito tal como la reporta el archivo ("TIIE", "Fija"…); ver loanTapeRates.ts
 }
-export type StandardLoanField = Exclude<keyof StandardLoan, 'source_granularity' | 'source_share' | 'dpd_source' | 'id_source' | 'installment'>;
+export type StandardLoanField = Exclude<keyof StandardLoan, 'source_granularity' | 'source_share' | 'dpd_source' | 'id_source' | 'installment' | 'rate_base'>;
 
 // Retroalimentación del analista al mapeo: encabezado normalizado → campo estándar (o 'ignore' = no usar).
 // Se guarda por cliente y gana sobre el mapeo automático en cada importación.
@@ -644,6 +645,7 @@ export function standardizeLoanTape(rows: any[], fileName?: string, overrides: M
       industry: get('industry') ? String(get('industry')).trim() : null,
       purpose: get('purpose') ? String(get('purpose')).trim() : null,
       state: get('state') ? String(get('state')).trim() : null,
+      rate_base: rateBaseValue(row, headers),
       file_date: rowFileDate,
     };
   // Un renglón es crédito solo si trae algo que lo identifique (ID, cliente) o un saldo. Fórmulas copiadas hacia abajo
@@ -1361,4 +1363,14 @@ export function storedAnalysisFor(tape: LoanTape_DB | null | undefined, context:
   const merged: StructuredLoanTapeAnalysis = { ...fresh, congruencyChecks: stored?.congruencyChecks?.length ? stored.congruencyChecks : fresh.congruencyChecks };
   byCtx.set(ctxKey, merged);
   return merged;
+}
+
+// Base de la tasa por crédito: columna "Tasa Base" / "Tipo de Tasa" / "Tasa de referencia" / "Referencia" (Afix trae
+// "TIIE" o "Fija" por crédito; Swell "Fija"/"Variable"). Se guarda tal cual; loanTapeRates.ts decide si la tasa es sobretasa.
+const RATE_BASE_HEADER = /^(tasa base|base de (la )?tasa|tipo de tasa|tipo tasa|tasa de referencia|referencia( de (la )?tasa)?|indice de referencia|rate type|base rate|reference rate)$/;
+function rateBaseValue(row: any, headers: string[]): string | null {
+  const h = headers.find(x => RATE_BASE_HEADER.test(normalize(x)));
+  if (!h) return null;
+  const v = row?.[h];
+  return v === null || v === undefined || String(v).trim() === '' ? null : String(v).trim();
 }

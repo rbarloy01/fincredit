@@ -13,7 +13,9 @@ export interface TapePortfolioPoint {
   vencida: number;         // más de 90 días (portfolioRules)
   sinDato: number;
   pastDue30: number;       // atrasada + vencida (30+ días)
-  waRate?: number | null;  // tasa anual ponderada por saldo de la cartera vigente (decimal)
+  waRate?: number | null;  // tasa REPORTADA ponderada de la cartera vigente (decimal; sobretasa en créditos a TIIE)
+  variableShare?: number;  // % de la cartera vigente con tasa TIIE + sobretasa (loanTapeRates.ts)
+  assumedVariable?: number; // de ese %, cuánto es supuesto (columna "sobretasa" sin base)
 }
 
 export type TapePortfolio = Record<string, TapePortfolioPoint>;

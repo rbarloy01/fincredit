@@ -14,6 +14,7 @@ import { reserveDownloadTarget } from '../../lib/browserDownload';
 import { analyzePortfolio, buildLoanTapeInsights, type Insight } from '../../lib/loanTapeReport';
 import { imorBreakdown, liveLoansDetail, QUALITY_RULES } from '../../lib/portfolioRules';
 import ChartCard from './ChartCard';
+import LoanTapeTiieCard from './LoanTapeTiieCard';
 import LoanTapePortfolioCharts from './LoanTapePortfolioCharts';
 
 const C = { green: '#059669', amber: '#f59e0b', red: '#ef4444', indigo: '#4f46e5', cyan: '#06b6d4', slate: '#94a3b8' };
@@ -376,6 +377,8 @@ export default function LoanTapeCockpit({ tapes, clientName }: Props) {
       )}
 
       {/* Evolution */}
+      <LoanTapeTiieCard tapes={tapes} clientName={clientName} />
+
       <ChartCard title="Evolución de saldo & cartera vencida (>90 días)" subtitle="Barras = saldo · línea = % vencida" fileName={`Evolucion_${clientName}`} captureId="evo" registerNode={registerNode} legend={[{ label: 'Saldo', color: C.indigo }, { label: 'Vencida %', color: C.red }]}>
         <div style={{ height: 260 }}>
           <ResponsiveContainer>
