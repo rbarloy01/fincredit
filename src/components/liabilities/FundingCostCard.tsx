@@ -1,18 +1,39 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { ResponsiveContainer, ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
 import { Percent, AlertTriangle } from 'lucide-react';
 import type { FinancialStatement_DB, InstitutionalLiability_DB } from '../../db/index';
 import type { LiabilitySnapshot } from '../../lib/liabilityHistory';
-import { analyzeFundingCost } from '../../lib/fundingCost';
+import { analyzeFundingCost, lenderRatesByCutoff, type ReferenceRates } from '../../lib/fundingCost';
+import { parseRateFormula, type ReferenceSeries } from '../../lib/referenceRates';
+import { fetchReferenceSeries } from '../../lib/referenceRatesClient';
+import { tapePortfolioCached } from '../../lib/tapePortfolioCache';
 
 const pct = (v: number | null | undefined) => (v === null || v === undefined ? 'N/D' : `${(v * 100).toFixed(1)}%`);
 const moneyM = (v: number | null | undefined) => (v === null || v === undefined ? 'N/D' : Math.abs(v) >= 1e6 ? `$${(v / 1e6).toLocaleString('es-MX', { maximumFractionDigits: 2 })}M` : `$${Math.round(v / 1e3).toLocaleString('es-MX')}K`);
 
-interface Props { statements: FinancialStatement_DB[]; snapshots: LiabilitySnapshot[]; liabilities: InstitutionalLiability_DB[] }
+interface Props { clientId: string; statements: FinancialStatement_DB[]; snapshots: LiabilitySnapshot[]; liabilities: InstitutionalLiability_DB[] }
 
 // Costo del fondeo aproximado con los estados financieros (reglas en lib/fundingCost.ts).
-export default function FundingCostCard({ statements, snapshots, liabilities }: Props) {
-  const a = useMemo(() => analyzeFundingCost(statements, snapshots, liabilities), [statements, snapshots, liabilities]);
+export default function FundingCostCard({ clientId, statements, snapshots, liabilities }: Props) {
+  const tape = tapePortfolioCached(clientId) || {};
+  const tapeCutoffs = Object.keys(tape).sort();
+  const [refRates, setRefRates] = useState<ReferenceRates>({});
+  const [refError, setRefError] = useState('');
+  // TIIE de Banxico para los meses de los cortes (loan tape y estados): siempre TIIE 28 + las series que usen los contratos.
+  useEffect(() => {
+    const dates = [...tapeCutoffs, ...statements.map(s => s.periodDate)].filter(Boolean).sort();
+    if (!dates.length) return;
+    const from = `${dates[0].slice(0, 7)}-01`; const to = new Date().toISOString().slice(0, 10);
+    const series = new Set<ReferenceSeries>(['tiie28']);
+    liabilities.forEach(l => { const f = parseRateFormula(l.rateDescription); if (f) series.add(f.series); });
+    let alive = true;
+    Promise.all([...series].map(s => fetchReferenceSeries(s, from, to).then(v => [s, v] as const)))
+      .then(pairs => { if (alive) setRefRates(Object.fromEntries(pairs)); })
+      .catch(e => { if (alive) setRefError(e?.message || String(e)); });
+    return () => { alive = false; };
+  }, [clientId, statements.length, liabilities.length, tapeCutoffs.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
+  const a = useMemo(() => analyzeFundingCost(statements, snapshots, liabilities, refRates), [statements, snapshots, liabilities, refRates]);
+  const byCutoff = useMemo(() => lenderRatesByCutoff(liabilities, tape, refRates).slice(-12), [liabilities, tape, refRates]);
   if (!a.periods.length) {
     return (
       <div className="border border-slate-200 rounded-xl p-4 text-sm text-slate-500">
@@ -77,6 +98,27 @@ export default function FundingCostCard({ statements, snapshots, liabilities }: 
           </table>
         </div>
       </div>
+      {byCutoff.length > 0 && (
+        <div className="overflow-x-auto">
+          <p className="text-xs font-black text-slate-700 uppercase tracking-widest mb-1">Tasa por fondeador en cada corte del loan tape</p>
+          <p className="text-[11px] text-slate-500 mb-2">TIIE de Banxico al cierre de cada mes. Las líneas "TIIE + sobretasa" se recalculan cada mes; spread = tasa de la cartera vigente del loan tape − tasa del fondeador.{refError ? ` · Banxico: ${refError}` : ''}</p>
+          <table className="w-full text-xs">
+            <thead><tr className="text-left text-slate-500"><th className="py-1">Corte</th><th className="text-right">TIIE 28</th><th className="text-right">Tasa cartera</th>{byCutoff[0].lenders.map(l => <th key={l.lender} className="text-right">{l.lender}<span className="block text-[9px] font-semibold text-slate-400">{l.source}</span></th>)}</tr></thead>
+            <tbody>
+              {byCutoff.map(r => (
+                <tr key={r.cutoff} className="border-t border-slate-100">
+                  <td className="py-1 font-semibold">{r.cutoff}</td>
+                  <td className="text-right font-mono">{r.tiie.tiie28 === null || r.tiie.tiie28 === undefined ? '…' : `${r.tiie.tiie28.toFixed(2)}%`}</td>
+                  <td className="text-right font-mono">{pct(r.assetRate)}</td>
+                  {r.lenders.map(l => (
+                    <td key={l.lender} className="text-right font-mono">{pct(l.rate)}{l.spread !== null && <span className={`block text-[10px] ${l.spread < 0 ? 'text-rose-600' : 'text-emerald-700'}`}>spread {(l.spread * 100).toFixed(1)} pp</span>}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       {a.notes.length > 0 && (
         <ul className="space-y-1">{a.notes.map((n, i) => <li key={i} className="text-xs text-slate-600 flex gap-1.5"><AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0 mt-0.5" />{n}</li>)}</ul>
       )}

@@ -13,6 +13,7 @@ export interface TapePortfolioPoint {
   vencida: number;         // más de 90 días (portfolioRules)
   sinDato: number;
   pastDue30: number;       // atrasada + vencida (30+ días)
+  waRate?: number | null;  // tasa anual ponderada por saldo de la cartera vigente (decimal)
 }
 
 export type TapePortfolio = Record<string, TapePortfolioPoint>;

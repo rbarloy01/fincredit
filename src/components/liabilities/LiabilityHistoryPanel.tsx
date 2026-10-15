@@ -132,7 +132,7 @@ export default function LiabilityHistoryPanel({ clientId, clientName, liabilitie
         </div>
       )}
 
-      <FundingCostCard statements={statements} snapshots={store.snapshots} liabilities={liabilities} />
+      <FundingCostCard clientId={clientId} statements={statements} snapshots={store.snapshots} liabilities={liabilities} />
 
       {!a.cutoffs.length ? (
         <p className="text-sm text-slate-400 py-6 text-center">Aún no hay cortes. Agrega la segregación del pasivo de cada mes para ver la evolución por acreedor.</p>

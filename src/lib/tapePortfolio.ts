@@ -23,7 +23,12 @@ export function tapePortfolioPoints(rows: StandardLoan[], fileName: string): Tap
   return [...byCutoff.entries()].map(([cutoff, list]) => {
     const sum = (k: ReturnType<typeof classifyDpd>) => list.filter(r => classifyDpd(r.days_overdue) === k).reduce((a, r) => a + bal(r), 0);
     const atrasada = sum('atrasada'), vencida = sum('vencida');
+    // Tasa activa: ponderada por saldo de la cartera vigente con tasa (0.12 = 12%).
+    const rated = list.filter(r => classifyDpd(r.days_overdue) === 'vigente' && typeof r.interest_rate === 'number' && r.interest_rate > 0 && r.interest_rate < 3);
+    const ratedBal = rated.reduce((a, r) => a + bal(r), 0);
+    const waRate = ratedBal > 0 ? rated.reduce((a, r) => a + bal(r) * (r.interest_rate as number), 0) / ratedBal : null;
     return {
+      waRate,
       cutoff, fileName, loans: list.length,
       balance: list.reduce((a, r) => a + bal(r), 0),
       vigente: sum('vigente'), atrasada, vencida, sinDato: sum('sin_dato'), pastDue30: atrasada + vencida,

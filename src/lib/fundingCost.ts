@@ -15,6 +15,10 @@
 import type { FinancialStatement_DB, InstitutionalLiability_DB } from '../db/index';
 import { getMetric, incomeSpan } from './financialMetrics';
 import type { LiabilitySnapshot } from './liabilityHistory';
+import { parseRateFormula, rateForMonth, type MonthlySeries, type ReferenceSeries } from './referenceRates';
+import type { TapePortfolio } from './tapePortfolioCache';
+
+export type ReferenceRates = Partial<Record<ReferenceSeries, MonthlySeries>>;
 
 export const FUNDING_COST_BOUNDS = { min: 0.03, max: 0.6 } as const;
 
@@ -51,6 +55,7 @@ export function analyzeFundingCost(
   statements: FinancialStatement_DB[],
   snapshots: LiabilitySnapshot[] = [],
   liabilities: InstitutionalLiability_DB[] = [],
+  refRates: ReferenceRates = {},
 ): FundingCostAnalysis {
   const sts = [...statements].filter(s => s.periodDate).sort((a, b) => a.periodDate.localeCompare(b.periodDate));
   const snapTotal = (d: string) => {
@@ -114,7 +119,14 @@ export function analyzeFundingCost(
     ? lastSnap.lines.map(l => ({ lender: l.lender, balance: l.balance }))
     : liabilities.filter(l => (l.currentBalance || 0) > 0).map(l => ({ lender: l.lenderName, balance: l.currentBalance as number }));
   const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
-  const contractRate = (lender: string) => liabilities.find(l => norm(l.lenderName) === norm(lender))?.interestRate ?? null;
+  // R6b: tasa de contrato. "TIIE + sobretasa" se evalúa con la TIIE del mes del último periodo (no es tasa fija).
+  const contractRate = (lender: string) => {
+    const l = liabilities.find(x => norm(x.lenderName) === norm(lender));
+    if (!l) return null;
+    const f = parseRateFormula(l.rateDescription);
+    if (f && latest) { const v = rateForMonth(f, refRates[f.series]?.[latest.cutoff.slice(0, 7)]); if (v !== null) return v; }
+    return l.interestRate ?? null;
+  };
   const known = base.map(b => ({ ...b, rate: contractRate(b.lender) }));
   const knownCost = known.filter(k => k.rate !== null).reduce((a, k) => a + (k.rate as number) * k.balance, 0);
   const unknownBal = known.filter(k => k.rate === null).reduce((a, k) => a + k.balance, 0);
@@ -140,4 +152,29 @@ export function analyzeFundingCost(
   }
   if (byLender.some(b => b.source === 'implícita')) notes.push('Los fondeadores sin tasa de contrato usan la tasa implícita del estado (aproximación); con el contrato se reemplaza por la tasa real.');
   return { periods, latest, annualExpense, annualBasis, byLender, notes, unexplained };
+}
+
+// ── Tasa por fondeador en cada corte del loan tape (TIIE de Banxico del mes) ───────────────────────────────────────────
+export interface CutoffRateRow {
+  cutoff: string;
+  tiie: Partial<Record<ReferenceSeries, number | null>>;   // % anual al cierre del mes
+  assetRate: number | null;                                // tasa ponderada de la cartera vigente del loan tape
+  lenders: Array<{ lender: string; rate: number | null; spread: number | null; source: 'TIIE + sobretasa' | 'fija' | 'sin tasa' }>;
+}
+
+export function lenderRatesByCutoff(liabilities: InstitutionalLiability_DB[], tape: TapePortfolio, refRates: ReferenceRates): CutoffRateRow[] {
+  const cutoffs = Object.keys(tape).sort();
+  const lines = liabilities.filter(l => (l.currentBalance || 0) > 0);
+  return cutoffs.map(c => {
+    const month = c.slice(0, 7);
+    const assetRate = tape[c]?.waRate ?? null;
+    const lenders = lines.map(l => {
+      const f = parseRateFormula(l.rateDescription);
+      const rate = f ? rateForMonth(f, refRates[f.series]?.[month]) : l.interestRate ?? null;
+      return { lender: l.lenderName, rate, spread: rate !== null && assetRate !== null ? assetRate - rate : null, source: f ? 'TIIE + sobretasa' as const : l.interestRate !== null ? 'fija' as const : 'sin tasa' as const };
+    });
+    const tiie: CutoffRateRow['tiie'] = {};
+    (Object.keys(refRates) as ReferenceSeries[]).forEach(sr => { tiie[sr] = refRates[sr]?.[month] ?? null; });
+    return { cutoff: c, tiie, assetRate, lenders };
+  });
 }
