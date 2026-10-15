@@ -106,7 +106,7 @@ test('analysis stays available with optional fields missing and formats rates as
     uploadDate: '2026-08-31',
     extractedData: { _standardized: res.standardized, _mappingReport: res.mappingReport },
   } as any], 'lt1');
-  assert.equal(analysis.metrics.find(item => item.name === 'Tasa ponderada por saldo')?.latestValue, '25.2%');
+  assert.equal(analysis.metrics.find(item => item.name === 'Tasa ponderada por saldo')?.latestValue, '25.20%');
 });
 
 test('COFINE profile maps real portfolio headers without confusing money columns for DPD', () => {
@@ -163,7 +163,7 @@ test('COFINE profile maps real portfolio headers without confusing money columns
   } as any], 'lt-cofine');
 
   assert.equal(analysis.metrics.find(item => item.name === 'Créditos vivos (sin liquidados)')?.latestValue, '2');
-  assert.equal(analysis.metrics.find(item => item.name === 'DPD ponderado por saldo')?.latestValue, '41.2 dias');
+  assert.equal(analysis.metrics.find(item => item.name === 'DPD ponderado por saldo')?.latestValue, '41.22 dias');
 });
 
 test('loan tape period selection uses cutoff date instead of upload date', () => {

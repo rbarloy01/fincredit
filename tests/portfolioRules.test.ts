@@ -64,7 +64,7 @@ test('a saved analysis made with the old definition is refreshed with the curren
 test('executive summary uses the same vigente % as the quality table and names Top-10 clients vs credits', () => {
   const tape: any = { id: 't', clientId: 'c', name: 't', uploadDate: '2026-06-01', fileName: '260531 - LT - Test.xlsx', tapeType: 'credito', extractedData: { _standardized: rows, _analysis: { executiveSummary: 'vigente 60.0%, atrasada 39.0%' } } };
   const fresh: any = storedAnalysisFor(tape);
-  assert.match(fresh.executiveSummary, /vigente 96\.0% \(0-30 DPD; 60\.0% al corriente\)/);
+  assert.match(fresh.executiveSummary, /vigente 96\.00% \(0-30 DPD; 60\.00% al corriente\)/);
   assert.match(fresh.executiveSummary, /10 clientes más grandes/);
   assert.match(fresh.executiveSummary, /10 créditos más grandes/);
   assert.doesNotMatch(fresh.executiveSummary, /39\.0%/);

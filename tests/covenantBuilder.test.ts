@@ -34,7 +34,7 @@ test('a percent limit is stored as a fraction so it never depends on the covenan
 
 test('preview evaluates the draft per period exactly as the saved covenant will be evaluated', () => {
   const p = previewDraft({ name: 'Mi indicador', formula: 'ratio:equity/totalAssets', kind: 'gte', limit: '15', unit: 'percent' }, series);
-  assert.deepEqual(p.rows.map(r => r.display), ['20.0%', '16.0%', '12.0%']);
+  assert.deepEqual(p.rows.map(r => r.display), ['20.00%', '16.00%', '12.00%']);
   assert.deepEqual(p.rows.map(r => r.status), ['cumple', 'alerta', 'incumple']);
   assert.equal(p.computable, true);
   assert.equal(previewDraft({ name: 'x', formula: 'ratio:equity/totalAssets', kind: 'none', limit: '', unit: 'percent' }, series).rows[0].status, 'sin_limite');
