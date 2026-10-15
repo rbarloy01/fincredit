@@ -4,8 +4,9 @@
 //        "TIIE…" / "Variable" / "Flotante"  → la tasa reportada es SOBRETASA: tasa = TIIE del mes del corte + sobretasa.
 //        "Fija"                             → la tasa reportada es la tasa total.
 //      (Afix: cada crédito dice "TIIE" con sobretasa 13, o es fijo con 24%.)
-//  R2. Sin base, si la columna de tasa se llama "sobretasa / sobre tasa / spread / margen" (COFINE, Capital X), se toma
-//      como sobretasa sobre TIIE 28 y se marca como SUPUESTO.
+//  R2. Si el archivo NO trae columna de base y la columna de tasa se llama "sobretasa / sobre tasa / spread / margen"
+//      (COFINE, Capital X), se toma como sobretasa sobre TIIE 28 y se marca como SUPUESTO. Si el archivo SÍ trae columna
+//      de base y el crédito la tiene vacía, es tasa fija (Afix solo llena "TIIE" en los créditos variables).
 //  R3. Si no, la tasa reportada es la tasa total.
 //  Tasa efectiva ponderada = Σ saldo × (tasa + TIIE·[variable]) ÷ Σ saldo = tasa reportada ponderada + TIIE × % variable.
 
@@ -43,9 +44,10 @@ export function rateProfile(rows: StandardLoan[], spreadColumn: boolean): RatePr
   const total = rated.reduce((a, r) => a + bal(r), 0);
   if (!total) return { waReported: null, variableShare: 0, assumedShare: 0, ratedBalance: 0 };
   let wa = 0, varBal = 0, assumedBal = 0;
+  const hasBaseColumn = rows.some(r => r.rate_base !== null && r.rate_base !== undefined && String(r.rate_base).trim() !== '');
   rated.forEach(r => {
     const b = bal(r); wa += b * (r.interest_rate as number);
-    const basis = loanRateBasis(r, spreadColumn);
+    const basis = loanRateBasis(r, spreadColumn && !hasBaseColumn);
     if (basis !== 'fija') varBal += b;
     if (basis === 'tiie_supuesto') assumedBal += b;
   });

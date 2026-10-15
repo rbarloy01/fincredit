@@ -27,3 +27,11 @@ test('tasa efectiva ponderada = reportada + TIIE × % de la cartera a TIIE', () 
   const fixed = rateProfile([loan(0.26, 100, 'Fija'), loan(0.2, 100, 'Fija')], false);
   assert.equal(effectiveWaRate(fixed, null), 0.23);
 });
+
+test('archivo con columna de base: base vacía = tasa fija (no supuesto)', () => {
+  const p = rateProfile([loan(0.13, 340, 'TIIE'), loan(0.24, 660, null)], true);
+  assert.ok(Math.abs(p.variableShare - 0.34) < 1e-12);
+  assert.equal(p.assumedShare, 0);
+  const q = rateProfile([loan(0.115, 100, null)], true);       // COFINE: sin columna de base → supuesto
+  assert.equal(q.assumedShare, 1);
+});
