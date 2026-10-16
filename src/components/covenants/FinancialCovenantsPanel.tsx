@@ -8,6 +8,7 @@ import { loadExportModule } from '../../lib/exportLoader';
 import { accountOptions, buildCovenantAnalystInsight, buildCovenantInsightPrompt, evaluateCovenantAuto, evaluateCovenantForStatement, evaluateFormula, formulaLabel, getMetric, isPercentCovenant, prioritizedLatestCovenantPerformance, rawAccountKey, resolveCovenantThreshold, standardRatioFormula, standardRatios, suggestedCovenants } from '../../lib/financialMetrics';
 import { GlobalCovenantTemplate, loadOrgConsolidationRules, loadOrgGlobalCovenantTemplates } from '../../lib/accountConsolidation';
 import { matchesFacilityFilter } from '../../lib/facilityHistory';
+import { facilityLife, statementsDuringLife, type FacilityDisposition } from '../../lib/facilityLife';
 import { normalizeFinancialNumberString, parseNullableFinancialNumber } from '../../lib/numberParsing';
 import CovenantBuilder, { type CovenantBuilderSave } from './CovenantBuilder';
 import { thresholdToStore } from '../../lib/covenantBuilder';
@@ -59,9 +60,9 @@ interface Props {
   onCovenantsChange: (covenants: Covenant_DB[]) => void;
 }
 
-const StatusBadge: React.FC<{ status: 'cumple' | 'alerta' | 'incumple' | 'sin_dato' }> = ({ status }) => {
+const StatusBadge: React.FC<{ status: 'cumple' | 'alerta' | 'incumple' | 'sin_dato' | 'pausado' }> = ({ status }) => {
   const monitored = useClientMonitored();
-  if (!monitored) {
+  if (!monitored || status === 'pausado') {
     return <span className="flex items-center gap-1 text-xs font-black px-2.5 py-1 rounded-full border bg-slate-100 text-slate-500 border-slate-200">SIN MONITOREO</span>;
   }
   const map = {
@@ -69,12 +70,14 @@ const StatusBadge: React.FC<{ status: 'cumple' | 'alerta' | 'incumple' | 'sin_da
     alerta: 'bg-amber-100 text-amber-800 border-amber-200',
     incumple: 'bg-rose-100 text-rose-800 border-rose-200',
     sin_dato: 'bg-slate-100 text-slate-500 border-slate-200',
+    pausado: 'bg-slate-100 text-slate-500 border-slate-200',
   };
   const icons = {
     cumple: <CheckCircle className="w-3 h-3" />,
     alerta: <AlertTriangle className="w-3 h-3" />,
     incumple: <XCircle className="w-3 h-3" />,
     sin_dato: null,
+    pausado: null,
   };
   return (
     <span className={`flex items-center gap-1 text-xs font-black px-2.5 py-1 rounded-full border ${map[status]}`}>
@@ -161,7 +164,8 @@ const distanceToLimit = (value: number | null, cov: Covenant_DB) => {
   return null;
 };
 
-const riskToneFromDistance = (distance: number | null, status: 'cumple' | 'alerta' | 'incumple' | 'sin_dato') => {
+const riskToneFromDistance = (distance: number | null, status: 'cumple' | 'alerta' | 'incumple' | 'sin_dato' | 'pausado') => {
+  if (status === 'pausado') return 'Sin monitoreo';
   if (status === 'sin_dato') return 'Sin dato';
   if (status === 'incumple') return 'Breach';
   if (distance === null) return 'Sin límite';
@@ -175,8 +179,8 @@ const deltaDirectionLabel = (delta: number | null) => {
   return delta > 0 ? 'Subió' : 'Bajó';
 };
 
-const periodStatusClass = (status: 'cumple' | 'alerta' | 'incumple' | 'sin_dato') => {
-  if (status === 'sin_dato') return 'bg-slate-50 text-slate-400 border-slate-200';
+const periodStatusClass = (status: 'cumple' | 'alerta' | 'incumple' | 'sin_dato' | 'pausado') => {
+  if (status === 'sin_dato' || status === 'pausado') return 'bg-slate-50 text-slate-400 border-slate-200';
   if (status === 'incumple') return 'bg-rose-600 text-white border-rose-700';
   if (status === 'alerta') return 'bg-amber-400 text-amber-950 border-amber-500';
   return 'bg-emerald-600 text-white border-emerald-700';
@@ -220,12 +224,28 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
   const [fmap, setFmap] = useState({ open: false, query: '', onlyFav: false, onlyIssues: false });
   const notesEndRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const orderedStatements = useMemo(
+  const allOrderedStatements = useMemo(
     () => [...statements].sort((a, b) => a.periodDate.localeCompare(b.periodDate)),
     [statements],
   );
+  // Facility seleccionada: los indicadores se miden con los periodos de su vigencia (si ya terminó, se "remonta" a ellos).
+  const [facilityDispositions, setFacilityDispositions] = useState<Record<string, FacilityDisposition[]>>({});
+  const [facilityStages, setFacilityStages] = useState<Record<string, { pipelineStage?: string }>>({});
+  useEffect(() => {
+    db.getClientSetting<Record<string, FacilityDisposition[]>>(clientId, `finmonitor_transaction_dispositions_${clientId}`, {}).then(setFacilityDispositions).catch(() => undefined);
+    db.getClientSetting<Record<string, { pipelineStage?: string }>>(clientId, `finmonitor_transaction_pipeline_meta_${clientId}`, {}).then(setFacilityStages).catch(() => undefined);
+  }, [clientId]);
+  const selectedFacility = transactions.find(tx => tx.id === facilityFilter) || null;
+  const selectedLife = useMemo(
+    () => (selectedFacility ? facilityLife(selectedFacility, facilityDispositions[selectedFacility.id] || [], facilityStages[selectedFacility.id]?.pipelineStage) : null),
+    [selectedFacility, facilityDispositions, facilityStages],
+  );
+  const orderedStatements = useMemo(
+    () => (selectedLife ? statementsDuringLife(allOrderedStatements, selectedLife) : allOrderedStatements),
+    [allOrderedStatements, selectedLife],
+  );
   const statementsFingerprint = useMemo(
-    () => orderedStatements
+    () => allOrderedStatements
       .map(stmt => `${stmt.id}:${stmt.period}:${stmt.periodDate}:${stmt.rawLineItems.length}:${stmt.rawLineItems.map(item => `${item.name}:${item.value}:${item.statementType || ''}`).join('|')}`)
       .join('||'),
     [orderedStatements],
@@ -347,7 +367,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
   };
 
   const setManualStatus = async (cov: Covenant_DB, status: 'cumple' | 'alerta' | 'incumple' | 'auto') => {
-    if (!monitored && status !== 'auto' && status !== 'cumple') { alert('Cliente sin monitoreo: no se puede marcar incumplimiento ni alerta.'); return; }
+    if ((!monitored || cov.monitoringPaused) && status !== 'auto' && status !== 'cumple') { alert('Cliente sin monitoreo: no se puede marcar incumplimiento ni alerta.'); return; }
     setSavingAction(`${cov.id}:status`);
     try {
       const real = await materialize(cov as Covenant_DB & { virtual?: boolean });
@@ -520,7 +540,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
     const breachedCount = monitored ? covenantRows.filter(r => r.status === 'incumple').length : 0;
     const warningCount = monitored ? covenantRows.filter(r => r.status === 'alerta').length : 0;
     const calculatedCount = covenantRows.filter(r => r.value !== null).length;
-    const latestPerformance = prioritizedLatestCovenantPerformance(displayCovenants, orderedStatements, contractCovenants);
+    const latestPerformance = prioritizedLatestCovenantPerformance(displayCovenants.filter(c => !c.monitoringPaused), orderedStatements, contractCovenants);
     const performanceById = new Map(latestPerformance.map(row => [row.covenantId, row]));
     const analystInsight = buildCovenantAnalystInsight(latestPerformance);
     const latestInsightPrompt = buildCovenantInsightPrompt(clientName, latestPerformance);
@@ -814,6 +834,16 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
           </button>
         </div>
       </div>
+
+      {selectedFacility && selectedLife && (
+        <div className={`rounded-2xl border px-4 py-3 text-xs font-semibold ${selectedLife.status === 'vigente' ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
+          <b>{selectedFacility.name}</b> · {selectedLife.status === 'terminada' ? 'Terminada' : selectedLife.status === 'vencida' ? 'Vencida' : selectedLife.status === 'vigente' ? 'Vigente' : 'Sin fecha fin'}
+          {' '}· vigencia {selectedLife.start || '¿?'} → {selectedLife.end || 'sin fecha'}.{' '}
+          {orderedStatements.length
+            ? `Indicadores medidos con ${orderedStatements.length} periodo${orderedStatements.length !== 1 ? 's' : ''} de su vigencia (${orderedStatements[0].periodDate} a ${orderedStatements.at(-1)!.periodDate})${selectedLife.status !== 'vigente' && selectedLife.status !== 'sin-fecha' ? '; el estatus es el del último periodo en que estuvo viva' : ''}.`
+            : 'No hay estados financieros con corte dentro de su vigencia.'}
+        </div>
+      )}
 
       {allDisplayCovenants.length > 0 && displayCovenants.length === 0 && (
         <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center">
@@ -1230,7 +1260,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
                             result.value === null || !monitored ? 'bg-slate-50 text-slate-400 border-slate-200' : periodStatusClass(result.status)
                           }`}>
                             <span className="font-mono font-black">{fmtCov(result.value, cov)}</span>
-                            <span className="text-[9px] font-black uppercase opacity-80">{result.value === null ? '0' : result.status}</span>
+                            <span className="text-[9px] font-black uppercase opacity-80">{!monitored || result.status === 'pausado' ? 'Sin monitoreo' : result.value === null ? 'Sin dato' : result.status}</span>
                           </div>
                         </td>
                       );
@@ -1583,7 +1613,7 @@ const FinancialCovenantsPanel: React.FC<Props> = ({ clientId, clientName = '', t
                       >
                         Automático
                       </button>
-                      {(['cumple', 'alerta', 'incumple'] as const).filter(opt => monitored || opt === 'cumple').map(s => (
+                      {(['cumple', 'alerta', 'incumple'] as const).filter(opt => !cov.monitoringPaused && (monitored || opt === 'cumple')).map(s => (
                         <button
                           key={s}
                           onClick={() => setManualStatus(cov, s)}

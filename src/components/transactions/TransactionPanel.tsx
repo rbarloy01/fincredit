@@ -1,3 +1,4 @@
+import { isTransactionMonitored, transactionMonitoringStatus, applyTransactionMonitoringUpdate } from '../../lib/transactionMonitoring';
 import React, { useState, useEffect, useRef } from 'react';
 import { useClientMonitored } from '../clients/MonitoringContext';
 import { db, Transaction, ContractFile } from '../../db/index';
@@ -14,6 +15,7 @@ import { extractPdfText, isUsefulExtractedText } from '../../lib/documentParsing
 import { loadExportModule } from '../../lib/exportLoader';
 import FacilityTermsEditor from './FacilityTermsEditor';
 import { type FacilityTerms, type FacilityTermsMap, emptyFacilityTerms, facilityTermsKey, termsFromExtraction } from '../../lib/facilityTerms';
+import { type FacilityDisposition, type DispositionStatus, DISPOSITION_STATUS_LABEL, dispositionStatus, facilityUsage } from '../../lib/facilityLife';
 import { KNOWN_INDICATORS, knownIndicatorFormula, thresholdToStore } from '../../lib/covenantBuilder';
 
 const nanoid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -76,21 +78,15 @@ interface TxFormData {
   maturityAt: string;
 }
 
-interface Disposition {
-  id: string;
-  date: string;
-  maturityDate?: string;   // fecha de vencimiento de la disposición
-  amount: string;
-  currency: string;
-  notes: string;
-}
+// Disposición: fecha, vencimiento, monto, estatus (vigente / pagada / terminada) y fecha de cierre. Reglas en lib/facilityLife.ts.
+type Disposition = FacilityDisposition;
 
 // Vencimiento efectivo de una facility: el último vencimiento entre el contrato y sus disposiciones.
 function facilityMaturity(tx: Transaction, items: Disposition[]): { last: string | null; allMatured: boolean; maturedCount: number } {
   const today = new Date().toISOString().slice(0, 10);
   const dates = [tx.maturityAt, ...items.map(d => d.maturityDate || '')].filter(Boolean) as string[];
   const last = dates.sort().at(-1) || null;
-  const withDate = items.filter(d => d.maturityDate);
+  const withDate = items.filter(d => d.maturityDate && dispositionStatus(d) === 'vigente');
   const maturedCount = withDate.filter(d => (d.maturityDate as string) < today).length;
   return { last, allMatured: !!last && last < today, maturedCount };
 }
@@ -294,13 +290,12 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
     await db.setClientSetting(clientId, pipelineMetaKey(clientId), next);
   };
 
-  const updatePipelineMeta = (txId: string, updates: Partial<PipelineTransactionMeta>) => {
-    setPipelineMeta(prev => {
-      const current = prev[txId] || emptyPipelineMeta();
-      const next = { ...prev, [txId]: { ...current, ...updates } };
-      void db.setClientSetting(clientId, pipelineMetaKey(clientId), next);
-      return next;
-    });
+  const updatePipelineMeta = async (txId: string, updates: Partial<PipelineTransactionMeta>) => {
+    const current = pipelineMeta[txId] || emptyPipelineMeta();
+    const next = { ...pipelineMeta, [txId]: applyTransactionMonitoringUpdate(current, updates, monitored) };
+    setPipelineMeta(next);
+    await db.setClientSetting(clientId, pipelineMetaKey(clientId), next);
+    if (updates.pipelineStage !== undefined) onCovenantsExtracted();
   };
 
   const handleUploadFiles = async (txId: string, fileList: FileList) => {
@@ -605,10 +600,11 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
             const isExpanded = expanded === tx.id;
             const extraction = extractedMap[tx.id];
             const txDispositions = dispositions[tx.id] || [];
-            const disposedTotal = txDispositions.reduce((sum, item) => sum + parseFinancialNumber(item.amount), 0);
+            const usage = facilityUsage(tx, txDispositions);
             const txPipelineMeta = pipelineMeta[tx.id] || emptyPipelineMeta();
             const maturity = facilityMaturity(tx, txDispositions);
-            const closedStage = txPipelineMeta.pipelineStage === 'Dormant' || txPipelineMeta.pipelineStage === 'Terminado';
+            const txMonitored = isTransactionMonitored(txPipelineMeta, monitored);
+            const monitoringLabel = transactionMonitoringStatus(txPipelineMeta, monitored);
 
             return (
               <div key={tx.id} className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
@@ -626,23 +622,23 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                       {txPipelineMeta.pipelineStage && (
                         <span className="text-xs bg-slate-100 text-slate-700 px-2 py-0.5 rounded-md font-semibold flex-shrink-0">{txPipelineMeta.pipelineStage}</span>
                       )}
-                      {txPipelineMeta.monitoringStatus && (
+                      {monitoringLabel && (
                         <span className={`text-xs px-2 py-0.5 rounded-md font-semibold flex-shrink-0 ${
-                          txPipelineMeta.monitoringStatus === 'Cumplimiento'
+                          !txMonitored ? 'bg-slate-100 text-slate-600' : txPipelineMeta.monitoringStatus === 'Cumplimiento'
                             ? 'bg-emerald-50 text-emerald-700'
                             : txPipelineMeta.monitoringStatus === 'Incumplimiento técnico'
                               ? 'bg-amber-50 text-amber-700'
                               : 'bg-rose-50 text-rose-700'
-                        }`}>{txPipelineMeta.monitoringStatus}</span>
+                        }`}>{monitoringLabel}</span>
                       )}
                     </div>
                     <div className="flex items-center gap-4 mt-1 text-xs text-slate-500">
                       <span className="flex items-center gap-1"><Calendar className="w-3 h-3" />Disp. inicial {fmtDate(tx.date)}</span>
                       <span className="flex items-center gap-1"><DollarSign className="w-3 h-3" />Autorizado {fmtAmount(tx.originalAmount, tx.currency)}</span>
                       {txPipelineMeta.utilizationPct && <span className="font-semibold text-slate-600">Utilización {txPipelineMeta.utilizationPct}%</span>}
-                      {txDispositions.length > 0 && <span className="flex items-center gap-1 text-emerald-600 font-semibold">{txDispositions.length} disposición{txDispositions.length !== 1 ? 'es' : ''}{maturity.maturedCount ? ` · ${maturity.maturedCount} vencida${maturity.maturedCount !== 1 ? 's' : ''}` : ''}</span>}
-                      {maturity.last && <span className={`flex items-center gap-1 font-semibold ${maturity.allMatured ? 'text-rose-600' : 'text-slate-600'}`}><Calendar className="w-3 h-3" />Vence {fmtDate(maturity.last)}{maturity.allMatured ? ' · todo vencido' : ''}</span>}
-                      {maturity.allMatured && !closedStage && (
+                      {txDispositions.length > 0 && <span className="flex items-center gap-1 text-emerald-600 font-semibold">{usage.openCount} vigente{usage.openCount !== 1 ? 's' : ''}{usage.closedCount ? ` · ${usage.closedCount} pagada${usage.closedCount !== 1 ? 's' : ''}/terminada${usage.closedCount !== 1 ? 's' : ''}` : ''}{txMonitored && maturity.maturedCount ? ` · ${maturity.maturedCount} vencida${maturity.maturedCount !== 1 ? 's' : ''}` : ''}</span>}
+                      {maturity.last && <span className={`flex items-center gap-1 font-semibold ${txMonitored && maturity.allMatured ? 'text-rose-600' : 'text-slate-600'}`}><Calendar className="w-3 h-3" />Vence {fmtDate(maturity.last)}{txMonitored && maturity.allMatured ? ' · todo vencido' : ''}</span>}
+                      {maturity.allMatured && txMonitored && (
                         <button onClick={e => { e.stopPropagation(); void updatePipelineMeta(tx.id, { pipelineStage: 'Terminado' }); }} className="text-[11px] font-black text-rose-700 bg-rose-50 border border-rose-200 rounded-md px-2 py-0.5 hover:bg-rose-100">
                           Marcar como Terminado
                         </button>
@@ -682,8 +678,11 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                         <p className="text-slate-800 font-semibold mt-0.5">{fmtDate(tx.date)}</p>
                       </div>
                       <div>
-                        <span className="text-slate-500 font-bold uppercase tracking-wide">Autorizado / dispuesto</span>
-                        <p className="text-slate-800 font-semibold mt-0.5">{fmtAmount(tx.originalAmount, tx.currency)} / {fmtAmount(disposedTotal, tx.currency)}</p>
+                        <span className="text-slate-500 font-bold uppercase tracking-wide">{usage.revolving ? 'Autorizado / saldo vigente / disponible' : 'Autorizado / dispuesto / disponible'}</span>
+                        <p className={`font-semibold mt-0.5 ${usage.overAuthorized ? 'text-rose-700' : 'text-slate-800'}`}>{fmtAmount(tx.originalAmount, tx.currency)} / {fmtAmount(usage.revolving ? usage.outstanding : usage.disbursedTotal, tx.currency)} / {fmtAmount(usage.available, tx.currency)}</p>
+                        <p className="text-[11px] text-slate-400 mt-0.5">{usage.revolving
+                          ? `Revolvente: lo pagado libera la línea. Dispuesto acumulado ${fmtAmount(usage.disbursedTotal, tx.currency)}.`
+                          : `Simple: cada disposición consume la línea. Saldo vigente ${fmtAmount(usage.outstanding, tx.currency)}.`}{usage.overAuthorized ? ' Excede el autorizado.' : ''}</p>
                       </div>
                     </div>
 
@@ -719,8 +718,8 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                         </label>
                         <label>
                           <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">Estatus monitoring</span>
-                          <select className={inputClass} value={txPipelineMeta.monitoringStatus} onChange={e => void updatePipelineMeta(tx.id, { monitoringStatus: e.target.value })}>
-                            {(monitored ? MONITORING_STATUSES : MONITORING_STATUSES.filter(st => !st.startsWith('Incumplimiento'))).map(status => <option key={status} value={status}>{status}</option>)}
+                          <select disabled={!txMonitored} className={inputClass} value={monitoringLabel} onChange={e => void updatePipelineMeta(tx.id, { monitoringStatus: e.target.value })}>
+                            {(txMonitored ? MONITORING_STATUSES : ['Sin monitoreo']).map(status => <option key={status} value={status}>{status}</option>)}
                           </select>
                         </label>
                         <label>
@@ -754,7 +753,7 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                       <div className="flex items-center justify-between mb-3">
                         <div>
                           <p className="text-xs font-black text-slate-700 uppercase tracking-widest">Disposiciones</p>
-                          <p className="text-xs text-slate-400 mt-0.5">Carga una o varias disposiciones: fecha de disposición, fecha de vencimiento (en rojo si ya venció), monto y moneda.</p>
+                          <p className="text-xs text-slate-400 mt-0.5">Fecha de disposición, vencimiento (en rojo si ya venció y sigue vigente), monto, moneda y estatus. Marca como <b>Pagada</b> o <b>Terminada</b> las que ya se cerraron: en líneas revolventes eso libera el disponible.</p>
                         </div>
                         <button
                           onClick={() => addDisposition(tx)}
@@ -769,13 +768,17 @@ const TransactionPanel: React.FC<Props> = ({ clientId, clientName = '', session,
                       ) : (
                         <div className="space-y-2">
                           {txDispositions.map(disposition => (
-                            <div key={disposition.id} className="grid grid-cols-1 md:grid-cols-[140px_140px_1fr_110px_1fr_auto] gap-2 items-center">
+                            <div key={disposition.id} className={`grid grid-cols-1 md:grid-cols-[140px_140px_1fr_90px_120px_140px_1fr_auto] gap-2 items-center ${dispositionStatus(disposition) !== 'vigente' ? 'opacity-60' : ''}`}>
                               <input type="date" title="Fecha de disposición" value={disposition.date} onChange={e => updateDisposition(tx.id, disposition.id, { date: e.target.value })} className={inputClass} />
-                              <input type="date" title="Fecha de vencimiento" value={disposition.maturityDate || ''} onChange={e => updateDisposition(tx.id, disposition.id, { maturityDate: e.target.value })} className={`${inputClass} ${disposition.maturityDate && disposition.maturityDate < new Date().toISOString().slice(0, 10) ? 'border-rose-300 text-rose-700' : ''}`} />
+                              <input type="date" title="Fecha de vencimiento" value={disposition.maturityDate || ''} onChange={e => updateDisposition(tx.id, disposition.id, { maturityDate: e.target.value })} className={`${inputClass} ${dispositionStatus(disposition) === 'vigente' && disposition.maturityDate && disposition.maturityDate < new Date().toISOString().slice(0, 10) ? 'border-rose-300 text-rose-700' : ''}`} />
                               <input type="text" inputMode="decimal" value={disposition.amount} onChange={e => updateDisposition(tx.id, disposition.id, { amount: e.target.value })} placeholder="Monto dispuesto" className={inputClass} />
                               <select value={disposition.currency} onChange={e => updateDisposition(tx.id, disposition.id, { currency: e.target.value })} className={inputClass}>
                                 {['MXN', 'USD', 'EUR'].map(c => <option key={c} value={c}>{c}</option>)}
                               </select>
+                              <select title="Estatus" value={dispositionStatus(disposition)} onChange={e => { const status = e.target.value as DispositionStatus; void updateDisposition(tx.id, disposition.id, { status, closedAt: status === 'vigente' ? '' : disposition.closedAt || disposition.maturityDate || new Date().toISOString().slice(0, 10) }); }} className={inputClass}>
+                                {(Object.keys(DISPOSITION_STATUS_LABEL) as DispositionStatus[]).map(st => <option key={st} value={st}>{DISPOSITION_STATUS_LABEL[st]}</option>)}
+                              </select>
+                              <input type="date" title="Fecha de pago / terminación" disabled={dispositionStatus(disposition) === 'vigente'} value={disposition.closedAt || ''} onChange={e => updateDisposition(tx.id, disposition.id, { closedAt: e.target.value })} className={`${inputClass} disabled:opacity-40`} />
                               <input value={disposition.notes} onChange={e => updateDisposition(tx.id, disposition.id, { notes: e.target.value })} placeholder="Nota opcional" className={inputClass} />
                               <button onClick={() => deleteDisposition(tx.id, disposition.id)} className="text-slate-300 hover:text-rose-500 transition-colors justify-self-end">
                                 <Trash2 className="w-4 h-4" />

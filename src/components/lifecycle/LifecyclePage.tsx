@@ -19,18 +19,15 @@ import {
 } from 'lucide-react';
 import { db, Client, Covenant_DB, FinancialStatement_DB, LoanTape_DB, Transaction } from '../../db/index';
 import { ALL_FACILITIES, facilityDisplayName, matchesFacilityFilter } from '../../lib/facilityHistory';
-import { evaluateCovenantAuto } from '../../lib/financialMetrics';
+import { evaluateCovenantAuto, covenantPerformanceHistory } from '../../lib/financialMetrics';
+import { facilityLife, statementsDuringLife, dispositionStatus, DISPOSITION_STATUS_LABEL, type FacilityDisposition, type FacilityLife } from '../../lib/facilityLife';
 import { loanTapePeriodDate } from '../../lib/loanTapeAnalytics';
 import { parseFinancialNumber } from '../../lib/numberParsing';
 import { classifyDpd } from '../../lib/portfolioRules';
 
-type Disposition = {
-  id: string;
-  date: string;
-  amount: string;
-  currency: string;
-  notes: string;
-};
+type Disposition = FacilityDisposition;
+type PipelineMetaMap = Record<string, { pipelineStage?: string }>;
+const pipelineMetaKey = (clientId: string) => `finmonitor_transaction_pipeline_meta_${clientId}`;
 
 type DispositionMap = Record<string, Disposition[]>;
 
@@ -43,6 +40,7 @@ type LifeRow = {
   covenants: Covenant_DB[];
   loanTapes: LoanTape_DB[];
   dispositions: DispositionMap;
+  pipelineMeta: PipelineMetaMap;
 };
 
 type TimelineEvent = {
@@ -66,7 +64,7 @@ type FacilitySummary = {
   currency: string;
   startDate: string;
   endDate: string;
-  status: 'vigente' | 'vencida' | 'sin-fecha';
+  status: 'vigente' | 'vencida' | 'terminada' | 'sin-fecha' | 'pausado';
 };
 
 const eventIcon = {
@@ -142,20 +140,16 @@ function fmtCurrency(value: number | undefined, currency: string) {
   }).format(value);
 }
 
-function facilityStartDate(tx: Transaction) {
-  return tx.signedAt || tx.date || tx.createdAt || '';
-}
-
-function facilityEndDate(tx: Transaction) {
-  return tx.maturityAt || '';
+function lifeOf(row: LifeRow, tx: Transaction): FacilityLife {
+  return facilityLife(tx, row.dispositions[tx.id] || [], row.pipelineMeta[tx.id]?.pipelineStage);
 }
 
 function facilitySummaries(row: LifeRow): FacilitySummary[] {
   return row.transactions.map(tx => {
-    const startDate = facilityStartDate(tx);
-    const endDate = facilityEndDate(tx);
-    const endTime = endDate ? new Date(endDate).getTime() : NaN;
-    const status: FacilitySummary['status'] = !endDate ? 'sin-fecha' : endTime < Date.now() ? 'vencida' : 'vigente';
+    const life = lifeOf(row, tx);
+    const startDate = life.start || tx.createdAt || '';
+    const endDate = life.end || '';
+    const status: FacilitySummary['status'] = tx.monitoringPaused ? 'pausado' : life.status;
     return {
       id: tx.id,
       name: tx.name || tx.creditType || 'Facility sin nombre',
@@ -196,6 +190,90 @@ function covenantSeverity(status: string): TimelineEvent['severity'] {
   if (status === 'cumple') return 'good';
   return 'info';
 }
+
+type CovenantMatrix = {
+  facilityName: string;
+  life: FacilityLife;
+  periods: string[];
+  rows: Array<{ id: string; name: string; requirement: string; cells: Array<{ value: number | null; status: string }> }>;
+  generalOnly: boolean;
+};
+
+// Covenants de la facility medidos en cada estado financiero con corte dentro de su vigencia (reglas en lib/facilityLife.ts).
+function buildCovenantMatrix(row: LifeRow, tx: Transaction): CovenantMatrix {
+  const life = lifeOf(row, tx);
+  const statements = statementsDuringLife([...row.statements].sort((a, b) => a.periodDate.localeCompare(b.periodDate)), life);
+  const withLimit = (c: Covenant_DB) => c.type === 'financial' && c.operator !== 'none' && String(c.threshold ?? '').trim() !== '';
+  const own = row.covenants.filter(c => c.transactionId === tx.id && withLimit(c));
+  const general = row.covenants.filter(c => !c.transactionId && withLimit(c));
+  const chosen = own.length ? own : general;
+  const op: Record<string, string> = { gt: '>', gte: '≥', lt: '<', lte: '≤' };
+  return {
+    facilityName: tx.name || tx.creditType || 'Facility',
+    life,
+    periods: statements.map(s => s.periodDate),
+    generalOnly: !own.length && general.length > 0,
+    rows: chosen.map(c => {
+      const hist = covenantPerformanceHistory(c, statements);
+      return { id: c.id, name: c.name, requirement: `${op[c.operator] || c.operator} ${c.threshold}`, cells: hist.map(h => ({ value: h.value, status: h.status })) };
+    }),
+  };
+}
+
+const fmtCovValue = (v: number | null) => (v === null ? 'N/D' : Math.abs(v) <= 3 ? `${(v * 100).toFixed(2)}%` : v.toFixed(2));
+const cellClass: Record<string, string> = {
+  cumple: 'bg-emerald-50 text-emerald-800',
+  alerta: 'bg-amber-50 text-amber-800',
+  incumple: 'bg-rose-100 text-rose-800 font-black',
+};
+
+const CovenantLifeMatrix: React.FC<{ matrix: CovenantMatrix }> = ({ matrix }) => {
+  const { life } = matrix;
+  const breaches = matrix.rows.reduce((n, r) => n + r.cells.filter(c => c.status === 'incumple').length, 0);
+  return (
+    <section className="mb-8 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="mb-4 flex flex-col gap-1 md:flex-row md:items-end md:justify-between">
+        <div>
+          <h2 className="text-sm font-black uppercase tracking-widest text-slate-900">Covenants durante la vigencia · {matrix.facilityName}</h2>
+          <p className="mt-1 text-xs font-semibold text-slate-500">
+            {life.start ? fmtFullDate(life.start) : '¿?'} → {life.end ? fmtFullDate(life.end) : 'sin fecha'} · {life.status === 'terminada' ? 'terminada' : life.status}
+            {' '}· {matrix.periods.length} periodo{matrix.periods.length !== 1 ? 's' : ''} con estados financieros
+            {matrix.generalOnly ? ' · la facility no tiene covenants propios: se muestran los generales del cliente con límite' : ''}
+          </p>
+        </div>
+        {matrix.rows.length > 0 && matrix.periods.length > 0 && (
+          <span className={`rounded-full px-3 py-1 text-xs font-black ${breaches ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}>{breaches ? `${breaches} incumplimiento${breaches !== 1 ? 's' : ''} en su vida` : 'Sin incumplimientos en su vida'}</span>
+        )}
+      </div>
+      {!matrix.rows.length ? (
+        <p className="text-sm font-semibold text-slate-500">Esta facility no tiene covenants financieros con límite. Asígnalos en Indicadores financieros (detalle del covenant → Facility).</p>
+      ) : !matrix.periods.length ? (
+        <p className="text-sm font-semibold text-slate-500">No hay estados financieros con corte dentro de la vigencia de esta facility.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-slate-500">
+                <th className="py-1.5 pr-3">Covenant</th>
+                <th className="pr-3">Límite</th>
+                {matrix.periods.map(p => <th key={p} className="px-2 text-right whitespace-nowrap">{p.slice(0, 7)}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {matrix.rows.map(r => (
+                <tr key={r.id} className="border-t border-slate-100">
+                  <td className="py-1.5 pr-3 font-bold text-slate-800">{r.name}</td>
+                  <td className="pr-3 font-mono text-slate-500 whitespace-nowrap">{r.requirement}</td>
+                  {r.cells.map((c, i) => <td key={i} className={`px-2 py-1 text-right font-mono whitespace-nowrap ${cellClass[c.status] || 'text-slate-400'}`}>{fmtCovValue(c.value)}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+};
 
 function buildEvents(row: LifeRow, selectedTransactionId: string): TimelineEvent[] {
   const { client, transactions, statements, covenants, loanTapes, dispositions } = row;
@@ -241,12 +319,27 @@ function buildEvents(row: LifeRow, selectedTransactionId: string): TimelineEvent
       const amount = parseFinancialNumber(disposition.amount);
       const dispositionCurrency = disposition.currency || tx.currency || currency;
       const note = disposition.notes?.trim();
+      const dStatus = dispositionStatus(disposition);
+      if (dStatus !== 'vigente' && disposition.closedAt) {
+        events.push({
+          id: `disposition-close-${tx.id}-${disposition.id}`,
+          date: disposition.closedAt,
+          periodLabel: fmtFullDate(disposition.closedAt),
+          title: `Disposición ${DISPOSITION_STATUS_LABEL[dStatus].toLowerCase()}: ${tx.name || tx.creditType || 'facility'}`,
+          detail: `Disposición del ${fmtFullDate(disposition.date)} cerrada.`,
+          type: 'payment',
+          severity: 'good',
+          amount,
+          currency: dispositionCurrency,
+          meta: tx.name || tx.creditType,
+        });
+      }
       events.push({
         id: `disposition-${tx.id}-${disposition.id}`,
         date: disposition.date,
         periodLabel: fmtFullDate(disposition.date),
         title: `Desembolso de ${tx.name || tx.creditType || 'facility'}`,
-        detail: note || 'Disposición registrada sin nota adicional.',
+        detail: `${DISPOSITION_STATUS_LABEL[dStatus]}${disposition.maturityDate ? ` · vence ${fmtFullDate(disposition.maturityDate)}` : ''}${note ? ` · ${note}` : ''}`,
         type: 'disposition',
         severity: 'good',
         amount,
@@ -321,7 +414,8 @@ function buildEvents(row: LifeRow, selectedTransactionId: string): TimelineEvent
   covenants
     .filter(covenant => matchesFacilityFilter(covenant, selectedTransactionId, transactions.length))
     .forEach(covenant => {
-      const status = isClientMonitored(row.client) ? evaluateCovenantAuto(covenant, statements).status : 'pausado';
+      const scoped = selectedTransaction ? statementsDuringLife([...statements].sort((x, y) => x.periodDate.localeCompare(y.periodDate)), lifeOf(row, selectedTransaction)) : statements;
+      const status = isClientMonitored(row.client) ? evaluateCovenantAuto(covenant, scoped).status : 'pausado';
       events.push({
         id: `covenant-${covenant.id}`,
         date: covenant.createdAt,
@@ -362,14 +456,15 @@ const LifecyclePage: React.FC = () => {
       try {
         const clients = await db.getClients();
         const loaded = await Promise.all(clients.map(async client => {
-          const [transactions, statements, covenants, loanTapes, dispositions] = await Promise.all([
+          const [transactions, statements, covenants, loanTapes, dispositions, pipelineMeta] = await Promise.all([
             db.getTransactions(client.id),
             db.getStatements(client.id),
             db.getCovenants(client.id),
             db.getLoanTapes(client.id),
             db.getClientSetting<DispositionMap>(client.id, dispositionsKey(client.id), {}),
+            db.getClientSetting<PipelineMetaMap>(client.id, pipelineMetaKey(client.id), {}),
           ]);
-          return { client, transactions, statements, covenants, loanTapes, dispositions };
+          return { client, transactions, statements, covenants, loanTapes, dispositions, pipelineMeta };
         }));
         if (active) {
           setRows(loaded);
@@ -404,6 +499,13 @@ const LifecyclePage: React.FC = () => {
     if (!selectedRow) return [];
     return facilitySummaries(selectedRow);
   }, [selectedRow]);
+
+  const covenantMatrix = useMemo(() => {
+    if (!selectedRow || selectedTransactionId === ALL_FACILITIES) return null;
+    const tx = selectedRow.transactions.find(t => t.id === selectedTransactionId);
+    if (!tx) return null;
+    return buildCovenantMatrix(selectedRow, tx);
+  }, [selectedRow, selectedTransactionId]);
 
   const filteredEvents = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -584,11 +686,11 @@ const LifecyclePage: React.FC = () => {
                         <span className={`rounded-full px-2 py-0.5 text-[10px] font-black uppercase ${
                           facility.status === 'vigente'
                             ? 'bg-emerald-100 text-emerald-700'
-                            : facility.status === 'vencida'
+                            : facility.status === 'vencida' || facility.status === 'terminada'
                               ? 'bg-amber-100 text-amber-700'
                               : 'bg-slate-100 text-slate-600'
                         }`}>
-                          {facility.status === 'vigente' ? 'Vigente' : facility.status === 'vencida' ? 'Vencida' : 'Sin fecha fin'}
+                          {facility.status === 'pausado' ? 'Sin monitoreo' : facility.status === 'vigente' ? 'Vigente' : facility.status === 'vencida' ? 'Vencida' : facility.status === 'terminada' ? 'Terminada' : 'Sin fecha fin'}
                         </span>
                       </div>
                       <p className="mt-1 text-xs font-semibold text-slate-500">{facility.type}</p>
@@ -611,6 +713,8 @@ const LifecyclePage: React.FC = () => {
           </div>
         )}
       </section>
+
+      {covenantMatrix && <CovenantLifeMatrix matrix={covenantMatrix} />}
 
       <div className="grid gap-8 xl:grid-cols-[minmax(0,1fr)_320px]">
         <section className="relative">
